@@ -21,3 +21,4 @@ psycopg2
 fastapi
 uvicorn[standard]
 sqlalchemy
+python-multipart
