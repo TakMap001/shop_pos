@@ -1,5 +1,4 @@
 from fastapi import APIRouter, Form
-from app.twilio_client import send_whatsapp_message
 from app.database import get_db
 from sqlalchemy.orm import Session
 from app.routes.products import create_product
@@ -7,16 +6,25 @@ from app.schemas.schemas import ProductCreate
 from app.models.models import Product as ProductORM, Sale
 from datetime import date
 from sqlalchemy import func, extract
+from config import twilio_client, TWILIO_WHATSAPP_NUMBER  # ✅ import client + number
 
 router = APIRouter(prefix="/whatsapp", tags=["WhatsApp"])
 
 LOW_STOCK_THRESHOLD = 10  # adjust as needed
 
+def send_whatsapp_message(to: str, body: str):
+    """Wrapper for Twilio WhatsApp message sending"""
+    return twilio_client.messages.create(
+        from_=TWILIO_WHATSAPP_NUMBER,
+        to=to,
+        body=body
+    )
+
 def check_low_stock_and_alert(db: Session):
     low_stock_products = db.query(ProductORM).filter(ProductORM.stock <= LOW_STOCK_THRESHOLD).all()
     for p in low_stock_products:
         message = f"⚠️ Low stock alert: {p.name} has {p.stock} units left!"
-        # Replace with shopkeeper number
+        # TODO: Replace with shopkeeper’s real WhatsApp number
         send_whatsapp_message(to="whatsapp:+1234567890", body=message)
 
 @router.post("/webhook")
@@ -27,7 +35,6 @@ async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...)):
     try:
         # ---------- PRODUCT MANAGEMENT ----------
         if incoming_message.startswith("add product"):
-            # Format: add product;name;price;stock
             _, name, price, stock = incoming_message.split(";")
             product_data = ProductCreate(
                 name=name.strip(),
@@ -39,7 +46,6 @@ async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...)):
             reply = f"✅ Product added: {product.name} (Stock: {product.stock})"
 
         elif incoming_message.startswith("stock add"):
-            # Format: stock add;product_id;quantity
             _, product_id, quantity = incoming_message.split(";")
             product = db.query(ProductORM).filter(ProductORM.product_id==int(product_id)).first()
             if product:
@@ -51,7 +57,6 @@ async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...)):
                 reply = "❌ Product ID not found"
 
         elif incoming_message.startswith("stock reduce"):
-            # Format: stock reduce;product_id;quantity
             _, product_id, quantity = incoming_message.split(";")
             product = db.query(ProductORM).filter(ProductORM.product_id==int(product_id)).first()
             if product:
@@ -63,10 +68,12 @@ async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...)):
                 reply = "❌ Product ID not found"
 
         elif incoming_message.startswith("low stock"):
-            threshold = 10  # default threshold
+            threshold = 10
             products = db.query(ProductORM).filter(ProductORM.stock <= threshold).all()
             if products:
-                reply = "⚠️ Low stock products:\n" + "\n".join([f"{p.product_id}. {p.name}: {p.stock}" for p in products])
+                reply = "⚠️ Low stock products:\n" + "\n".join(
+                    [f"{p.product_id}. {p.name}: {p.stock}" for p in products]
+                )
             else:
                 reply = "✅ No products with low stock"
 
@@ -102,7 +109,6 @@ async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...)):
                 reply = "No sales this month"
 
         elif incoming_message.startswith("sales top products"):
-            # Top 5 products by quantity sold
             sales = db.query(Sale.product_id, func.sum(Sale.quantity).label("total_qty"))\
                       .group_by(Sale.product_id)\
                       .order_by(func.sum(Sale.quantity).desc())\
@@ -117,7 +123,6 @@ async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...)):
                 reply = "No sales yet"
 
         elif incoming_message.startswith("sales top customers"):
-            # Top 5 customers by total spent
             sales = db.query(Sale.user_id, func.sum(Sale.total_amount).label("total_spent"))\
                       .group_by(Sale.user_id)\
                       .order_by(func.sum(Sale.total_amount).desc())\
@@ -128,9 +133,8 @@ async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...)):
             else:
                 reply = "No sales yet"
 
-        # ---------- HELP / DEFAULT ----------
+        # ---------- STOCK BATCH ----------
         elif incoming_message.startswith("stock batch"):
-            # Format: stock batch;1:10,2:5
             try:
                 _, batch_data = incoming_message.split(";")
                 updates = batch_data.split(",")
@@ -163,9 +167,9 @@ async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...)):
             )
 
     except Exception as e:
-        reply = f"❌ Failed to process command. Please check format. Error: {str(e)}"
+        reply = f"❌ Failed to process command. Error: {str(e)}"
 
-    # send reply back to WhatsApp
+    # ✅ Send reply back to WhatsApp
     send_whatsapp_message(to=From, body=reply)
-    return "OK"
+    return {"status": "ok"}
 
