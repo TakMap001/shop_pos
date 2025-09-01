@@ -3,7 +3,7 @@ from twilio.rest import Client
 from fastapi import APIRouter, Request
 from fastapi.responses import PlainTextResponse
 
-router = APIRouter(prefix="/whatsapp", tags=["WhatsApp"])
+router = APIRouter()
 
 # --- Load Twilio credentials from environment variables ---
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
