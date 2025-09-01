@@ -24,8 +24,7 @@ except Exception as e:
     print("❌ Debug: Failed to initialize Twilio Client")
     print(e)
 
-
-@router.post("/whatsapp")
+@router.post("/whatsapp/webhook")
 async def whatsapp_webhook(request: Request):
     print("📩 Debug: Incoming webhook received")
 
@@ -46,7 +45,7 @@ async def whatsapp_webhook(request: Request):
         try:
             print("📤 Debug: Attempting to send WhatsApp reply...")
             message = client.messages.create(
-                from_=f"whatsapp:{twilio_whatsapp_number}",
+                from_=twilio_whatsapp_number,
                 body=f"Hello 👋! You said: {body}",
                 to=from_number,
             )
