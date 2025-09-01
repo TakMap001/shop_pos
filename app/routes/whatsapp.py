@@ -1,175 +1,64 @@
-from fastapi import APIRouter, Form
-from app.database import get_db
-from sqlalchemy.orm import Session
-from app.routes.products import create_product
-from app.schemas.schemas import ProductCreate
-from app.models.models import Product as ProductORM, Sale
-from datetime import date
-from sqlalchemy import func, extract
-from config import twilio_client, TWILIO_WHATSAPP_NUMBER  # ✅ import client + number
+import os
+from twilio.rest import Client
+from fastapi import APIRouter, Request
+from fastapi.responses import PlainTextResponse
 
-router = APIRouter(prefix="/whatsapp", tags=["WhatsApp"])
+router = APIRouter()
 
-LOW_STOCK_THRESHOLD = 10  # adjust as needed
+# Load Twilio credentials from environment variables
+account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+twilio_whatsapp_number = os.getenv("TWILIO_WHATSAPP_NUMBER")
 
-def send_whatsapp_message(to: str, body: str):
-    """Wrapper for Twilio WhatsApp message sending"""
-    return twilio_client.messages.create(
-        from_=TWILIO_WHATSAPP_NUMBER,
-        to=to,
-        body=body
-    )
+print("🔍 Debug: Loaded Environment Variables")
+print(f"  TWILIO_ACCOUNT_SID: {account_sid}")
+print(f"  TWILIO_AUTH_TOKEN: {'SET' if auth_token else 'MISSING'}")
+print(f"  TWILIO_WHATSAPP_NUMBER: {twilio_whatsapp_number}")
 
-def check_low_stock_and_alert(db: Session):
-    low_stock_products = db.query(ProductORM).filter(ProductORM.stock <= LOW_STOCK_THRESHOLD).all()
-    for p in low_stock_products:
-        message = f"⚠️ Low stock alert: {p.name} has {p.stock} units left!"
-        # TODO: Replace with shopkeeper’s real WhatsApp number
-        send_whatsapp_message(to="whatsapp:+1234567890", body=message)
+# Initialize Twilio client
+client = None
+try:
+    client = Client(account_sid, auth_token)
+    print("✅ Debug: Twilio Client initialized successfully")
+except Exception as e:
+    print("❌ Debug: Failed to initialize Twilio Client")
+    print(e)
 
-@router.post("/webhook")
-async def whatsapp_webhook(From: str = Form(...), Body: str = Form(...)):
-    incoming_message = Body.strip().lower()
-    db: Session = next(get_db())
+
+@router.post("/whatsapp")
+async def whatsapp_webhook(request: Request):
+    print("📩 Debug: Incoming webhook received")
 
     try:
-        # ---------- PRODUCT MANAGEMENT ----------
-        if incoming_message.startswith("add product"):
-            _, name, price, stock = incoming_message.split(";")
-            product_data = ProductCreate(
-                name=name.strip(),
-                description="Added via WhatsApp",
-                price=float(price),
-                stock=int(stock)
+        form_data = await request.form()
+        print("📋 Debug: Parsed request form data:", form_data)
+
+        from_number = form_data.get("From")
+        body = form_data.get("Body")
+
+        print(f"📞 Debug: From={from_number}, Body={body}")
+
+        if not from_number or not body:
+            print("⚠️ Debug: Missing required fields (From/Body)")
+            return PlainTextResponse("Invalid request", status_code=400)
+
+        # Send automated reply via Twilio
+        try:
+            print("📤 Debug: Attempting to send WhatsApp reply...")
+            message = client.messages.create(
+                from_=f"whatsapp:{twilio_whatsapp_number}",
+                body=f"Hello 👋! You said: {body}",
+                to=from_number,
             )
-            product = create_product(product_data, db)
-            reply = f"✅ Product added: {product.name} (Stock: {product.stock})"
+            print(f"✅ Debug: Message sent successfully. SID={message.sid}")
+        except Exception as e:
+            print("❌ Debug: Failed to send WhatsApp message")
+            print(e)
+            return PlainTextResponse("Error sending message", status_code=500)
 
-        elif incoming_message.startswith("stock add"):
-            _, product_id, quantity = incoming_message.split(";")
-            product = db.query(ProductORM).filter(ProductORM.product_id==int(product_id)).first()
-            if product:
-                product.stock += int(quantity)
-                db.commit()
-                db.refresh(product)
-                reply = f"✅ Stock added. {product.name} new stock: {product.stock}"
-            else:
-                reply = "❌ Product ID not found"
-
-        elif incoming_message.startswith("stock reduce"):
-            _, product_id, quantity = incoming_message.split(";")
-            product = db.query(ProductORM).filter(ProductORM.product_id==int(product_id)).first()
-            if product:
-                product.stock = max(0, product.stock - int(quantity))
-                db.commit()
-                db.refresh(product)
-                reply = f"✅ Stock reduced. {product.name} new stock: {product.stock}"
-            else:
-                reply = "❌ Product ID not found"
-
-        elif incoming_message.startswith("low stock"):
-            threshold = 10
-            products = db.query(ProductORM).filter(ProductORM.stock <= threshold).all()
-            if products:
-                reply = "⚠️ Low stock products:\n" + "\n".join(
-                    [f"{p.product_id}. {p.name}: {p.stock}" for p in products]
-                )
-            else:
-                reply = "✅ No products with low stock"
-
-        # ---------- SALES REPORTS ----------
-        elif incoming_message.startswith("sales daily"):
-            today = date.today()
-            sales = db.query(Sale.product_id, func.sum(Sale.quantity), func.sum(Sale.total_amount))\
-                      .filter(func.date(Sale.sale_date) == today)\
-                      .group_by(Sale.product_id).all()
-            if sales:
-                reply_lines = []
-                for pid, qty, total in sales:
-                    product = db.query(ProductORM).filter(ProductORM.product_id==pid).first()
-                    reply_lines.append(f"{product.name}: Sold {qty}, Revenue {total}")
-                reply = "\n".join(reply_lines)
-            else:
-                reply = "No sales today"
-
-        elif incoming_message.startswith("sales monthly"):
-            year = date.today().year
-            month = date.today().month
-            sales = db.query(Sale.product_id, func.sum(Sale.quantity), func.sum(Sale.total_amount))\
-                      .filter(extract("year", Sale.sale_date)==year)\
-                      .filter(extract("month", Sale.sale_date)==month)\
-                      .group_by(Sale.product_id).all()
-            if sales:
-                reply_lines = []
-                for pid, qty, total in sales:
-                    product = db.query(ProductORM).filter(ProductORM.product_id==pid).first()
-                    reply_lines.append(f"{product.name}: Sold {qty}, Revenue {total}")
-                reply = "\n".join(reply_lines)
-            else:
-                reply = "No sales this month"
-
-        elif incoming_message.startswith("sales top products"):
-            sales = db.query(Sale.product_id, func.sum(Sale.quantity).label("total_qty"))\
-                      .group_by(Sale.product_id)\
-                      .order_by(func.sum(Sale.quantity).desc())\
-                      .limit(5).all()
-            if sales:
-                reply_lines = []
-                for pid, total_qty in sales:
-                    product = db.query(ProductORM).filter(ProductORM.product_id==pid).first()
-                    reply_lines.append(f"{product.name}: {total_qty} units sold")
-                reply = "🏆 Top products:\n" + "\n".join(reply_lines)
-            else:
-                reply = "No sales yet"
-
-        elif incoming_message.startswith("sales top customers"):
-            sales = db.query(Sale.user_id, func.sum(Sale.total_amount).label("total_spent"))\
-                      .group_by(Sale.user_id)\
-                      .order_by(func.sum(Sale.total_amount).desc())\
-                      .limit(5).all()
-            if sales:
-                reply_lines = [f"User {uid}: Spent {spent}" for uid, spent in sales]
-                reply = "🏆 Top customers:\n" + "\n".join(reply_lines)
-            else:
-                reply = "No sales yet"
-
-        # ---------- STOCK BATCH ----------
-        elif incoming_message.startswith("stock batch"):
-            try:
-                _, batch_data = incoming_message.split(";")
-                updates = batch_data.split(",")
-                reply_lines = []
-                for item in updates:
-                    pid, qty = item.split(":")
-                    product = db.query(ProductORM).filter(ProductORM.product_id==int(pid)).first()
-                    if product:
-                        product.stock += int(qty)
-                        db.commit()
-                        db.refresh(product)
-                        reply_lines.append(f"{product.name}: +{qty} units, new stock {product.stock}")
-                    else:
-                        reply_lines.append(f"Product ID {pid} not found")
-                reply = "✅ Batch stock update:\n" + "\n".join(reply_lines)
-            except Exception:
-                reply = "❌ Failed batch update. Format: stock batch;1:10,2:5"
-
-        else:
-            reply = (
-                "📋 WhatsApp Shop Commands:\n"
-                "- add product;name;price;stock\n"
-                "- stock add;product_id;qty\n"
-                "- stock reduce;product_id;qty\n"
-                "- low stock\n"
-                "- sales daily\n"
-                "- sales monthly\n"
-                "- sales top products\n"
-                "- sales top customers"
-            )
+        return PlainTextResponse("Message processed")
 
     except Exception as e:
-        reply = f"❌ Failed to process command. Error: {str(e)}"
-
-    # ✅ Send reply back to WhatsApp
-    send_whatsapp_message(to=From, body=reply)
-    return {"status": "ok"}
-
+        print("❌ Debug: Exception inside whatsapp_webhook")
+        print(e)
+        return PlainTextResponse("Error processing request", status_code=500)
