@@ -32,7 +32,7 @@ async def whatsapp_webhook(request: Request):
         form_data = await request.form()
         print("📋 Debug: Parsed request form data:", form_data)
 
-        from_number = form_data.get("From")  # sender’s WhatsApp number
+        from_number = "whatsapp:+263719982845"  # sender’s WhatsApp number
         body = form_data.get("Body")         # message content
 
         print(f"📞 Debug: From={from_number}, Body={body}")
