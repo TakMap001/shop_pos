@@ -7,15 +7,15 @@ from twilio.rest import Client
 load_dotenv()
 
 # --- Database ---
-DB_USER = os.getenv("DB_USER", "postgres")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+DB_USER = os.getenv("DB_USER", "takuramapfumo")   # 👈 matches your psql user
+DB_PASSWORD = os.getenv("DB_PASSWORD", "")        # set if needed
 DB_HOST = os.getenv("DB_HOST", "localhost")
 DB_PORT = os.getenv("DB_PORT", "5432")
-DB_NAME = os.getenv("DB_NAME", "salesdb")
+DB_NAME = os.getenv("DB_NAME", "shopdb")          # 👈 matches your real db
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
 )
 
 # --- Twilio (optional) ---
