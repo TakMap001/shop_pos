@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.models.models import User, ProductORM, SaleORM
 import telebot
-from app.config import TELEGRAM_BOT_TOKEN
+from config import TELEGRAM_BOT_TOKEN
 
 LOW_STOCK_THRESHOLD = 10
 TOP_PRODUCT_THRESHOLD = 50
