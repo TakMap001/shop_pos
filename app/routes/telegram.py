@@ -16,7 +16,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 
-# ------------------- UTILITY FUNCTIONS -------------------
+# -------------------- Telegram Helpers --------------------
 
 def send_message(chat_id, text, keyboard=None):
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
@@ -37,7 +37,7 @@ def main_menu(chat_id):
     send_message(chat_id, "📋 Main Menu:", keyboard)
 
 
-# ------------------- PRODUCTS -------------------
+# -------------------- Products --------------------
 
 def get_stock_list(db: Session):
     products = db.query(ProductORM).all()
@@ -73,15 +73,12 @@ def add_product(db: Session, chat_id: int, text: str):
     db.commit()
     db.refresh(new_product)
 
-    send_message(chat_id, f"✅ Product added: {name} — ${price:.2f}, Stock: {stock}")
+    send_message(chat_id, f"✅ Product added: {name} — ${price}, Stock: {stock}")
 
 
-# ------------------- SALES -------------------
+# -------------------- Sales --------------------
 
-def record_sale(db: Session, chat_id: int, text: str, user_id: int = None):
-    """
-    Parse and record sale: 'product_name;quantity'
-    """
+def record_sale(db: Session, chat_id: int, text: str):
     try:
         product_name, qty = text.split(";")
         qty = int(qty)
@@ -98,11 +95,7 @@ def record_sale(db: Session, chat_id: int, text: str, user_id: int = None):
         send_message(chat_id, f"❌ Insufficient stock. Available: {product.stock}")
         return
 
-    if user_id:
-        user = db.query(User).filter(User.user_id == user_id).first()
-    else:
-        user = db.query(User).first()
-
+    user = db.query(User).first()
     if not user:
         send_message(chat_id, "❌ No users available in the system.")
         return
@@ -116,10 +109,11 @@ def record_sale(db: Session, chat_id: int, text: str, user_id: int = None):
     db.commit()
     db.refresh(sale)
 
-    send_message(chat_id, f"🛒 Sale recorded: {qty} × {product.name} = ${float(total_amount):.2f}")
+    send_message(chat_id, f"🛒 Sale recorded: {qty} × {product.name} = ${total_amount}")
+    send_message(chat_id, get_stock_list(db))  # ✅ Show updated stock after sale
 
 
-# ------------------- REPORTS -------------------
+# -------------------- Reports --------------------
 
 def generate_report(db: Session, report_type: str):
     if report_type == "report_daily":
@@ -129,10 +123,10 @@ def generate_report(db: Session, report_type: str):
             func.sum(SaleORM.total_amount).label("total_revenue")
         ).group_by(func.date(SaleORM.sale_date)).all()
         if not results:
-            return "No sales data available."
+            return "No sales data."
         lines = ["📅 *Daily Sales*"]
         for r in results:
-            lines.append(f"{r.day}: {r.total_qty} items, ${float(r.total_revenue):.2f}")
+            lines.append(f"{r.day}: {r.total_qty} items, ${float(r.total_revenue)}")
         return "\n".join(lines)
 
     elif report_type == "report_weekly":
@@ -142,10 +136,10 @@ def generate_report(db: Session, report_type: str):
             func.sum(SaleORM.total_amount).label("total_revenue")
         ).group_by("week").order_by("week").all()
         if not results:
-            return "No sales data available."
+            return "No sales data."
         lines = ["📅 *Weekly Sales*"]
         for r in results:
-            lines.append(f"Week {int(r.week)}: {r.total_qty} items, ${float(r.total_revenue):.2f}")
+            lines.append(f"Week {int(r.week)}: {r.total_qty} items, ${float(r.total_revenue)}")
         return "\n".join(lines)
 
     elif report_type == "report_monthly":
@@ -159,17 +153,17 @@ def generate_report(db: Session, report_type: str):
          .filter(extract("month", SaleORM.sale_date) == now.month)\
          .group_by(ProductORM.name).all()
         if not results:
-            return "No sales data available."
+            return "No sales data."
         lines = ["📊 *Monthly Sales per Product*"]
         for r in results:
-            lines.append(f"{r.product}: {r.total_qty} items, ${float(r.total_revenue):.2f}")
+            lines.append(f"{r.product}: {r.total_qty} items, ${float(r.total_revenue)}")
         return "\n".join(lines)
 
     else:
         return "❌ Unknown report type."
 
 
-# ------------------- TELEGRAM WEBHOOK -------------------
+# -------------------- Webhook --------------------
 
 @router.post("/telegram/webhook")
 async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
