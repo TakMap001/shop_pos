@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from decimal import Decimal
 from app.database import get_db
-from app.models.models import Sale as SaleORM, Product, User
+from app.models.models import SaleORM, ProductORM, User
 from app.schemas.schemas import SaleCreate, Sale
 
 router = APIRouter(
@@ -54,10 +54,10 @@ def create_sale(sale: SaleCreate, db: Session = Depends(get_db)):
 @router.get("/", response_model=list[Sale])
 def get_all_sales(db: Session = Depends(get_db)):
     """Retrieve all sales records"""
-    return db.query(SaleORM).all()
+    return db.query(Sale).all()
 
 
-@router.get("/{sale_id}", response_model=Sale)
+@router.get("/{sale_id}", response_model=SaleORM)
 def get_sale(sale_id: int, db: Session = Depends(get_db)):
     """Retrieve a specific sale by ID"""
     sale = db.query(SaleORM).filter(SaleORM.sale_id == sale_id).first()
@@ -76,7 +76,7 @@ def delete_sale(sale_id: int, db: Session = Depends(get_db)):
     if not sale:
         raise HTTPException(status_code=404, detail="Sale not found")
 
-    product = db.query(Product).filter(Product.product_id == sale.product_id).first()
+    product = db.query(ProductORM).filter(ProductORM.product_id == sale.product_id).first()
     if product:
         product.stock += sale.quantity  # restore stock
 
@@ -97,7 +97,7 @@ def update_sale(sale_id: int, updated_sale: SaleCreate, db: Session = Depends(ge
     if not sale:
         raise HTTPException(status_code=404, detail="Sale not found")
 
-    product = db.query(Product).filter(Product.product_id == updated_sale.product_id).first()
+    product = db.query(ProductORM).filter(ProductORM.product_id == updated_sale.product_id).first()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
 

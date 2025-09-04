@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, extract
 from datetime import datetime
 from app.database import get_db
-from app.models.models import Sale, Product, User
+from app.models.models import SaleORM, ProductORM, User
 
 router = APIRouter(
     prefix="/reports",
@@ -19,12 +19,12 @@ def total_sales_per_product(db: Session = Depends(get_db)):
     """
     results = (
         db.query(
-            Product.name,
-            func.sum(Sale.quantity).label("total_quantity"),
-            func.sum(Sale.total_amount).label("total_revenue")
+            ProductORM.name,
+            func.sum(SaleORM.quantity).label("total_quantity"),
+            func.sum(SaleORM.total_amount).label("total_revenue")
         )
-        .join(Sale, Sale.product_id == Product.product_id)
-        .group_by(Product.name)
+        .join(SaleORM, SaleORM.product_id == ProductORM.product_id)
+        .group_by(ProductORM.name)
         .all()
     )
     return [{"product": r.name, "total_quantity": r.total_quantity, "total_revenue": float(r.total_revenue)} for r in results]
@@ -38,10 +38,10 @@ def total_sales_per_user(db: Session = Depends(get_db)):
     results = (
         db.query(
             User.name,
-            func.sum(Sale.quantity).label("total_quantity"),
-            func.sum(Sale.total_amount).label("total_spent")
+            func.sum(SaleORM.quantity).label("total_quantity"),
+            func.sum(SaleORM.total_amount).label("total_spent")
         )
-        .join(Sale, Sale.user_id == User.user_id)
+        .join(SaleORM, SaleORM.user_id == User.user_id)
         .group_by(User.name)
         .all()
     )
@@ -55,12 +55,12 @@ def daily_sales(db: Session = Depends(get_db)):
     """
     results = (
         db.query(
-            func.date(Sale.sale_date).label("sale_day"),
-            func.sum(Sale.quantity).label("total_quantity"),
-            func.sum(Sale.total_amount).label("total_revenue")
+            func.date(SaleORM.sale_date).label("sale_day"),
+            func.sum(SaleORM.quantity).label("total_quantity"),
+            func.sum(SaleORM.total_amount).label("total_revenue")
         )
-        .group_by(func.date(Sale.sale_date))
-        .order_by(func.date(Sale.sale_date))
+        .group_by(func.date(SaleORM.sale_date))
+        .order_by(func.date(SaleORM.sale_date))
         .all()
     )
     return [{"date": str(r.sale_day), "total_quantity": r.total_quantity, "total_revenue": float(r.total_revenue)} for r in results]
@@ -71,7 +71,7 @@ def low_stock_products(db: Session = Depends(get_db), threshold: int = 10):
     """
     Returns products with stock below a certain threshold (default 10)
     """
-    results = db.query(Product).filter(Product.stock <= threshold).all()
+    results = db.query(ProductORM).filter(ProductORM.stock <= threshold).all()
     return [{"product_id": p.product_id, "name": p.name, "stock": p.stock, "price": float(p.price)} for p in results]
 
 @router.get("/top_selling_products")
@@ -82,13 +82,13 @@ def top_selling_products(limit: int = Query(5, gt=0), db: Session = Depends(get_
     """
     results = (
         db.query(
-            Product.name.label("product"),
-            func.sum(Sale.quantity).label("total_quantity"),
-            func.sum(Sale.total_amount).label("total_revenue")
+            ProductORM.name.label("product"),
+            func.sum(SaleORM.quantity).label("total_quantity"),
+            func.sum(SaleORM.total_amount).label("total_revenue")
         )
-        .join(Sale, Product.product_id == Sale.product_id)
-        .group_by(Product.name)
-        .order_by(func.sum(Sale.quantity).desc())
+        .join(SaleORM, ProductORM.product_id == SaleORM.product_id)
+        .group_by(ProductORM.name)
+        .order_by(func.sum(SaleORM.quantity).desc())
         .limit(limit)
         .all()
     )
@@ -103,12 +103,12 @@ def top_customers(limit: int = Query(5, gt=0), db: Session = Depends(get_db)):
     results = (
         db.query(
             User.name.label("user"),
-            func.sum(Sale.quantity).label("total_quantity"),
-            func.sum(Sale.total_amount).label("total_spent")
+            func.sum(SaleORM.quantity).label("total_quantity"),
+            func.sum(SaleORM.total_amount).label("total_spent")
         )
-        .join(Sale, User.user_id == Sale.user_id)
+        .join(SaleORM, User.user_id == SaleORM.user_id)
         .group_by(User.name)
-        .order_by(func.sum(Sale.total_amount).desc())
+        .order_by(func.sum(SaleORM.total_amount).desc())
         .limit(limit)
         .all()
     )
@@ -132,14 +132,14 @@ def monthly_sales_per_product(
 
     results = (
         db.query(
-            Product.name.label("product"),
-            func.sum(Sale.quantity).label("total_quantity"),
-            func.sum(Sale.total_amount).label("total_revenue")
+            ProductORM.name.label("product"),
+            func.sum(SaleORM.quantity).label("total_quantity"),
+            func.sum(SaleORM.total_amount).label("total_revenue")
         )
-        .join(Product, Sale.product_id == Product.product_id)
-        .filter(extract("year", Sale.sale_date) == year)
-        .filter(extract("month", Sale.sale_date) == month)
-        .group_by(Product.name)
+        .join(ProductORM, SaleORM.product_id == ProductORM.product_id)
+        .filter(extract("year", SaleORM.sale_date) == year)
+        .filter(extract("month", SaleORM.sale_date) == month)
+        .group_by(ProductORM.name)
         .all()
     )
 
@@ -163,12 +163,12 @@ def monthly_sales_per_user(
     results = (
         db.query(
             User.name.label("user"),
-            func.sum(Sale.quantity).label("total_quantity"),
-            func.sum(Sale.total_amount).label("total_spent")
+            func.sum(SaleORM.quantity).label("total_quantity"),
+            func.sum(SaleORM.total_amount).label("total_spent")
         )
-        .join(User, Sale.user_id == User.user_id)
-        .filter(extract("year", Sale.sale_date) == year)
-        .filter(extract("month", Sale.sale_date) == month)
+        .join(User, SaleORM.user_id == User.user_id)
+        .filter(extract("year", SaleORM.sale_date) == year)
+        .filter(extract("month", SaleORM.sale_date) == month)
         .group_by(User.name)
         .all()
     )
@@ -183,12 +183,12 @@ def stock_turnover_per_product(db: Session = Depends(get_db)):
     """
     Returns turnover rate per product: units sold / (stock + units sold)
     """
-    products = db.query(Product).all()
+    products = db.query(ProductORM).all()
     results = []
 
     for product in products:
-        total_sold = db.query(func.sum(Sale.quantity))\
-                       .filter(Sale.product_id == product.product_id)\
+        total_sold = db.query(func.sum(SaleORM.quantity))\
+                       .filter(SaleORM.product_id == product.product_id)\
                        .scalar() or 0
         turnover_rate = total_sold / (product.stock + total_sold) if (product.stock + total_sold) > 0 else 0
         results.append({
@@ -205,8 +205,8 @@ def average_order_value(db: Session = Depends(get_db)):
     """
     Returns the average order value
     """
-    total_sales = db.query(func.count(Sale.sale_id)).scalar() or 0
-    total_revenue = db.query(func.sum(Sale.total_amount)).scalar() or 0
+    total_sales = db.query(func.count(SaleORM.sale_id)).scalar() or 0
+    total_revenue = db.query(func.sum(SaleORM.total_amount)).scalar() or 0
 
     aov = round(total_revenue / total_sales, 2) if total_sales > 0 else 0
 
@@ -220,10 +220,10 @@ def top_repeat_customers(limit: int = 5, db: Session = Depends(get_db)):
     """
     customers = db.query(
         Sale.user_id,
-        func.count(Sale.sale_id).label("num_purchases"),
-        func.sum(Sale.total_amount).label("total_spent")
-    ).group_by(Sale.user_id)\
-     .order_by(func.count(Sale.sale_id).desc())\
+        func.count(SaleORM.sale_id).label("num_purchases"),
+        func.sum(SaleORM.total_amount).label("total_spent")
+    ).group_by(SaleORM.user_id)\
+     .order_by(func.count(SaleORM.sale_id).desc())\
      .limit(limit).all()
 
     results = []
@@ -242,10 +242,10 @@ def weekly_revenue(year: int = datetime.now().year, db: Session = Depends(get_db
     Returns total revenue and quantity per week for a given year
     """
     sales = db.query(
-        extract('week', Sale.sale_date).label("week"),
-        func.sum(Sale.quantity).label("total_quantity"),
-        func.sum(Sale.total_amount).label("total_revenue")
-    ).filter(extract('year', Sale.sale_date) == year)\
+        extract('week', SaleORM.sale_date).label("week"),
+        func.sum(SaleORM.quantity).label("total_quantity"),
+        func.sum(SaleORM.total_amount).label("total_revenue")
+    ).filter(extract('year', SaleORM.sale_date) == year)\
      .group_by("week")\
      .order_by("week").all()
 

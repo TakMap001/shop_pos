@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from app.database import get_db
-from app.models.models import Product as ProductORM
+from app.models.models import ProductORM
 from app.schemas.schemas import Product, ProductCreate
 from typing import List
 
