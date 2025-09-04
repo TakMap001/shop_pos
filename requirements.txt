@@ -22,3 +22,5 @@ fastapi
 uvicorn[standard]
 sqlalchemy
 python-multipart
+python-telegram-bot==20.6
+
