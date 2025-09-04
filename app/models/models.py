@@ -32,6 +32,6 @@ class SaleORM(Base):
     sale_date = Column(DateTime(timezone=True), server_default=func.now())
 
     user = relationship("User")
-    product = relationship("Product")
+    product = relationship("ProductORM")
 
 
