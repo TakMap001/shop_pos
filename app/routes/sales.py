@@ -57,7 +57,7 @@ def get_all_sales(db: Session = Depends(get_db)):
     return db.query(Sale).all()
 
 
-@router.get("/{sale_id}", response_model=SaleORM)
+@router.get("/{sale_id}", response_model=Sale)
 def get_sale(sale_id: int, db: Session = Depends(get_db)):
     """Retrieve a specific sale by ID"""
     sale = db.query(SaleORM).filter(SaleORM.sale_id == sale_id).first()
