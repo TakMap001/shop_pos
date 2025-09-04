@@ -7,7 +7,7 @@ from decimal import Decimal
 from datetime import datetime
 from sqlalchemy import func, extract
 from app.database import get_db
-from app.models.models import Product as ProductORM, Sale as SaleORM, User
+from app.models.models import ProductORM, SaleORM, User
 from app.telegram_notifications import notify_low_stock, notify_top_product, notify_high_value_sale, send_message
 
 router = APIRouter()
