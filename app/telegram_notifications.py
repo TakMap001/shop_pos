@@ -3,11 +3,17 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.models.models import User, ProductORM, SaleORM
-from app.telegram_utils import send_message  # your existing Telegram send_message function
+import telebot
+from app.config import TELEGRAM_BOT_TOKEN
 
 LOW_STOCK_THRESHOLD = 10
 TOP_PRODUCT_THRESHOLD = 50
 HIGH_VALUE_SALE_THRESHOLD = 100
+
+bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+
+def send_message(user_id: int, text: str):
+    bot.send_message(user_id, text)
 
 def notify_low_stock(db: Session, product: ProductORM):
     if product.stock <= LOW_STOCK_THRESHOLD:
