@@ -12,7 +12,7 @@ class User(Base):
     created_at = Column(TIMESTAMP)
     role = Column(String(20), default="keeper")  # 'owner' or 'keeper'
 
-class Product(Base):
+class ProductORM(Base):
     __tablename__ = "products"
     product_id = Column(Integer, primary_key=True, index=True)
     name = Column(String(150), nullable=False)
@@ -22,7 +22,7 @@ class Product(Base):
     low_stock_threshold = Column(Integer, default=10)  # <-- New column
     created_at = Column(TIMESTAMP)
 
-class Sale(Base):
+class SaleORM(Base):
     __tablename__ = "sales"
     sale_id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.user_id"))
