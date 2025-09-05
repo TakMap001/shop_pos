@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from app.routes import products, views, sales, reports, whatsapp, telegram  # 👈 added telegram
 import uvicorn
 import os
+from app.routes import test_db
 
 app = FastAPI(title="POS Backend API")
 
@@ -12,6 +13,7 @@ app.include_router(sales.router)
 app.include_router(reports.router)
 #app.include_router(whatsapp.router)
 app.include_router(telegram.router)  # 👈 new Telegram router
+app.include_router(test_db.router)
 
 # Root
 @app.get("/")
