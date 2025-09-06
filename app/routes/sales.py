@@ -26,7 +26,7 @@ def create_sale(sale: SaleCreate, db: Session = Depends(get_db)):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    product = db.query(Product).filter(Product.product_id == sale.product_id).first()
+    product = db.query(ProductORM).filter(ProductORM.product_id == sale.product_id).first()
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
 
@@ -54,7 +54,7 @@ def create_sale(sale: SaleCreate, db: Session = Depends(get_db)):
 @router.get("/", response_model=list[Sale])
 def get_all_sales(db: Session = Depends(get_db)):
     """Retrieve all sales records"""
-    return db.query(Sale).all()
+    return db.query(SaleORM).all()
 
 
 @router.get("/{sale_id}", response_model=Sale)

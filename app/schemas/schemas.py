@@ -7,6 +7,7 @@ class ProductBase(BaseModel):
     description: Optional[str] = None
     price: float
     stock: int = 0
+    low_stock_threshold: int = 10  # optional default
 
 class ProductCreate(ProductBase):
     pass
@@ -38,8 +39,10 @@ class SaleBase(BaseModel):
     quantity: int
     total_amount: float
 
-class SaleCreate(SaleBase):
-    total_amount: float = 0
+class SaleCreate(BaseModel):
+    user_id: int
+    product_id: int
+    quantity: int
 
 class Sale(BaseModel):
     sale_id: int
@@ -47,9 +50,9 @@ class Sale(BaseModel):
     product_id: int
     quantity: int
     total_amount: float
-    sale_date: datetime  # updated
+    sale_date: datetime
 
     class Config:
-        from_attributes = True  # for SQLAlchemy ORM
+        orm_mode = True
 
 

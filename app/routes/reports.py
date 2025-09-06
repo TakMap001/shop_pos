@@ -177,7 +177,7 @@ def monthly_sales_per_user(
         {"user": r.user, "total_quantity": r.total_quantity, "total_spent": float(r.total_spent)}
         for r in results
     ]
-
+    
 @router.get("/stock_turnover_per_product")
 def stock_turnover_per_product(db: Session = Depends(get_db)):
     """
@@ -219,7 +219,7 @@ def top_repeat_customers(limit: int = 5, db: Session = Depends(get_db)):
     Returns top repeat customers by purchase frequency
     """
     customers = db.query(
-        Sale.user_id,
+        SaleORM.user_id,
         func.count(SaleORM.sale_id).label("num_purchases"),
         func.sum(SaleORM.total_amount).label("total_spent")
     ).group_by(SaleORM.user_id)\

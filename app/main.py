@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.routes import products, views, sales, reports, whatsapp, telegram  # 👈 added telegram
+from app.routes import products, views, sales, reports, users, whatsapp, telegram  # 👈 added telegram
 import uvicorn
 import os
 from app.routes import test_db
@@ -14,6 +14,7 @@ app.include_router(reports.router)
 #app.include_router(whatsapp.router)
 app.include_router(telegram.router)  # 👈 new Telegram router
 app.include_router(test_db.router)
+app.include_router(users.router, prefix="/users", tags=["users"])
 
 # Root
 @app.get("/")

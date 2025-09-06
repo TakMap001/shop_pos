@@ -9,6 +9,10 @@ from sqlalchemy import func, extract
 from app.database import get_db
 from app.models.models import ProductORM, SaleORM, User
 from app.telegram_notifications import notify_low_stock, notify_top_product, notify_high_value_sale, send_message
+from app.tenants import create_tenant_db, get_engine_for_tenant, get_session_for_tenant
+from app.database import Base
+from config import DATABASE_URL
+
 
 router = APIRouter()
 
@@ -17,6 +21,12 @@ TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 
 # -------------------- Helpers --------------------
+
+def get_tenant_session(global_db: Session, user_id: int):
+    user = global_db.query(User).filter(User.user_id == user_id).first()
+    if not user or not user.tenant_db_url:
+        return None
+    return get_session_for_tenant(user.tenant_db_url)
 
 def send_message(chat_id, text, keyboard=None):
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
@@ -88,6 +98,9 @@ def parse_input(text: str, expected_parts: int):
 def register_new_user(db: Session, chat_id: int, text: str, role="keeper"):
     """
     Owner adds a new user (shopkeeper or owner) manually.
+    - Registers user in central master DB with tenant awareness.
+    - Optionally, initializes tenant DB for the user if they are an owner.
+    
     Expected input: user_id;name
     """
     try:
@@ -100,20 +113,26 @@ def register_new_user(db: Session, chat_id: int, text: str, role="keeper"):
         send_message(chat_id, f"❌ Invalid input: {str(e)}\nSend as: `user_id;name`")
         return
 
-    # Check if user already exists
+    # Check if user already exists in central DB
     existing = db.query(User).filter(User.user_id == new_chat_id).first()
     if existing:
         send_message(chat_id, f"❌ User with ID {new_chat_id} already exists.")
         return
 
-    # Create user
+    # Get owner info to attach tenant_db_url
+    owner = db.query(User).filter(User.user_id == chat_id).first()
+    tenant_db_url = owner.tenant_db_url if owner else None
+
+    # Create new user in central DB
     new_user = User(
         user_id=new_chat_id,
         name=name,
         email=f"{new_chat_id}@example.com",
         password_hash="",
-        role=role
+        role=role,
+        tenant_db_url=tenant_db_url
     )
+
     try:
         db.add(new_user)
         db.commit()
@@ -128,21 +147,44 @@ def register_new_user(db: Session, chat_id: int, text: str, role="keeper"):
     # Optional: welcome message to the new user
     send_message(new_chat_id, f"👋 Hello {name}! You have been registered as a {role}. Use /start to begin.")
 
+    # If the new user is an owner, create their tenant DB
+    if role == "owner":
+        if not tenant_db_url:
+            # Construct tenant DB URL dynamically
+            tenant_db_url = DATABASE_URL.rsplit("/", 1)[0] + f"/tenant_{new_chat_id}"
+            new_user.tenant_db_url = tenant_db_url
+            db.commit()
 
+        # Initialize tenant DB and tables
+        create_tenant_db(tenant_db_url)
+        engine = get_engine_for_tenant(tenant_db_url)
+        Base.metadata.create_all(bind=engine)
+
+        send_message(new_chat_id, f"🔑 Tenant database created and initialized for you.")
 
 # -------------------- Products --------------------
 
 def get_stock_list(db: Session):
-    products = db.query(ProductORM).all()
+    """
+    Retrieve the stock list for the current tenant.
+    The `db` session should already be connected to the tenant's database.
+    """
+    products = db.query(ProductORM).all()  # Only products in this tenant DB
     if not products:
         return "📦 No products found."
+    
     lines = ["📦 *Stock Levels:*"]
     for p in products:
         lines.append(f"{p.name} — {p.stock}")
+    
     return "\n".join(lines)
 
 
 def add_product(db: Session, chat_id: int, text: str):
+    """
+    Add a product in a tenant-aware way.
+    The `db` session is already connected to the tenant's DB.
+    """
     try:
         name, price_str, stock_str = parse_input(text, 3)
         price = float(price_str)
@@ -154,6 +196,7 @@ def add_product(db: Session, chat_id: int, text: str):
         send_message(chat_id, f"❌ Invalid input: {str(e)}\nSend as: `name;price;stock` or `name,price,stock`")
         return
 
+    # Tenant DB only contains products for this tenant
     existing = db.query(ProductORM).filter(func.lower(ProductORM.name) == name.lower()).first()
     if existing:
         send_message(chat_id, f"❌ Product '{name}' already exists.")
@@ -173,6 +216,10 @@ def add_product(db: Session, chat_id: int, text: str):
 
 
 def update_product(db: Session, chat_id: int, text: str):
+    """
+    Update a product in a tenant-aware way.
+    Only products in the current tenant DB are affected.
+    """
     try:
         prod_id_str, new_name, price_str, stock_str = parse_input(text, 4)
         prod_id = int(prod_id_str)
@@ -182,6 +229,7 @@ def update_product(db: Session, chat_id: int, text: str):
         if price <= 0 or stock < 0:
             raise ValueError("Price must be > 0 and stock >= 0")
 
+        # Tenant DB only contains products for this tenant
         product = db.query(ProductORM).filter(ProductORM.product_id == prod_id).first()
         if not product:
             raise ValueError(f"No product found with ID {prod_id}")
@@ -203,8 +251,12 @@ def update_product(db: Session, chat_id: int, text: str):
 
 # -------------------- Sales --------------------
 def record_sale(db: Session, chat_id: int, text: str):
+    """
+    Record a sale in a tenant-aware way.
+    All queries affect only the current tenant DB.
+    """
     try:
-        product_name, qty_str = parse_input(text, 2)  # local function
+        product_name, qty_str = parse_input(text, 2)
         qty = int(qty_str)
         if qty <= 0:
             raise ValueError("Quantity must be > 0")
@@ -212,7 +264,7 @@ def record_sale(db: Session, chat_id: int, text: str):
         send_message(chat_id, f"❌ Invalid input: {str(e)}\nSend as: `product_name;quantity` or `product_name,quantity`")
         return
 
-    # Find product
+    # Find product in tenant DB
     product = db.query(ProductORM).filter(func.lower(ProductORM.name) == product_name.lower()).first()
     if not product:
         send_message(chat_id, f"❌ Product '{product_name}' not found.")
@@ -223,7 +275,7 @@ def record_sale(db: Session, chat_id: int, text: str):
         send_message(chat_id, f"❌ Insufficient stock. Available: {product.stock}")
         return
 
-    # Find user
+    # Find user in tenant DB
     user = db.query(User).filter(User.user_id == chat_id).first()
     if not user:
         send_message(chat_id, "❌ No users available in the system.")
@@ -251,23 +303,35 @@ def record_sale(db: Session, chat_id: int, text: str):
 
     # Notify user
     send_message(chat_id, f"✅ Sale recorded: {qty} × {product.name} = ${total_amount}")
-    send_message(chat_id, get_stock_list(db))  # local function
+    send_message(chat_id, get_stock_list(db))
 
     # --- Telegram Notifications ---
     notify_low_stock(db, product)
     notify_top_product(db, product)
     notify_high_value_sale(db, sale)
 
-# -------------------- Generate Reports --------------------
-def generate_report(db: Session, report_type: str):
-    """Generate report text based on action, consistent with reports.py"""
+# -------------------- Clean Tenant-Aware Reports --------------------
+def generate_report(db: Session, report_type: str, tenant_id: int = None):
+    """
+    Generate tenant-aware reports.
+    - db: SQLAlchemy session (tenant DB or central DB)
+    - report_type: report_daily, report_weekly, report_monthly, etc.
+    - tenant_id: optional, used for multi-tenant filtering in central DB
+    """
 
+    def apply_tenant_filter(query, model):
+        return query.filter(model.tenant_id == tenant_id) if tenant_id else query
+
+    # -------------------- Daily Sales --------------------
     if report_type == "report_daily":
         results = (
-            db.query(
-                func.date(SaleORM.sale_date).label("day"),
-                func.sum(SaleORM.quantity).label("total_qty"),
-                func.sum(SaleORM.total_amount).label("total_revenue")
+            apply_tenant_filter(
+                db.query(
+                    func.date(SaleORM.sale_date).label("day"),
+                    func.sum(SaleORM.quantity).label("total_qty"),
+                    func.sum(SaleORM.total_amount).label("total_revenue")
+                ),
+                SaleORM
             )
             .group_by(func.date(SaleORM.sale_date))
             .order_by(func.date(SaleORM.sale_date))
@@ -280,12 +344,16 @@ def generate_report(db: Session, report_type: str):
             lines.append(f"{r.day}: {r.total_qty} items, ${float(r.total_revenue)}")
         return "\n".join(lines)
 
+    # -------------------- Weekly Sales --------------------
     elif report_type == "report_weekly":
         results = (
-            db.query(
-                extract("week", SaleORM.sale_date).label("week"),
-                func.sum(SaleORM.quantity).label("total_qty"),
-                func.sum(SaleORM.total_amount).label("total_revenue")
+            apply_tenant_filter(
+                db.query(
+                    extract("week", SaleORM.sale_date).label("week"),
+                    func.sum(SaleORM.quantity).label("total_qty"),
+                    func.sum(SaleORM.total_amount).label("total_revenue")
+                ),
+                SaleORM
             )
             .group_by("week")
             .order_by("week")
@@ -298,13 +366,17 @@ def generate_report(db: Session, report_type: str):
             lines.append(f"Week {int(r.week)}: {r.total_qty} items, ${float(r.total_revenue)}")
         return "\n".join(lines)
 
+    # -------------------- Monthly Sales per Product --------------------
     elif report_type == "report_monthly":
         now = datetime.now()
         results = (
-            db.query(
-                ProductORM.name.label("product"),
-                func.sum(SaleORM.quantity).label("total_qty"),
-                func.sum(SaleORM.total_amount).label("total_revenue")
+            apply_tenant_filter(
+                db.query(
+                    ProductORM.name.label("product"),
+                    func.sum(SaleORM.quantity).label("total_qty"),
+                    func.sum(SaleORM.total_amount).label("total_revenue")
+                ),
+                SaleORM
             )
             .join(ProductORM, SaleORM.product_id == ProductORM.product_id)
             .filter(extract("year", SaleORM.sale_date) == now.year)
@@ -319,8 +391,9 @@ def generate_report(db: Session, report_type: str):
             lines.append(f"{r.product}: {r.total_qty} items, ${float(r.total_revenue)}")
         return "\n".join(lines)
 
+    # -------------------- Low Stock Products --------------------
     elif report_type == "report_low_stock":
-        products = db.query(ProductORM).filter(ProductORM.stock <= 10).all()
+        products = apply_tenant_filter(db.query(ProductORM), ProductORM).filter(ProductORM.stock <= 10).all()
         if not products:
             return "All products have sufficient stock."
         lines = ["⚠️ *Low Stock Products:*"]
@@ -328,12 +401,16 @@ def generate_report(db: Session, report_type: str):
             lines.append(f"{p.name}: {p.stock} units left")
         return "\n".join(lines)
 
+    # -------------------- Top Products --------------------
     elif report_type == "report_top_products":
         results = (
-            db.query(
-                ProductORM.name.label("product"),
-                func.sum(SaleORM.quantity).label("total_qty"),
-                func.sum(SaleORM.total_amount).label("total_revenue")
+            apply_tenant_filter(
+                db.query(
+                    ProductORM.name.label("product"),
+                    func.sum(SaleORM.quantity).label("total_qty"),
+                    func.sum(SaleORM.total_amount).label("total_revenue")
+                ),
+                ProductORM
             )
             .join(SaleORM, ProductORM.product_id == SaleORM.product_id)
             .group_by(ProductORM.name)
@@ -348,12 +425,16 @@ def generate_report(db: Session, report_type: str):
             lines.append(f"{r.product}: {r.total_qty} sold, ${float(r.total_revenue)} revenue")
         return "\n".join(lines)
 
+    # -------------------- Top Customers --------------------
     elif report_type == "report_top_customers":
         results = (
-            db.query(
-                User.name.label("user"),
-                func.sum(SaleORM.quantity).label("total_qty"),
-                func.sum(SaleORM.total_amount).label("total_spent")
+            apply_tenant_filter(
+                db.query(
+                    User.name.label("user"),
+                    func.sum(SaleORM.quantity).label("total_qty"),
+                    func.sum(SaleORM.total_amount).label("total_spent")
+                ),
+                User
             )
             .join(SaleORM, User.user_id == SaleORM.user_id)
             .group_by(User.name)
@@ -368,12 +449,16 @@ def generate_report(db: Session, report_type: str):
             lines.append(f"{r.user}: {r.total_qty} items, ${float(r.total_spent)} spent")
         return "\n".join(lines)
 
+    # -------------------- Top Repeat Customers --------------------
     elif report_type == "report_top_repeat_customers":
         customers = (
-            db.query(
-                SaleORM.user_id,
-                func.count(SaleORM.sale_id).label("num_purchases"),
-                func.sum(SaleORM.total_amount).label("total_spent")
+            apply_tenant_filter(
+                db.query(
+                    SaleORM.user_id,
+                    func.count(SaleORM.sale_id).label("num_purchases"),
+                    func.sum(SaleORM.total_amount).label("total_spent")
+                ),
+                SaleORM
             )
             .group_by(SaleORM.user_id)
             .order_by(func.count(SaleORM.sale_id).desc())
@@ -384,24 +469,26 @@ def generate_report(db: Session, report_type: str):
             return "No sales data."
         lines = ["🔁 *Top Repeat Customers*"]
         for c in customers:
-            user = db.query(User).filter(User.user_id == c.user_id).first()
+            user = apply_tenant_filter(db.query(User), User).filter(User.user_id == c.user_id).first()
             name = user.name if user else f"User {c.user_id}"
             lines.append(f"{name}: {c.num_purchases} purchases, ${float(c.total_spent)} spent")
         return "\n".join(lines)
 
+    # -------------------- Average Order Value --------------------
     elif report_type == "report_aov":
-        total_orders = db.query(func.count(SaleORM.sale_id)).scalar() or 0
-        total_revenue = db.query(func.sum(SaleORM.total_amount)).scalar() or 0
+        total_orders = apply_tenant_filter(db.query(func.count(SaleORM.sale_id)), SaleORM).scalar() or 0
+        total_revenue = apply_tenant_filter(db.query(func.sum(SaleORM.total_amount)), SaleORM).scalar() or 0
         aov = round(total_revenue / total_orders, 2) if total_orders > 0 else 0
         return f"💰 *Average Order Value*\nTotal Orders: {total_orders}\nTotal Revenue: ${total_revenue}\nAOV: ${aov}"
 
+    # -------------------- Stock Turnover --------------------
     elif report_type == "report_stock_turnover":
-        products = db.query(ProductORM).all()
+        products = apply_tenant_filter(db.query(ProductORM), ProductORM).all()
         if not products:
             return "No products found."
         lines = ["📦 *Stock Turnover per Product*"]
         for p in products:
-            total_sold = db.query(func.sum(SaleORM.quantity)).filter(SaleORM.product_id == p.product_id).scalar() or 0
+            total_sold = apply_tenant_filter(db.query(func.sum(SaleORM.quantity)), SaleORM).filter(SaleORM.product_id == p.product_id).scalar() or 0
             turnover_rate = total_sold / (p.stock + total_sold) if (p.stock + total_sold) > 0 else 0
             lines.append(f"{p.name}: Sold {total_sold}, Stock {p.stock}, Turnover Rate {turnover_rate:.2f}")
         return "\n".join(lines)
@@ -416,54 +503,62 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
     data = await request.json()
 
     def get_user(chat_id: int):
-        user = db.query(User).filter(User.user_id == chat_id).first()
-        if not user:
-            # Prompt role selection for first-time users
-            role_menu(chat_id)
+        return db.query(User).filter(User.user_id == chat_id).first()
+
+    def get_tenant_session(user: User):
+        if not user or not user.tenant_db_url:
             return None
-        return user
+        return get_session_for_tenant(user.tenant_db_url)
 
     if "message" in data:
         chat_id = data["message"]["chat"]["id"]
         text = data["message"].get("text", "").strip()
         user = get_user(chat_id)
+
         if not user:
-            # User must choose role first
+            role_menu(chat_id)
             return {"ok": True}
+
         role = user.role
+        tenant_db = get_tenant_session(user)   # ✅ tenant DB session
+        if not tenant_db:
+            send_message(chat_id, "❌ No tenant DB found. Please register as owner first.")
+            return {"ok": True}
 
         if text.lower() in ["/start", "menu"]:
             role_menu(chat_id)
+
         else:
             handled = False
-            # Only owners can add/update products or register new users
+
             if role == "owner":
                 try:
                     parse_input(text, 3)
-                    add_product(db, chat_id, text)
+                    add_product(tenant_db, chat_id, text)   # ✅ tenant_db
                     handled = True
                 except:
                     pass
+
                 if not handled:
                     try:
                         parse_input(text, 4)
-                        update_product(db, chat_id, text)
-                        handled = True
-                    except:
-                        pass
-                if not handled:
-                    try:
-                        parse_input(text, 2)
-                        register_new_user(db, chat_id, text, role="keeper")
+                        update_product(tenant_db, chat_id, text)   # ✅ tenant_db
                         handled = True
                     except:
                         pass
 
-            # Both roles can record sales
+                if not handled:
+                    try:
+                        parse_input(text, 2)
+                        register_new_user(db, chat_id, text, role="keeper")  
+                        handled = True
+                    except:
+                        pass
+
             if not handled:
                 try:
                     parse_input(text, 2)
-                    record_sale(db, chat_id, text)
+                    record_sale(tenant_db, chat_id, text)   # ✅ tenant_db
                     handled = True
                 except:
                     pass
@@ -475,93 +570,42 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
         chat_id = data["callback_query"]["message"]["chat"]["id"]
         action = data["callback_query"]["data"]
         user = get_user(chat_id)
+
         if not user:
             return {"ok": True}
-        role = user.role
 
-        # Role selection
+        role = user.role
+        tenant_db = get_tenant_session(user)   # ✅ tenant DB session
+
         if action == "role_owner":
             user.role = "owner"
+            tenant_db_url = DATABASE_URL.rsplit("/", 1)[0] + f"/tenant_{chat_id}"
+            create_tenant_db(tenant_db_url)
+            engine = get_engine_for_tenant(tenant_db_url)
+            Base.metadata.create_all(bind=engine)
+
+            user.tenant_db_url = tenant_db_url
             db.commit()
             main_menu(chat_id, role="owner")
+
         elif action == "role_keeper":
             user.role = "keeper"
             db.commit()
             main_menu(chat_id, role="keeper")
 
-        # Owner-only actions
-        elif action == "add_user":
-            if role != "owner":
-                send_message(chat_id, "❌ Only owners can add users.")
-            else:
-                keyboard = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
-                send_message(chat_id, "➕ Send new user details as:\n`user_id;name`", keyboard)
-
-        # Products (owner only)
-        elif action == "add_product":
-            if role != "owner":
-                send_message(chat_id, "❌ Only owners can add products.")
-            else:
-                keyboard = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
-                send_message(chat_id, "➕ Send product details as:\n`name;price;stock`", keyboard)
-
-        elif action == "update_product":
-            if role != "owner":
-                send_message(chat_id, "❌ Only owners can update products.")
-            else:
-                keyboard = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
-                send_message(chat_id, "✏️ Send update as:\n`id;new_name;price;stock`", keyboard)
-
-        # Record sale (everyone)
-        elif action == "record_sale":
-            keyboard = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
-            send_message(chat_id, "🛒 Send sale as:\n`product_name;quantity`", keyboard)
-
-        # View stock (everyone)
         elif action == "view_stock":
-            stock_list = get_stock_list(db)
-            keyboard = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
-            send_message(chat_id, stock_list, keyboard)
+            if tenant_db:
+                stock_list = get_stock_list(tenant_db)  # ✅ tenant_db
+                keyboard = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
+                send_message(chat_id, stock_list, keyboard)
 
-        # Reports with role filtering
-        elif action == "reports":
-            keyboard_buttons = [
-                [{"text": "📅 Daily", "callback_data": "report_daily"}],
-                [{"text": "📆 Weekly", "callback_data": "report_weekly"}],
-                [{"text": "📊 Monthly", "callback_data": "report_monthly"}],
-            ]
-            if role == "owner":
-                keyboard_buttons.extend([
-                    [{"text": "⚠️ Low Stock", "callback_data": "report_low_stock"}],
-                    [{"text": "🏆 Top Products", "callback_data": "report_top_products"}],
-                    [{"text": "👥 Top Customers", "callback_data": "report_top_customers"}],
-                    [{"text": "🔁 Top Repeat Customers", "callback_data": "report_top_repeat_customers"}],
-                    [{"text": "💰 Average Order Value", "callback_data": "report_aov"}],
-                    [{"text": "📦 Stock Turnover", "callback_data": "report_stock_turnover"}],
-                ])
-            keyboard_buttons.append([{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}])
-            keyboard = {"inline_keyboard": keyboard_buttons}
-            send_message(chat_id, "📊 Choose report type:", keyboard)
-
-        elif action in [
-            "report_daily", "report_weekly", "report_monthly",
-            "report_low_stock", "report_top_products", "report_top_customers",
-            "report_top_repeat_customers", "report_aov", "report_stock_turnover"
-        ]:
+        elif action.startswith("report_"):
             if role != "owner" and action not in ["report_daily", "report_weekly", "report_monthly"]:
                 send_message(chat_id, "❌ Only owners can access this report.")
             else:
-                report_text = generate_report(db, action)
-                keyboard = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
-                send_message(chat_id, report_text, keyboard)
-
-        # Help
-        elif action == "help":
-            keyboard = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
-            send_message(chat_id, help_text(), keyboard)
-
-        # Back button
-        elif action == "back_to_menu":
-            main_menu(chat_id, role)
+                if tenant_db:
+                    report_text = generate_report(tenant_db, action)  # ✅ tenant_db
+                    keyboard = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
+                    send_message(chat_id, report_text, keyboard)
 
     return {"ok": True}
