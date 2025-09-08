@@ -516,6 +516,19 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
         user = get_user(chat_id)
 
         if not user:
+            # Auto-register first-time user
+            new_user = User(
+                user_id=chat_id,
+                name=f"User{chat_id}",
+                email=f"{chat_id}@example.com",
+                password_hash="",
+                role=None,             # no role until chosen
+                tenant_db_url=None
+            )
+            db.add(new_user)
+            db.commit()
+            db.refresh(new_user)
+
             role_menu(chat_id)
             return {"ok": True}
 
