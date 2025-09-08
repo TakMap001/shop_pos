@@ -681,17 +681,21 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                         user.tenant_db_url = tenant_db_url
                         db.commit()
-                        main_menu(chat_id, role="owner")
+
+                        keyboard = main_menu(role="owner")
+                        send_message(chat_id, "🏠 Main Menu:", keyboard)
 
                     elif action == "role_keeper":
                         user.role = "keeper"
                         db.commit()
-                        main_menu(chat_id, role="keeper")
+
+                        keyboard = main_menu(role="keeper")
+                        send_message(chat_id, "🏠 Main Menu:", keyboard)
 
                     # -------------------- Shop Setup --------------------
                     elif action == "setup_shop":
                         send_message(chat_id, "🏪 Please enter your shop name:")
-                        user_states[chat_id] = {"action": "awaiting_shop_name"}  # <--- triggers message handler flow
+                        user_states[chat_id] = {"action": "awaiting_shop_name"}
 
                     # -------------------- Product Management --------------------
                     elif action == "add_product":
@@ -737,11 +741,12 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             "📦 View Stock – Show all products in stock\n"
                             "📊 Reports – View sales/stock reports\n"
                             "👑 Owner vs 🛍 Shopkeeper – Different permissions"
-                        )
+                       )
 
                     # -------------------- Navigation --------------------
                     elif action == "back_to_menu":
-                        main_menu(chat_id, role=role)
+                        keyboard = main_menu(role=role)
+                        send_message(chat_id, "🏠 Main Menu:", keyboard)
 
         return {"ok": True}
 
