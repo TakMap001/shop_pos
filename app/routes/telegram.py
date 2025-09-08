@@ -13,7 +13,7 @@ from app.database import get_db  # central DB session
 from app.telegram_notifications import notify_low_stock, notify_top_product, notify_high_value_sale, send_message
 from app.tenants import create_tenant_db, get_engine_for_tenant, get_session_for_tenant
 from config import DATABASE_URL
-
+from telebot import types
 
 router = APIRouter()
 
@@ -31,37 +31,42 @@ def get_tenant_session(global_db: Session, owner_chat_id: int):
 
 def role_menu(chat_id):
     """Role selection menu (Owner vs Shopkeeper)."""
-    keyboard = {
-        "inline_keyboard": [
-            [{"text": "👑 Owner", "callback_data": "role_owner"}],
-            [{"text": "🛍 Shopkeeper", "callback_data": "role_keeper"}],
-        ]
-    }
+    keyboard = types.InlineKeyboardMarkup()
+    keyboard.add(
+        types.InlineKeyboardButton("👑 Owner", callback_data="role_owner"),
+        types.InlineKeyboardButton("🛍 Shopkeeper", callback_data="role_keeper")
+    )
     send_message(chat_id, "👋 Welcome! Please choose your role:", keyboard)
 
 
 def main_menu(chat_id, role="keeper"):
     """Main menu changes depending on role."""
+    keyboard = types.InlineKeyboardMarkup()
+    
     if role == "owner":
-        keyboard = {
-            "inline_keyboard": [
-                [{"text": "➕ Add Product", "callback_data": "add_product"}],
-                [{"text": "✏️ Update Product", "callback_data": "update_product"}],
-                [{"text": "🛒 Record Sale", "callback_data": "record_sale"}],
-                [{"text": "📦 View Stock", "callback_data": "view_stock"}],
-                [{"text": "📊 Reports", "callback_data": "reports"}],
-                [{"text": "ℹ️ Help", "callback_data": "help"}],
-            ]
-        }
+        keyboard.add(
+            types.InlineKeyboardButton("➕ Add Product", callback_data="add_product"),
+            types.InlineKeyboardButton("✏️ Update Product", callback_data="update_product")
+        )
+        keyboard.add(
+            types.InlineKeyboardButton("🛒 Record Sale", callback_data="record_sale"),
+            types.InlineKeyboardButton("📦 View Stock", callback_data="view_stock")
+        )
+        keyboard.add(
+            types.InlineKeyboardButton("📊 Reports", callback_data="reports"),
+            types.InlineKeyboardButton("ℹ️ Help", callback_data="help")
+        )
     else:  # shopkeeper
-        keyboard = {
-            "inline_keyboard": [
-                [{"text": "🛒 Record Sale", "callback_data": "record_sale"}],
-                [{"text": "📦 View Stock", "callback_data": "view_stock"}],
-                [{"text": "ℹ️ Help", "callback_data": "help"}],
-            ]
-        }
+        keyboard.add(
+            types.InlineKeyboardButton("🛒 Record Sale", callback_data="record_sale"),
+            types.InlineKeyboardButton("📦 View Stock", callback_data="view_stock")
+        )
+        keyboard.add(
+            types.InlineKeyboardButton("ℹ️ Help", callback_data="help")
+        )
+    
     send_message(chat_id, "📋 Main Menu:", keyboard)
+
 
 def help_text():
     return (
@@ -521,7 +526,7 @@ def generate_report(db: Session, report_type: str, tenant_id: int = None):
 async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
     try:
         data = await request.json()
-        print("📩 Incoming Telegram update:", data)  # log full update for debugging
+        print("📩 Incoming Telegram update:", data)
 
         def get_user(chat_id: int):
             return db.query(User).filter(User.user_id == chat_id).first()
@@ -531,6 +536,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 return None
             return get_session_for_tenant(user.tenant_db_url)
 
+        # -------------------- Handle messages --------------------
         if "message" in data:
             chat_id = data["message"]["chat"]["id"]
             text = data["message"].get("text", "").strip()
@@ -543,8 +549,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     name=f"User{chat_id}",
                     email=f"{chat_id}@example.com",
                     password_hash="",
-                    role=None,             # no role until chosen
-                    #tenant_db_url=None
+                    role=None
                 )
                 db.add(new_user)
                 db.commit()
@@ -554,21 +559,21 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 return {"ok": True}
 
             role = user.role
-            tenant_db = get_tenant_session(user)   # ✅ tenant DB session
-            if not tenant_db:
+            tenant_db = get_tenant_session(user)
+            if not tenant_db and role:
                 send_message(chat_id, "❌ No tenant DB found. Please register as owner first.")
                 return {"ok": True}
 
+            # -------------------- Commands --------------------
             if text.lower() in ["/start", "menu"]:
                 role_menu(chat_id)
-
             else:
                 handled = False
 
                 if role == "owner":
                     try:
                         parse_input(text, 3)
-                        add_product(tenant_db, chat_id, text)   # ✅ tenant_db
+                        add_product(tenant_db, chat_id, text)
                         handled = True
                     except Exception as e:
                         print("⚠️ add_product failed:", str(e))
@@ -576,7 +581,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     if not handled:
                         try:
                             parse_input(text, 4)
-                            update_product(tenant_db, chat_id, text)   # ✅ tenant_db
+                            update_product(tenant_db, chat_id, text)
                             handled = True
                         except Exception as e:
                             print("⚠️ update_product failed:", str(e))
@@ -584,7 +589,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     if not handled:
                         try:
                             parse_input(text, 2)
-                            register_new_user(db, chat_id, text, role="keeper")  
+                            register_new_user(db, chat_id, text, role="keeper")
                             handled = True
                         except Exception as e:
                             print("⚠️ register_new_user failed:", str(e))
@@ -592,7 +597,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 if not handled:
                     try:
                         parse_input(text, 2)
-                        record_sale(tenant_db, chat_id, text)   # ✅ tenant_db
+                        record_sale(tenant_db, chat_id, text)
                         handled = True
                     except Exception as e:
                         print("⚠️ record_sale failed:", str(e))
@@ -600,6 +605,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 if not handled:
                     send_message(chat_id, f"⚠️ Invalid input or action not allowed for your role ({role}). Type *menu* to see instructions.")
 
+        # -------------------- Handle callbacks --------------------
         elif "callback_query" in data:
             chat_id = data["callback_query"]["message"]["chat"]["id"]
             action = data["callback_query"]["data"]
@@ -609,7 +615,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 return {"ok": True}
 
             role = user.role
-            tenant_db = get_tenant_session(user)   # ✅ tenant DB session
+            tenant_db = get_tenant_session(user)
 
             if action == "role_owner":
                 user.role = "owner"
@@ -629,8 +635,9 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             elif action == "view_stock":
                 if tenant_db:
-                    stock_list = get_stock_list(tenant_db)  # ✅ tenant_db
-                    keyboard = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
+                    stock_list = get_stock_list(tenant_db)
+                    keyboard = types.InlineKeyboardMarkup()
+                    keyboard.add(types.InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_menu"))
                     send_message(chat_id, stock_list, keyboard)
 
             elif action.startswith("report_"):
@@ -638,9 +645,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "❌ Only owners can access this report.")
                 else:
                     if tenant_db:
-                        report_text = generate_report(tenant_db, action)  # ✅ tenant_db
-                        keyboard = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
+                        report_text = generate_report(tenant_db, action)
+                        keyboard = types.InlineKeyboardMarkup()
+                        keyboard.add(types.InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_menu"))
                         send_message(chat_id, report_text, keyboard)
+
+            elif action == "back_to_menu":
+                main_menu(chat_id, role=role)
 
         return {"ok": True}
 

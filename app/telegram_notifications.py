@@ -1,5 +1,7 @@
 # app/telegram_notifications.py
 
+from telebot import TeleBot, types
+import os
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.models.models import User, ProductORM, SaleORM
@@ -10,13 +12,22 @@ LOW_STOCK_THRESHOLD = 10
 TOP_PRODUCT_THRESHOLD = 50
 HIGH_VALUE_SALE_THRESHOLD = 100
 
-bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
+bot = TeleBot(TELEGRAM_BOT_TOKEN)
 
-def send_message(user_id: int, text: str, keyboard=None):
-    if keyboard:
-        bot.send_message(user_id, text, reply_markup=keyboard, parse_mode="Markdown")
-    else:
-        bot.send_message(user_id, text, parse_mode="Markdown")
+def send_message(user_id, text, keyboard=None, parse_mode="Markdown"):
+    """
+    Send a Telegram message safely.
+    - keyboard: dict with 'inline_keyboard' or None
+    """
+    reply_markup = None
+    if keyboard and "inline_keyboard" in keyboard:
+        markup = types.InlineKeyboardMarkup()
+        for row in keyboard["inline_keyboard"]:
+            buttons = [types.InlineKeyboardButton(text=btn["text"], callback_data=btn["callback_data"]) for btn in row]
+            markup.row(*buttons)
+        reply_markup = markup
+
+    bot.send_message(user_id, text, reply_markup=reply_markup, parse_mode=parse_mode)
 
 def notify_low_stock(db: Session, product: ProductORM):
     if product.stock <= LOW_STOCK_THRESHOLD:
