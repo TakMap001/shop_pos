@@ -549,7 +549,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     name=f"User{chat_id}",
                     email=f"{chat_id}@example.com",
                     password_hash="",
-                    role=None
+                    role=None,
                     tenant_db_url=None
                 )
                 db.add(new_user)
