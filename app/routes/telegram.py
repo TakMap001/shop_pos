@@ -6,11 +6,12 @@ from sqlalchemy.orm import Session
 from decimal import Decimal
 from datetime import datetime
 from sqlalchemy import func, extract
-from app.database import get_db
-from app.models.models import ProductORM, SaleORM, User
+from app.models.central_models import Tenant  # Central DB
+from app.models.models import Base as TenantBase
+from app.models.models import User, ProductORM, SaleORM  # Tenant DB
+from app.database import get_db  # central DB session
 from app.telegram_notifications import notify_low_stock, notify_top_product, notify_high_value_sale, send_message
 from app.tenants import create_tenant_db, get_engine_for_tenant, get_session_for_tenant
-from app.database import Base
 from config import DATABASE_URL
 
 
@@ -22,18 +23,11 @@ TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
 # -------------------- Helpers --------------------
 
-def get_tenant_session(global_db: Session, user_id: int):
-    user = global_db.query(User).filter(User.user_id == user_id).first()
-    if not user or not user.tenant_db_url:
+def get_tenant_session(global_db: Session, owner_chat_id: int):
+    tenant = global_db.query(Tenant).filter(Tenant.telegram_owner_id == owner_chat_id).first()
+    if not tenant:
         return None
-    return get_session_for_tenant(user.tenant_db_url)
-
-def send_message(chat_id, text, keyboard=None):
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
-    if keyboard:
-        payload["reply_markup"] = keyboard
-    requests.post(f"{TELEGRAM_API_URL}/sendMessage", json=payload)
-
+    return get_session_for_tenant(tenant.database_url)
 
 def role_menu(chat_id):
     """Role selection menu (Owner vs Shopkeeper)."""
@@ -95,14 +89,17 @@ def parse_input(text: str, expected_parts: int):
     
     return parts
 
-def register_new_user(db: Session, chat_id: int, text: str, role="keeper"):
+def register_new_user(central_db: Session, chat_id: int, text: str, role="keeper"):
     """
-    Owner adds a new user (shopkeeper or owner) manually.
-    - Registers user in central master DB with tenant awareness.
-    - Optionally, initializes tenant DB for the user if they are an owner.
+    Register a new user in a tenant-aware way.
     
-    Expected input: user_id;name
+    - central_db: SQLAlchemy session for central DB
+    - chat_id: ID of the user sending the command (owner)
+    - text: input text (user_id;name)
+    - role: 'keeper' or 'owner'
     """
+
+    # -------------------- Parse Input --------------------
     try:
         user_id_str, name = parse_input(text, 2)
         new_chat_id = int(user_id_str)
@@ -113,54 +110,76 @@ def register_new_user(db: Session, chat_id: int, text: str, role="keeper"):
         send_message(chat_id, f"❌ Invalid input: {str(e)}\nSend as: `user_id;name`")
         return
 
-    # Check if user already exists in central DB
-    existing = db.query(User).filter(User.user_id == new_chat_id).first()
-    if existing:
-        send_message(chat_id, f"❌ User with ID {new_chat_id} already exists.")
+    # -------------------- Check for Existing Tenant --------------------
+    tenant = central_db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
+    if role == "owner" and tenant:
+        send_message(chat_id, f"❌ You already have a tenant registered.")
         return
 
-    # Get owner info to attach tenant_db_url
-    owner = db.query(User).filter(User.user_id == chat_id).first()
-    tenant_db_url = owner.tenant_db_url if owner else None
-
-    # Create new user in central DB
-    new_user = User(
-        user_id=new_chat_id,
-        name=name,
-        email=f"{new_chat_id}@example.com",
-        password_hash="",
-        role=role,
-        tenant_db_url=tenant_db_url
-    )
-
-    try:
-        db.add(new_user)
-        db.commit()
-        db.refresh(new_user)
-    except Exception as e:
-        db.rollback()
-        send_message(chat_id, f"❌ Database error: {str(e)}")
-        return
-
-    send_message(chat_id, f"✅ {role.title()} '{name}' added successfully with ID {new_chat_id}.")
-
-    # Optional: welcome message to the new user
-    send_message(new_chat_id, f"👋 Hello {name}! You have been registered as a {role}. Use /start to begin.")
-
-    # If the new user is an owner, create their tenant DB
+    # -------------------- Handle Owner Registration --------------------
     if role == "owner":
-        if not tenant_db_url:
-            # Construct tenant DB URL dynamically
-            tenant_db_url = DATABASE_URL.rsplit("/", 1)[0] + f"/tenant_{new_chat_id}"
-            new_user.tenant_db_url = tenant_db_url
-            db.commit()
+        # Construct tenant DB URL
+        tenant_db_url = DATABASE_URL.rsplit("/", 1)[0] + f"/tenant_{new_chat_id}"
 
-        # Initialize tenant DB and tables
+        # Create tenant DB
         create_tenant_db(tenant_db_url)
         engine = get_engine_for_tenant(tenant_db_url)
-        Base.metadata.create_all(bind=engine)
+        TenantBase.metadata.create_all(bind=engine)
 
-        send_message(new_chat_id, f"🔑 Tenant database created and initialized for you.")
+        # Add to central Tenant table
+        new_tenant = Tenant(
+            tenant_id=str(new_chat_id),
+            store_name=f"{name}'s Store",
+            telegram_owner_id=new_chat_id,
+            database_url=tenant_db_url
+        )
+        try:
+            central_db.add(new_tenant)
+            central_db.commit()
+            central_db.refresh(new_tenant)
+        except Exception as e:
+            central_db.rollback()
+            send_message(chat_id, f"❌ Database error (central DB): {str(e)}")
+            return
+
+        send_message(chat_id, f"✅ Owner '{name}' registered and tenant DB created.")
+
+    # -------------------- Handle Shopkeeper / Tenant Users --------------------
+    else:
+        if not tenant:
+            send_message(chat_id, "❌ No tenant found. Please register as an owner first.")
+            return
+
+        # Connect to tenant DB
+        tenant_db = get_session_for_tenant(tenant.database_url)
+
+        # Check if user exists in tenant DB
+        existing_user = tenant_db.query(User).filter(User.user_id == new_chat_id).first()
+        if existing_user:
+            send_message(chat_id, f"❌ User with ID {new_chat_id} already exists in tenant DB.")
+            return
+
+        # Add user to tenant DB
+        new_user = User(
+            user_id=new_chat_id,
+            name=name,
+            email=f"{new_chat_id}@example.com",
+            password_hash="",
+            role=role
+        )
+        try:
+            tenant_db.add(new_user)
+            tenant_db.commit()
+            tenant_db.refresh(new_user)
+        except Exception as e:
+            tenant_db.rollback()
+            send_message(chat_id, f"❌ Database error (tenant DB): {str(e)}")
+            return
+
+        send_message(chat_id, f"✅ {role.title()} '{name}' added successfully to tenant DB.")
+
+    # -------------------- Welcome Message --------------------
+    send_message(new_chat_id, f"👋 Hello {name}! Use /start to begin.")
 
 # -------------------- Products --------------------
 
@@ -597,7 +616,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 tenant_db_url = DATABASE_URL.rsplit("/", 1)[0] + f"/tenant_{chat_id}"
                 create_tenant_db(tenant_db_url)
                 engine = get_engine_for_tenant(tenant_db_url)
-                Base.metadata.create_all(bind=engine)
+                TenantBase.metadata.create_all(bind=engine)
 
                 user.tenant_db_url = tenant_db_url
                 db.commit()

@@ -12,8 +12,11 @@ HIGH_VALUE_SALE_THRESHOLD = 100
 
 bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
-def send_message(user_id: int, text: str):
-    bot.send_message(user_id, text)
+def send_message(user_id: int, text: str, keyboard=None):
+    if keyboard:
+        bot.send_message(user_id, text, reply_markup=keyboard, parse_mode="Markdown")
+    else:
+        bot.send_message(user_id, text, parse_mode="Markdown")
 
 def notify_low_stock(db: Session, product: ProductORM):
     if product.stock <= LOW_STOCK_THRESHOLD:

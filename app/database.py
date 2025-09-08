@@ -13,7 +13,9 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, futu
 Base = declarative_base()
 
 # -------------------- Import Central Models --------------------
-from app.models.central_models import User  # Add other central models here if needed
+# Only central models live in central DB
+from app.models.central_models import Tenant  # The main central model
+from app.models.models import User  # User lives in main models.py
 
 # -------------------- Create Tables Safely --------------------
 def init_db():
