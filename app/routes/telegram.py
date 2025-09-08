@@ -44,9 +44,12 @@ def role_menu(chat_id):
 
 
 def main_menu(role: str):
+    """
+    Returns a menu dictionary for the given role.
+    """
     keyboard = []
 
-    if role == "Owner":
+    if role.lower() == "owner":
         keyboard.append([
             {"text": "🏪 Setup My Shop", "callback_data": "setup_shop"}
         ])
@@ -63,7 +66,7 @@ def main_menu(role: str):
             {"text": "ℹ️ Help", "callback_data": "help"},
         ])
     else:
-        # Shopkeeper menu unchanged
+        # Shopkeeper menu
         keyboard.append([
             {"text": "🛒 Record Sale", "callback_data": "record_sale"},
             {"text": "📦 View Stock", "callback_data": "view_stock"},
@@ -74,6 +77,7 @@ def main_menu(role: str):
         ])
 
     return {"inline_keyboard": keyboard}
+
 
 def help_text():
     return (
@@ -682,14 +686,24 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         user.tenant_db_url = tenant_db_url
                         db.commit()
 
-                        keyboard = main_menu(role="owner")
+                        # Send main menu
+                        kb_dict = main_menu(role=user.role)
+                        keyboard = types.InlineKeyboardMarkup()
+                        for row in kb_dict["inline_keyboard"]:
+                            buttons = [types.InlineKeyboardButton(text=b["text"], callback_data=b["callback_data"]) for b in row]
+                            keyboard.row(*buttons)
                         send_message(chat_id, "🏠 Main Menu:", keyboard)
 
                     elif action == "role_keeper":
                         user.role = "keeper"
                         db.commit()
 
-                        keyboard = main_menu(role="keeper")
+                        # Send main menu
+                        kb_dict = main_menu(role=user.role)
+                        keyboard = types.InlineKeyboardMarkup()
+                        for row in kb_dict["inline_keyboard"]:
+                            buttons = [types.InlineKeyboardButton(text=b["text"], callback_data=b["callback_data"]) for b in row]
+                            keyboard.row(*buttons)
                         send_message(chat_id, "🏠 Main Menu:", keyboard)
 
                     # -------------------- Shop Setup --------------------
@@ -741,11 +755,15 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             "📦 View Stock – Show all products in stock\n"
                             "📊 Reports – View sales/stock reports\n"
                             "👑 Owner vs 🛍 Shopkeeper – Different permissions"
-                       )
+                        )
 
                     # -------------------- Navigation --------------------
                     elif action == "back_to_menu":
-                        keyboard = main_menu(role=role)
+                        kb_dict = main_menu(role=role)
+                        keyboard = types.InlineKeyboardMarkup()
+                        for row in kb_dict["inline_keyboard"]:
+                            buttons = [types.InlineKeyboardButton(text=b["text"], callback_data=b["callback_data"]) for b in row]
+                            keyboard.row(*buttons)
                         send_message(chat_id, "🏠 Main Menu:", keyboard)
 
         return {"ok": True}
