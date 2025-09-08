@@ -500,125 +500,133 @@ def generate_report(db: Session, report_type: str, tenant_id: int = None):
 
 @router.post("/telegram/webhook")
 async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
-    data = await request.json()
+    try:
+        data = await request.json()
+        print("📩 Incoming Telegram update:", data)  # log full update for debugging
 
-    def get_user(chat_id: int):
-        return db.query(User).filter(User.user_id == chat_id).first()
+        def get_user(chat_id: int):
+            return db.query(User).filter(User.user_id == chat_id).first()
 
-    def get_tenant_session(user: User):
-        if not user or not user.tenant_db_url:
-            return None
-        return get_session_for_tenant(user.tenant_db_url)
+        def get_tenant_session(user: User):
+            if not user or not user.tenant_db_url:
+                return None
+            return get_session_for_tenant(user.tenant_db_url)
 
-    if "message" in data:
-        chat_id = data["message"]["chat"]["id"]
-        text = data["message"].get("text", "").strip()
-        user = get_user(chat_id)
+        if "message" in data:
+            chat_id = data["message"]["chat"]["id"]
+            text = data["message"].get("text", "").strip()
+            user = get_user(chat_id)
 
-        if not user:
-            # Auto-register first-time user
-            new_user = User(
-                user_id=chat_id,
-                name=f"User{chat_id}",
-                email=f"{chat_id}@example.com",
-                password_hash="",
-                role=None,             # no role until chosen
-                tenant_db_url=None
-            )
-            db.add(new_user)
-            db.commit()
-            db.refresh(new_user)
+            if not user:
+                # Auto-register first-time user
+                new_user = User(
+                    user_id=chat_id,
+                    name=f"User{chat_id}",
+                    email=f"{chat_id}@example.com",
+                    password_hash="",
+                    role=None,             # no role until chosen
+                    tenant_db_url=None
+                )
+                db.add(new_user)
+                db.commit()
+                db.refresh(new_user)
 
-            role_menu(chat_id)
-            return {"ok": True}
+                role_menu(chat_id)
+                return {"ok": True}
 
-        role = user.role
-        tenant_db = get_tenant_session(user)   # ✅ tenant DB session
-        if not tenant_db:
-            send_message(chat_id, "❌ No tenant DB found. Please register as owner first.")
-            return {"ok": True}
+            role = user.role
+            tenant_db = get_tenant_session(user)   # ✅ tenant DB session
+            if not tenant_db:
+                send_message(chat_id, "❌ No tenant DB found. Please register as owner first.")
+                return {"ok": True}
 
-        if text.lower() in ["/start", "menu"]:
-            role_menu(chat_id)
+            if text.lower() in ["/start", "menu"]:
+                role_menu(chat_id)
 
-        else:
-            handled = False
+            else:
+                handled = False
 
-            if role == "owner":
-                try:
-                    parse_input(text, 3)
-                    add_product(tenant_db, chat_id, text)   # ✅ tenant_db
-                    handled = True
-                except:
-                    pass
-
-                if not handled:
+                if role == "owner":
                     try:
-                        parse_input(text, 4)
-                        update_product(tenant_db, chat_id, text)   # ✅ tenant_db
+                        parse_input(text, 3)
+                        add_product(tenant_db, chat_id, text)   # ✅ tenant_db
                         handled = True
-                    except:
-                        pass
+                    except Exception as e:
+                        print("⚠️ add_product failed:", str(e))
+
+                    if not handled:
+                        try:
+                            parse_input(text, 4)
+                            update_product(tenant_db, chat_id, text)   # ✅ tenant_db
+                            handled = True
+                        except Exception as e:
+                            print("⚠️ update_product failed:", str(e))
+
+                    if not handled:
+                        try:
+                            parse_input(text, 2)
+                            register_new_user(db, chat_id, text, role="keeper")  
+                            handled = True
+                        except Exception as e:
+                            print("⚠️ register_new_user failed:", str(e))
 
                 if not handled:
                     try:
                         parse_input(text, 2)
-                        register_new_user(db, chat_id, text, role="keeper")  
+                        record_sale(tenant_db, chat_id, text)   # ✅ tenant_db
                         handled = True
-                    except:
-                        pass
+                    except Exception as e:
+                        print("⚠️ record_sale failed:", str(e))
 
-            if not handled:
-                try:
-                    parse_input(text, 2)
-                    record_sale(tenant_db, chat_id, text)   # ✅ tenant_db
-                    handled = True
-                except:
-                    pass
+                if not handled:
+                    send_message(chat_id, f"⚠️ Invalid input or action not allowed for your role ({role}). Type *menu* to see instructions.")
 
-            if not handled:
-                send_message(chat_id, f"⚠️ Invalid input or action not allowed for your role ({role}). Type *menu* to see instructions.")
+        elif "callback_query" in data:
+            chat_id = data["callback_query"]["message"]["chat"]["id"]
+            action = data["callback_query"]["data"]
+            user = get_user(chat_id)
 
-    elif "callback_query" in data:
-        chat_id = data["callback_query"]["message"]["chat"]["id"]
-        action = data["callback_query"]["data"]
-        user = get_user(chat_id)
+            if not user:
+                return {"ok": True}
 
-        if not user:
-            return {"ok": True}
+            role = user.role
+            tenant_db = get_tenant_session(user)   # ✅ tenant DB session
 
-        role = user.role
-        tenant_db = get_tenant_session(user)   # ✅ tenant DB session
+            if action == "role_owner":
+                user.role = "owner"
+                tenant_db_url = DATABASE_URL.rsplit("/", 1)[0] + f"/tenant_{chat_id}"
+                create_tenant_db(tenant_db_url)
+                engine = get_engine_for_tenant(tenant_db_url)
+                Base.metadata.create_all(bind=engine)
 
-        if action == "role_owner":
-            user.role = "owner"
-            tenant_db_url = DATABASE_URL.rsplit("/", 1)[0] + f"/tenant_{chat_id}"
-            create_tenant_db(tenant_db_url)
-            engine = get_engine_for_tenant(tenant_db_url)
-            Base.metadata.create_all(bind=engine)
+                user.tenant_db_url = tenant_db_url
+                db.commit()
+                main_menu(chat_id, role="owner")
 
-            user.tenant_db_url = tenant_db_url
-            db.commit()
-            main_menu(chat_id, role="owner")
+            elif action == "role_keeper":
+                user.role = "keeper"
+                db.commit()
+                main_menu(chat_id, role="keeper")
 
-        elif action == "role_keeper":
-            user.role = "keeper"
-            db.commit()
-            main_menu(chat_id, role="keeper")
-
-        elif action == "view_stock":
-            if tenant_db:
-                stock_list = get_stock_list(tenant_db)  # ✅ tenant_db
-                keyboard = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
-                send_message(chat_id, stock_list, keyboard)
-
-        elif action.startswith("report_"):
-            if role != "owner" and action not in ["report_daily", "report_weekly", "report_monthly"]:
-                send_message(chat_id, "❌ Only owners can access this report.")
-            else:
+            elif action == "view_stock":
                 if tenant_db:
-                    report_text = generate_report(tenant_db, action)  # ✅ tenant_db
+                    stock_list = get_stock_list(tenant_db)  # ✅ tenant_db
                     keyboard = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
-                    send_message(chat_id, report_text, keyboard)
+                    send_message(chat_id, stock_list, keyboard)
 
-    return {"ok": True}
+            elif action.startswith("report_"):
+                if role != "owner" and action not in ["report_daily", "report_weekly", "report_monthly"]:
+                    send_message(chat_id, "❌ Only owners can access this report.")
+                else:
+                    if tenant_db:
+                        report_text = generate_report(tenant_db, action)  # ✅ tenant_db
+                        keyboard = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
+                        send_message(chat_id, report_text, keyboard)
+
+        return {"ok": True}
+
+    except Exception as e:
+        import traceback
+        print("❌ Webhook crashed with error:", str(e))
+        traceback.print_exc()
+        return {"status": "error", "detail": str(e)}
