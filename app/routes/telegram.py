@@ -667,8 +667,12 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 elif "callback_query" in data:
                     chat_id = data["callback_query"]["message"]["chat"]["id"]
                     action = data["callback_query"]["data"]
-                    user = get_user(chat_id)
+                    callback_id = data["callback_query"]["id"]
 
+                    # ✅ Answer the callback query to remove the loading state
+                    bot.answer_callback_query(callback_query_id=callback_id)
+
+                    user = get_user(chat_id)
                     if not user:
                         return {"ok": True}
 
