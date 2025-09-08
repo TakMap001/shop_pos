@@ -27,7 +27,8 @@ def get_tenant_session(global_db: Session, owner_chat_id: int):
     tenant = global_db.query(Tenant).filter(Tenant.telegram_owner_id == owner_chat_id).first()
     if not tenant:
         return None
-    return get_session_for_tenant(tenant.database_url)
+    SessionLocal = get_session_for_tenant(tenant.database_url)  # returns sessionmaker
+    return SessionLocal()  # <-- create actual session
 
 def role_menu(chat_id):
     """Role selection menu (Owner vs Shopkeeper)."""
