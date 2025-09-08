@@ -4,14 +4,17 @@ from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from app.database import Base
 from datetime import datetime
+from sqlalchemy import BigInteger
 
 class User(Base):
     __tablename__ = "users"
-    user_id = Column(Integer, primary_key=True, index=True)
-    name = Column(String(100), nullable=False, index=True)
-    email = Column(String(100), unique=True, nullable=False)
-    password_hash = Column(Text, nullable=True, default="__no_login__")  # allow chat-only users
-    role = Column(String(20), default="keeper")  # 'owner' or 'keeper'
+
+    user_id = Column(BigInteger, primary_key=True, index=True)
+    name = Column(String(255))
+    email = Column(String(255))
+    password_hash = Column(String(255))
+    role = Column(String(50))
+    tenant_db_url = Column(Text, nullable=True)  # <-- Add this
     created_at = Column(TIMESTAMP, server_default=func.now())
 
 class ProductORM(Base):
