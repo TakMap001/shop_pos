@@ -542,7 +542,7 @@ def generate_report(db: Session, report_type: str, tenant_id: int = None):
     else:
         return "❌ Unknown report type."
 
-# -------------------- Webhook changes --------------------
+# -------------------- Webhook --------------------
 
 @router.post("/telegram/webhook")
 async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
@@ -674,122 +674,121 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 if not handled:
                     send_message(chat_id, f"⚠️ Invalid input or action not allowed for your role ({role}). Type *menu* to see instructions.")
 
-                # -------------------- Handle callbacks --------------------
-                if "callback_query" in data:
-                    chat_id = data["callback_query"]["message"]["chat"]["id"]
-                    action = data["callback_query"]["data"]
-                    callback_id = data["callback_query"]["id"]
+        # -------------------- Handle callbacks --------------------
+        if "callback_query" in data:
+            chat_id = data["callback_query"]["message"]["chat"]["id"]
+            action = data["callback_query"]["data"]
+            callback_id = data["callback_query"]["id"]
+            # ✅ Explicitly answer callback to remove spinner
+            requests.post(
+                f"{TELEGRAM_API_URL}/answerCallbackQuery",
+                json={"callback_query_id": callback_id}
+            )
 
-                    # ✅ Explicitly answer callback to remove spinner
-                    requests.post(
-                        f"{TELEGRAM_API_URL}/answerCallbackQuery",
-                        json={"callback_query_id": callback_id}
-                    )
+            user = get_user(chat_id)
+            if not user:
+                return {"ok": True}
 
-                    user = get_user(chat_id)
-                    if not user:
-                        return {"ok": True}
+            role = user.role
+            tenant_db = get_tenant_session(user)
 
-                    role = user.role
-                    tenant_db = get_tenant_session(user)
+            # -------------------- Role Selection --------------------
+            if action == "role_owner":
+                user.role = "owner"
+                tenant_db_url = DATABASE_URL.rsplit("/", 1)[0] + f"/tenant_{chat_id}"
+                create_tenant_db(tenant_db_url)
+                engine = get_engine_for_tenant(tenant_db_url)
+                TenantBase.metadata.create_all(bind=engine)
 
-                    # -------------------- Role Selection --------------------
-                    if action == "role_owner":
-                        user.role = "owner"
-                        tenant_db_url = DATABASE_URL.rsplit("/", 1)[0] + f"/tenant_{chat_id}"
-                        create_tenant_db(tenant_db_url)
-                        engine = get_engine_for_tenant(tenant_db_url)
-                        TenantBase.metadata.create_all(bind=engine)
+                user.tenant_db_url = tenant_db_url
+                db.commit()
 
-                        user.tenant_db_url = tenant_db_url
-                        db.commit()
+                kb_dict = main_menu(role=user.role)
+                send_message(chat_id, "🏠 Main Menu:", kb_dict)
 
-                        kb_dict = main_menu(role=user.role)
-                        send_message(chat_id, "🏠 Main Menu:", kb_dict)
+            elif action == "role_keeper":
+                user.role = "keeper"
+                db.commit()
 
-                    elif action == "role_keeper":
-                        user.role = "keeper"
-                        db.commit()
+                kb_dict = main_menu(role=user.role)
+                send_message(chat_id, "🏠 Main Menu:", kb_dict)
 
-                        kb_dict = main_menu(role=user.role)
-                        send_message(chat_id, "🏠 Main Menu:", kb_dict)
+            # -------------------- Shop Setup --------------------
+            elif action == "setup_shop":
+                send_message(chat_id, "🏪 Please enter your shop name:")
+                user_states[chat_id] = {"action": "awaiting_shop_name"}
 
-                    # -------------------- Shop Setup --------------------
-                    elif action == "setup_shop":
-                        send_message(chat_id, "🏪 Please enter your shop name:")
-                        user_states[chat_id] = {"action": "awaiting_shop_name"}
+            # -------------------- Product Management --------------------
+            elif action == "add_product":
+                send_message(chat_id, "➕ Please enter the product details in the format:\n\n`Name, Price, Quantity`")
+                user_states[chat_id] = {"action": "awaiting_product"}
 
-                    # -------------------- Product Management --------------------
-                    elif action == "add_product":
-                        send_message(chat_id, "➕ Please enter the product details in the format:\n\n`Name, Price, Quantity`")
-                        user_states[chat_id] = {"action": "awaiting_product"}
+            elif action == "update_product":
+                send_message(chat_id, "✏️ Please enter the product update in the format:\n\n`ProductID, NewName, NewPrice, NewQuantity`")
+                user_states[chat_id] = {"action": "awaiting_update"}
 
-                    elif action == "update_product":
-                        send_message(chat_id, "✏️ Please enter the product update in the format:\n\n`ProductID, NewName, NewPrice, NewQuantity`")
-                        user_states[chat_id] = {"action": "awaiting_update"}
+            # -------------------- Sales --------------------
+            elif action == "record_sale":
+                send_message(chat_id, "🛒 Please enter the sale in the format:\n\n`ProductID, Quantity`")
+                user_states[chat_id] = {"action": "awaiting_sale"}
 
-                    # -------------------- Sales --------------------
-                    elif action == "record_sale":
-                        send_message(chat_id, "🛒 Please enter the sale in the format:\n\n`ProductID, Quantity`")
-                        user_states[chat_id] = {"action": "awaiting_sale"}
+            # -------------------- Stock --------------------
+            elif action == "view_stock":
+                if tenant_db:
+                    stock_list = get_stock_list(tenant_db)
+                    kb_dict = {
+                        "inline_keyboard": [
+                            [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
+                        ]
+                    }
+                    send_message(chat_id, stock_list, kb_dict)
 
-                    # -------------------- Stock --------------------
-                    elif action == "view_stock":
-                        if tenant_db:
-                            stock_list = get_stock_list(tenant_db)
-                            kb_dict = {
-                                "inline_keyboard": [
-                                    [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
-                                ]
-                            }
-                            send_message(chat_id, stock_list, kb_dict)
+            # -------------------- Reports --------------------
+            elif action.startswith("report_"):
+                if role != "owner" and action not in ["report_daily", "report_weekly", "report_monthly"]:
+                    send_message(chat_id, "❌ Only owners can access this report.")
+                else:
+                    report_text = generate_report(tenant_db, action)
+                    kb_dict = {
+                        "inline_keyboard": [
+                            [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
+                        ]
+                    }
+                    send_message(chat_id, report_text, kb_dict)
 
-                    # -------------------- Reports --------------------
-                    elif action.startswith("report_"):
-                        if role != "owner" and action not in ["report_daily", "report_weekly", "report_monthly"]:
-                            send_message(chat_id, "❌ Only owners can access this report.")
-                        else:
-                            report_text = generate_report(tenant_db, action)
-                            kb_dict = {
-                                "inline_keyboard": [
-                                    [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
-                                ]
-                            }
-                            send_message(chat_id, report_text, kb_dict)
+            # -------------------- Help --------------------
+            elif action == "help":
+                help_text = (
+                    "❓ *Help & FAQs*\n\n"
+                    "Here are some things you should know:\n\n"
+                    "📌 *Getting Started*\n"
+                    "• Owners must first *setup the shop* from the Main Menu.\n"
+                    "• Shopkeepers can directly *record sales* and *check stock*.\n\n"
+                    "🛒 *Managing Products*\n"
+                    "• Use *Add Product* to register new items (Name, Price, Quantity).\n"
+                    "• Use *Update Product* to adjust details or restock.\n\n"
+                    "📦 *Stock Management*\n"
+                    "• Always check *View Stock* before recording a sale.\n"
+                    "• Low stock alerts will appear automatically.\n\n"
+                    "📊 *Reports*\n"
+                    "• Daily, weekly, and monthly sales summaries are available.\n"
+                    "• Owners can see all reports, Shopkeepers have limited access.\n\n"
+                    "⚠️ *Common Issues*\n"
+                    "• If the bot is unresponsive, type /start to reset.\n"
+                    "• Always enter details in the format shown when prompted.\n\n"
+                    "👨‍💻 Need more help? Contact support."
+                )
+                kb_dict = {
+                   "inline_keyboard": [
+                        [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
+                    ]
+                }
+                send_message(chat_id, help_text, kb_dict)
 
-                    # -------------------- Help --------------------
-                    elif action == "help":
-                        help_text = (
-                            "❓ *Help & FAQs*\n\n"
-                            "Here are some things you should know:\n\n"
-                            "📌 *Getting Started*\n"
-                            "• Owners must first *setup the shop* from the Main Menu.\n"
-                            "• Shopkeepers can directly *record sales* and *check stock*.\n\n"
-                            "🛒 *Managing Products*\n"
-                            "• Use *Add Product* to register new items (Name, Price, Quantity).\n"
-                            "• Use *Update Product* to adjust details or restock.\n\n"
-                            "📦 *Stock Management*\n"
-                            "• Always check *View Stock* before recording a sale.\n"
-                            "• Low stock alerts will appear automatically.\n\n"
-                            "📊 *Reports*\n"
-                            "• Daily, weekly, and monthly sales summaries are available.\n"
-                            "• Owners can see all reports, Shopkeepers have limited access.\n\n"
-                            "⚠️ *Common Issues*\n"
-                            "• If the bot is unresponsive, type /start to reset.\n"
-                            "• Always enter details in the format shown when prompted.\n\n"
-                            "👨‍💻 Need more help? Contact support."
-                        )
-                        kb_dict = {
-                           "inline_keyboard": [
-                                [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
-                            ]
-                        }
-                        send_message(chat_id, help_text, kb_dict)
-
-                    # -------------------- Back to Menu --------------------
-                    elif action == "back_to_menu":
-                        kb_dict = main_menu(role=user.role)
-                        send_message(chat_id, "🏠 Main Menu:", kb_dict)
+            # -------------------- Back to Menu --------------------
+            elif action == "back_to_menu":
+               kb_dict = main_menu(role=user.role)
+               send_message(chat_id, "🏠 Main Menu:", kb_dict)
 
         return {"ok": True}
 
