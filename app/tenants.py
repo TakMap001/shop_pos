@@ -3,6 +3,16 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import sessionmaker
 import psycopg2
+from app.models.central_models import Base as CentralBase
+from config import DATABASE_URL
+
+def create_central_db():
+    """
+    Ensures central DB tables exist at startup.
+    """
+    engine = create_engine(DATABASE_URL, echo=False, future=True, pool_pre_ping=True)
+    CentralBase.metadata.create_all(bind=engine)
+    print("✅ Central DB tables created")
 
 def create_tenant_db(tenant_db_url: str):
     """

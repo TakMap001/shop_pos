@@ -1,33 +1,26 @@
 import logging
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.orm import sessionmaker
 from config import DATABASE_URL
+from app.models.central_models import Base as CentralBase  # Central DB Base
+from app.models.models import User  # Users live in main models.py
 
 # -------------------- Logging Setup --------------------
 logger = logging.getLogger("database")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # -------------------- Engine & Session --------------------
-engine = create_engine(DATABASE_URL, echo=False, future=True)  # echo=False avoids clutter
+engine = create_engine(DATABASE_URL, echo=False, future=True, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
-Base = declarative_base()
-
-# -------------------- Import Central Models --------------------
-# Only central models live in central DB
-from app.models.central_models import Tenant  # The main central model
-from app.models.models import User  # User lives in main models.py
 
 # -------------------- Create Tables Safely --------------------
 def init_db():
-    """Initialize the main database if tables do not exist."""
+    """Initialize the central database tables (Tenant, User, etc.)."""
     try:
-        Base.metadata.create_all(bind=engine)
-        logger.info("✅ Main database tables created / verified successfully.")
+        CentralBase.metadata.create_all(bind=engine)
+        logger.info("✅ Central database tables created / verified successfully.")
     except Exception as e:
-        logger.error(f"❌ Failed to initialize main database: {e}")
-
-# Call once at import time
-init_db()
+        logger.error(f"❌ Failed to initialize central database: {e}")
 
 # -------------------- Dependency --------------------
 def get_db():

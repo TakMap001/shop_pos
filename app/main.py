@@ -1,17 +1,17 @@
 from fastapi import FastAPI
-from app.routes import products, views, sales, reports, users, whatsapp, telegram  # Telegram router included
+from app.routes import products, views, sales, reports, users, whatsapp, telegram
 import uvicorn
 import os
 
 # ✅ Import central DB init function
-from app.database import init_db  
+from app.tenants import create_central_db
 
 app = FastAPI(title="POS Backend API")
 
 # -------------------- Initialize Central DB Tables --------------------
 @app.on_event("startup")
 def startup_event():
-    init_db()  # creates central tables (Tenant)
+    create_central_db()  # creates central tables (Tenant)
     print("✅ Central database initialized successfully.")
 
 # -------------------- Include Routers --------------------
