@@ -79,6 +79,17 @@ def main_menu(role: str):
     return {"inline_keyboard": keyboard}
 
 
+def build_keyboard(kb_dict):
+    """Convert our menu dict into a Telebot InlineKeyboardMarkup."""
+    keyboard = types.InlineKeyboardMarkup()
+    for row in kb_dict["inline_keyboard"]:
+        buttons = [
+            types.InlineKeyboardButton(text=b["text"], callback_data=b["callback_data"])
+            for b in row
+        ]
+        keyboard.add(*buttons)   # ✅ use add() instead of row()
+    return keyboard
+
 def help_text():
     return (
         "ℹ️ *Help / Instructions*\n\n"
@@ -669,7 +680,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     action = data["callback_query"]["data"]
                     callback_id = data["callback_query"]["id"]
 
-                    # ✅ Answer the callback query to remove the loading state
+                    # ✅ Always answer callback query to clear Telegram's "loading..."
                     bot.answer_callback_query(callback_query_id=callback_id)
 
                     user = get_user(chat_id)
@@ -690,25 +701,15 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         user.tenant_db_url = tenant_db_url
                         db.commit()
 
-                        # Send main menu
                         kb_dict = main_menu(role=user.role)
-                        keyboard = types.InlineKeyboardMarkup()
-                        for row in kb_dict["inline_keyboard"]:
-                            buttons = [types.InlineKeyboardButton(text=b["text"], callback_data=b["callback_data"]) for b in row]
-                            keyboard.row(*buttons)
-                        send_message(chat_id, "🏠 Main Menu:", keyboard)
+                        send_message(chat_id, "🏠 Main Menu:", build_keyboard(kb_dict))
 
                     elif action == "role_keeper":
                         user.role = "keeper"
                         db.commit()
 
-                        # Send main menu
                         kb_dict = main_menu(role=user.role)
-                        keyboard = types.InlineKeyboardMarkup()
-                        for row in kb_dict["inline_keyboard"]:
-                            buttons = [types.InlineKeyboardButton(text=b["text"], callback_data=b["callback_data"]) for b in row]
-                            keyboard.row(*buttons)
-                        send_message(chat_id, "🏠 Main Menu:", keyboard)
+                        send_message(chat_id, "🏠 Main Menu:", build_keyboard(kb_dict))
 
                     # -------------------- Shop Setup --------------------
                     elif action == "setup_shop":
@@ -764,11 +765,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     # -------------------- Navigation --------------------
                     elif action == "back_to_menu":
                         kb_dict = main_menu(role=role)
-                        keyboard = types.InlineKeyboardMarkup()
-                        for row in kb_dict["inline_keyboard"]:
-                            buttons = [types.InlineKeyboardButton(text=b["text"], callback_data=b["callback_data"]) for b in row]
-                            keyboard.row(*buttons)
-                        send_message(chat_id, "🏠 Main Menu:", keyboard)
+                        send_message(chat_id, "🏠 Main Menu:", build_keyboard(kb_dict))
 
         return {"ok": True}
 
