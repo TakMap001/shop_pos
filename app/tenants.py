@@ -2,6 +2,7 @@
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.orm import sessionmaker
+import psycopg2
 
 def create_tenant_db(tenant_db_url: str):
     """
@@ -15,8 +16,14 @@ def create_tenant_db(tenant_db_url: str):
         with engine.connect() as conn:
             conn.execute(text(f'CREATE DATABASE "{db_name}"'))
             print(f"✅ Database {db_name} created successfully")
-    except ProgrammingError:
-        print(f"⚠️ Database {db_name} already exists")
+    except ProgrammingError as e:
+        # Check Postgres error code 42P04 = duplicate_database
+        if hasattr(e.orig, "pgcode") and e.orig.pgcode == "42P04":
+            # Database already exists, silently pass
+            pass
+        else:
+            # Re-raise other errors
+            raise
 
 def get_engine_for_tenant(tenant_db_url: str):
     """

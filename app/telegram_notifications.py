@@ -18,12 +18,17 @@ def send_message(user_id, text, keyboard=None):
     try:
         from telebot import types
 
+        markup = None
         if isinstance(keyboard, types.InlineKeyboardMarkup):
             markup = keyboard
         elif keyboard and "inline_keyboard" in keyboard:
-            markup = types.InlineKeyboardMarkup(keyboard["inline_keyboard"])
-        else:
-            markup = None
+            # Convert dict to InlineKeyboardMarkup
+            markup = types.InlineKeyboardMarkup()
+            for row in keyboard["inline_keyboard"]:
+                buttons = []
+                for btn in row:
+                    buttons.append(types.InlineKeyboardButton(text=btn["text"], callback_data=btn["callback_data"]))
+                markup.row(*buttons)
 
         bot.send_message(user_id, text, reply_markup=markup, parse_mode="Markdown")
     except Exception as e:
