@@ -680,7 +680,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     action = data["callback_query"]["data"]
                     callback_id = data["callback_query"]["id"]
 
-                    # ✅ Always answer callback query to clear Telegram's "loading..."
+                    # ✅ Answer the callback query to remove the loading spinner
                     bot.answer_callback_query(callback_query_id=callback_id)
 
                     user = get_user(chat_id)
@@ -701,15 +701,17 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         user.tenant_db_url = tenant_db_url
                         db.commit()
 
+                        # Send main menu (dict style)
                         kb_dict = main_menu(role=user.role)
-                        send_message(chat_id, "🏠 Main Menu:", build_keyboard(kb_dict))
+                        send_message(chat_id, "🏠 Main Menu:", kb_dict)
 
                     elif action == "role_keeper":
                         user.role = "keeper"
                         db.commit()
 
+                        # Send main menu (dict style)
                         kb_dict = main_menu(role=user.role)
-                        send_message(chat_id, "🏠 Main Menu:", build_keyboard(kb_dict))
+                        send_message(chat_id, "🏠 Main Menu:", kb_dict)
 
                     # -------------------- Shop Setup --------------------
                     elif action == "setup_shop":
@@ -734,9 +736,12 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     elif action == "view_stock":
                         if tenant_db:
                             stock_list = get_stock_list(tenant_db)
-                            keyboard = types.InlineKeyboardMarkup()
-                            keyboard.add(types.InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_menu"))
-                            send_message(chat_id, stock_list, keyboard)
+                            kb_dict = {
+                                "inline_keyboard": [
+                                    [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
+                                ]
+                            }
+                            send_message(chat_id, stock_list, kb_dict)
 
                     # -------------------- Reports --------------------
                     elif action.startswith("report_"):
@@ -745,13 +750,17 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         else:
                             if tenant_db:
                                 report_text = generate_report(tenant_db, action)
-                                keyboard = types.InlineKeyboardMarkup()
-                                keyboard.add(types.InlineKeyboardButton("⬅️ Back to Menu", callback_data="back_to_menu"))
-                                send_message(chat_id, report_text, keyboard)
+                                kb_dict = {
+                                    "inline_keyboard": [
+                                        [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
+                                    ]
+                                }
+                                send_message(chat_id, report_text, kb_dict)
 
                     # -------------------- Help --------------------
                     elif action == "help":
-                        send_message(chat_id,
+                        send_message(
+                            chat_id,
                             "ℹ️ *Help Menu*\n\n"
                             "🏪 Setup My Shop – Set shop name and details\n"
                             "➕ Add Product – Add a new product to stock\n"
@@ -765,7 +774,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     # -------------------- Navigation --------------------
                     elif action == "back_to_menu":
                         kb_dict = main_menu(role=role)
-                        send_message(chat_id, "🏠 Main Menu:", build_keyboard(kb_dict))
+                        send_message(chat_id, "🏠 Main Menu:", kb_dict)
 
         return {"ok": True}
 
