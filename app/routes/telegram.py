@@ -675,13 +675,16 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, f"⚠️ Invalid input or action not allowed for your role ({role}). Type *menu* to see instructions.")
 
                 # -------------------- Handle callbacks --------------------
-                elif "callback_query" in data:
+                if "callback_query" in data:
                     chat_id = data["callback_query"]["message"]["chat"]["id"]
                     action = data["callback_query"]["data"]
                     callback_id = data["callback_query"]["id"]
 
-                    # ✅ Answer the callback query to remove the loading spinner
-                    bot.answer_callback_query(callback_query_id=callback_id)
+                    # ✅ Explicitly answer callback to remove spinner
+                    requests.post(
+                        f"{TELEGRAM_API_URL}/answerCallbackQuery",
+                        json={"callback_query_id": callback_id}
+                    )
 
                     user = get_user(chat_id)
                     if not user:
@@ -701,7 +704,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         user.tenant_db_url = tenant_db_url
                         db.commit()
 
-                        # Send main menu (dict style)
                         kb_dict = main_menu(role=user.role)
                         send_message(chat_id, "🏠 Main Menu:", kb_dict)
 
@@ -709,7 +711,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         user.role = "keeper"
                         db.commit()
 
-                        # Send main menu (dict style)
                         kb_dict = main_menu(role=user.role)
                         send_message(chat_id, "🏠 Main Menu:", kb_dict)
 
@@ -748,32 +749,46 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         if role != "owner" and action not in ["report_daily", "report_weekly", "report_monthly"]:
                             send_message(chat_id, "❌ Only owners can access this report.")
                         else:
-                            if tenant_db:
-                                report_text = generate_report(tenant_db, action)
-                                kb_dict = {
-                                    "inline_keyboard": [
-                                        [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
-                                    ]
-                                }
-                                send_message(chat_id, report_text, kb_dict)
+                            report_text = generate_report(tenant_db, action)
+                            kb_dict = {
+                                "inline_keyboard": [
+                                    [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
+                                ]
+                            }
+                            send_message(chat_id, report_text, kb_dict)
 
                     # -------------------- Help --------------------
                     elif action == "help":
-                        send_message(
-                            chat_id,
-                            "ℹ️ *Help Menu*\n\n"
-                            "🏪 Setup My Shop – Set shop name and details\n"
-                            "➕ Add Product – Add a new product to stock\n"
-                            "✏️ Update Product – Edit existing product\n"
-                            "🛒 Record Sale – Record a customer sale\n"
-                            "📦 View Stock – Show all products in stock\n"
-                            "📊 Reports – View sales/stock reports\n"
-                            "👑 Owner vs 🛍 Shopkeeper – Different permissions"
+                        help_text = (
+                            "❓ *Help & FAQs*\n\n"
+                            "Here are some things you should know:\n\n"
+                            "📌 *Getting Started*\n"
+                            "• Owners must first *setup the shop* from the Main Menu.\n"
+                            "• Shopkeepers can directly *record sales* and *check stock*.\n\n"
+                            "🛒 *Managing Products*\n"
+                            "• Use *Add Product* to register new items (Name, Price, Quantity).\n"
+                            "• Use *Update Product* to adjust details or restock.\n\n"
+                            "📦 *Stock Management*\n"
+                            "• Always check *View Stock* before recording a sale.\n"
+                            "• Low stock alerts will appear automatically.\n\n"
+                            "📊 *Reports*\n"
+                            "• Daily, weekly, and monthly sales summaries are available.\n"
+                            "• Owners can see all reports, Shopkeepers have limited access.\n\n"
+                            "⚠️ *Common Issues*\n"
+                            "• If the bot is unresponsive, type /start to reset.\n"
+                            "• Always enter details in the format shown when prompted.\n\n"
+                            "👨‍💻 Need more help? Contact support."
                         )
+                        kb_dict = {
+                           "inline_keyboard": [
+                                [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
+                            ]
+                        }
+                        send_message(chat_id, help_text, kb_dict)
 
-                    # -------------------- Navigation --------------------
+                    # -------------------- Back to Menu --------------------
                     elif action == "back_to_menu":
-                        kb_dict = main_menu(role=role)
+                        kb_dict = main_menu(role=user.role)
                         send_message(chat_id, "🏠 Main Menu:", kb_dict)
 
         return {"ok": True}
