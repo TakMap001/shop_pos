@@ -583,7 +583,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             role = user.role
             tenant_db = get_tenant_session(user)
-            if not tenant_db and role:
+            if not tenant_db and role == "owner":
                 send_message(chat_id, "❌ No tenant DB found. Please register as owner first.")
                 return {"ok": True}
 
@@ -691,7 +691,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         field = data["field"]
                         new_value = text.strip()
 
-                        # Validate based on field type
                         if field == "price":
                             try:
                                 new_value = float(new_value)
@@ -706,7 +705,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                 send_message(chat_id, "❌ Invalid quantity. Please enter a number:")
                                 return {"ok": True}
 
-                        # Save update
                         try:
                             update_product(tenant_db, chat_id, data["id"], field, new_value)
                             send_message(chat_id, f"✅ Product {field} updated successfully.")
@@ -714,7 +712,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             send_message(chat_id, f"⚠️ Failed to update product: {str(e)}")
 
                         user_states.pop(chat_id)
-
                     return {"ok": True}
 
                 # -------------------- Record Sale --------------------
@@ -752,11 +749,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     f"⚠️ Invalid input or action not allowed for your role ({role}). Type *menu* to see instructions."
                 )
 
+
         # -------------------- Handle callbacks --------------------
         if "callback_query" in data:
             chat_id = data["callback_query"]["message"]["chat"]["id"]
             action = data["callback_query"]["data"]
             callback_id = data["callback_query"]["id"]
+
             # ✅ Explicitly answer callback to remove spinner
             requests.post(
                 f"{TELEGRAM_API_URL}/answerCallbackQuery",
@@ -802,7 +801,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 user_states[chat_id] = {"action": "awaiting_product"}
 
             elif action == "update_product":
-                send_message(chat_id, "✏️ Please enter the product update in the format:\n\n`ProductID, NewName, NewPrice, NewQuantity`")
+                send_message(chat_id, "✏️ Please enter the product update in the format:\n\n`ProductID, NewName, NewPrice, NewQuantity`\n\n"
+                                      "👉 You can leave a field blank if not updating it.")
                 user_states[chat_id] = {"action": "awaiting_update"}
 
             # -------------------- Sales --------------------
@@ -844,7 +844,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     "• Shopkeepers can directly *record sales* and *check stock*.\n\n"
                     "🛒 *Managing Products*\n"
                     "• Use *Add Product* to register new items (Name, Price, Quantity).\n"
-                    "• Use *Update Product* to adjust details or restock.\n\n"
+                    "• Use *Update Product* to adjust details (you can update just price or quantity).\n\n"
                     "📦 *Stock Management*\n"
                     "• Always check *View Stock* before recording a sale.\n"
                     "• Low stock alerts will appear automatically.\n\n"
@@ -857,7 +857,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     "👨‍💻 Need more help? Contact support."
                 )
                 kb_dict = {
-                   "inline_keyboard": [
+                    "inline_keyboard": [
                         [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
                     ]
                 }
@@ -865,8 +865,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Back to Menu --------------------
             elif action == "back_to_menu":
-               kb_dict = main_menu(role=user.role)
-               send_message(chat_id, "🏠 Main Menu:", kb_dict)
+                kb_dict = main_menu(role=user.role)
+                send_message(chat_id, "🏠 Main Menu:", kb_dict)
 
         return {"ok": True}
 
