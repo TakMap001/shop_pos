@@ -599,6 +599,14 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     if step == 1:  # Shop Name
                         shop_name = text.strip()
                         if shop_name:
+                            # Check if shop name exists in tenant DB
+                            existing_tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
+                            if existing_tenant and existing_tenant.store_name:
+                                send_message(
+                                    chat_id,
+                                    f"⚠️ You already have a shop named '{existing_tenant.store_name}'. "
+                                    f"Type the same name to confirm or enter a new one:"
+                                )
                             data["name"] = shop_name
                             user_states[chat_id] = {"action": action, "step": 2, "data": data}
                             send_message(chat_id, "📍 Now enter the shop location:")
@@ -618,28 +626,37 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         contact = text.strip()
                         if contact:
                             data["contact"] = contact
+                            # Save or update shop info
                             tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
                             if tenant:
                                 tenant.store_name = data["name"]
                                 tenant.location = data["location"]
                                 tenant.contact = data["contact"]
-                                db.commit()
-
-                                # 1️⃣ First send confirmation
-                                send_message(
-                                    chat_id,
-                                    f"✅ Shop information saved successfully!\n\n🏪 {data['name']}\n📍 {data['location']}\n📞 {data['contact']}"
+                            else:
+                                tenant = Tenant(
+                                    telegram_owner_id=chat_id,
+                                    store_name=data["name"],
+                                    location=data["location"],
+                                    contact=data["contact"]
                                 )
+                                db.add(tenant)
+                            db.commit()
 
-                                # 2️⃣ Then show main menu
-                                kb_dict = main_menu(role="owner")
-                                send_message(chat_id, "🏠 Main Menu:", kb_dict)
+                            send_message(
+                                chat_id,
+                                f"✅ Shop info saved!\n\n🏪 {data['name']}\n📍 {data['location']}\n📞 {data['contact']}"
+                            )
+                            # Go to Main Menu
+                            kb_dict = main_menu(role="owner")
+                            send_message(chat_id, "🏠 Main Menu:", kb_dict)
 
+                            # Clear user state
                             user_states.pop(chat_id)
                         else:
                             send_message(chat_id, "❌ Contact cannot be empty. Please enter the shop contact number:")
 
                     return {"ok": True}
+
 
                 # -------------------- Add Product --------------------
                 elif action == "awaiting_product":
