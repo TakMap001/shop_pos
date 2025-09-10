@@ -594,8 +594,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 step = state.get("step", 1)
                 data = state.get("data", {})
 
-                # -------------------- Shop Setup --------------------
-                if action == "setup_shop":
+                # -------------------- Shop Setup (Owner only) --------------------
+                if action == "setup_shop" and role == "owner":
                     if step == 1:  # Shop Name
                         shop_name = text.strip()
                         if shop_name:
@@ -624,8 +624,10 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                 tenant.location = data["location"]
                                 tenant.contact = data["contact"]
                                 db.commit()
-                                send_message(chat_id,
-                                    f"✅ Shop setup complete!\n\n🏪 {data['name']}\n📍 {data['location']}\n📞 {data['contact']}")
+                                send_message(
+                                    chat_id,
+                                    f"✅ Shop setup complete!\n\n🏪 {data['name']}\n📍 {data['location']}\n📞 {data['contact']}"
+                                )
                                 main_menu(chat_id, role="owner")
                             user_states.pop(chat_id)
                         else:
@@ -745,8 +747,10 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             if text.lower() in ["/start", "menu"]:
                 role_menu(chat_id)
             else:
-                send_message(chat_id,
-                    f"⚠️ Invalid input or action not allowed for your role ({role}). Type *menu* to see instructions.")
+                send_message(
+                    chat_id,
+                    f"⚠️ Invalid input or action not allowed for your role ({role}). Type *menu* to see instructions."
+                )
 
         # -------------------- Handle callbacks --------------------
         if "callback_query" in data:
