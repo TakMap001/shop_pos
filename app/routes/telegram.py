@@ -589,90 +589,164 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Multi-step flows --------------------
             if chat_id in user_states:
-                state = user_states[chat_id]["action"]
+                state = user_states[chat_id]
+                action = state.get("action")
+                step = state.get("step", 1)
+                data = state.get("data", {})
 
-                if state == "awaiting_shop_name":
-                    shop_name = text.strip()
-                    if shop_name:
-                        # Save shop name to Tenant DB or central DB
-                        tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
-                        if tenant:
-                            tenant.store_name = shop_name
-                            db.commit()
-                            send_message(chat_id, f"🏪 Shop name set to: {shop_name}")
-                            main_menu(chat_id, role="owner")
+                # -------------------- Shop Setup --------------------
+                if action == "setup_shop":
+                    if step == 1:  # Shop Name
+                        shop_name = text.strip()
+                        if shop_name:
+                            data["name"] = shop_name
+                            user_states[chat_id] = {"action": action, "step": 2, "data": data}
+                            send_message(chat_id, "📍 Now enter the shop location:")
+                        else:
+                            send_message(chat_id, "❌ Shop name cannot be empty. Please enter your shop name:")
+
+                    elif step == 2:  # Shop Location
+                        location = text.strip()
+                        if location:
+                            data["location"] = location
+                            user_states[chat_id] = {"action": action, "step": 3, "data": data}
+                            send_message(chat_id, "📞 Finally, enter the shop contact number:")
+                        else:
+                            send_message(chat_id, "❌ Location cannot be empty. Please enter your shop location:")
+
+                    elif step == 3:  # Shop Contact
+                        contact = text.strip()
+                        if contact:
+                            data["contact"] = contact
+                            tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
+                            if tenant:
+                                tenant.store_name = data["name"]
+                                tenant.location = data["location"]
+                                tenant.contact = data["contact"]
+                                db.commit()
+                                send_message(chat_id,
+                                    f"✅ Shop setup complete!\n\n🏪 {data['name']}\n📍 {data['location']}\n📞 {data['contact']}")
+                                main_menu(chat_id, role="owner")
+                            user_states.pop(chat_id)
+                        else:
+                            send_message(chat_id, "❌ Contact cannot be empty. Please enter the shop contact number:")
+
+                    return {"ok": True}
+
+                # -------------------- Add Product --------------------
+                elif action == "awaiting_product":
+                    if step == 1:  # Product Name
+                        product_name = text.strip()
+                        if product_name:
+                            data["name"] = product_name
+                            user_states[chat_id] = {"action": action, "step": 2, "data": data}
+                            send_message(chat_id, "💲 Enter product price:")
+                        else:
+                            send_message(chat_id, "❌ Product name cannot be empty. Please enter again:")
+
+                    elif step == 2:  # Product Price
+                        try:
+                            price = float(text.strip())
+                            data["price"] = price
+                            user_states[chat_id] = {"action": action, "step": 3, "data": data}
+                            send_message(chat_id, "📦 Enter product quantity:")
+                        except ValueError:
+                            send_message(chat_id, "❌ Invalid price. Please enter a number:")
+
+                    elif step == 3:  # Product Quantity
+                        try:
+                            qty = int(text.strip())
+                            data["quantity"] = qty
+                            add_product(tenant_db, chat_id, data)
+                            send_message(chat_id, f"✅ Product *{data['name']}* added successfully.")
+                            user_states.pop(chat_id)
+                        except ValueError:
+                            send_message(chat_id, "❌ Invalid quantity. Please enter a number:")
+
+                    return {"ok": True}
+
+                # -------------------- Update Product --------------------
+                elif action == "awaiting_update":
+                    if step == 1:  # Product ID
+                        try:
+                            product_id = int(text.strip())
+                            data["id"] = product_id
+                            user_states[chat_id] = {"action": action, "step": 2, "data": data}
+                            send_message(chat_id, "✏️ Enter the field to update (name, price, quantity):")
+                        except ValueError:
+                            send_message(chat_id, "❌ Invalid product ID. Please enter a number:")
+
+                    elif step == 2:  # Field to Update
+                        field = text.strip().lower()
+                        if field in ["name", "price", "quantity"]:
+                            data["field"] = field
+                            user_states[chat_id] = {"action": action, "step": 3, "data": data}
+                            send_message(chat_id, f"✏️ Enter new value for {field}:")
+                        else:
+                            send_message(chat_id, "❌ Invalid field. Choose: name, price, or quantity.")
+
+                    elif step == 3:  # New Value
+                        field = data["field"]
+                        new_value = text.strip()
+
+                        # Validate based on field type
+                        if field == "price":
+                            try:
+                                new_value = float(new_value)
+                            except ValueError:
+                                send_message(chat_id, "❌ Invalid price. Please enter a number:")
+                                return {"ok": True}
+
+                        elif field == "quantity":
+                            try:
+                                new_value = int(new_value)
+                            except ValueError:
+                                send_message(chat_id, "❌ Invalid quantity. Please enter a number:")
+                                return {"ok": True}
+
+                        # Save update
+                        try:
+                            update_product(tenant_db, chat_id, data["id"], field, new_value)
+                            send_message(chat_id, f"✅ Product {field} updated successfully.")
+                        except Exception as e:
+                            send_message(chat_id, f"⚠️ Failed to update product: {str(e)}")
+
                         user_states.pop(chat_id)
-                    else:
-                        send_message(chat_id, "❌ Shop name cannot be empty. Please enter your shop name:")
+
                     return {"ok": True}
 
-                elif state == "awaiting_product":
-                    try:
-                        add_product(tenant_db, chat_id, text)
-                        send_message(chat_id, "✅ Product added successfully.")
-                    except Exception as e:
-                        send_message(chat_id, f"⚠️ Failed to add product: {str(e)}")
-                    user_states.pop(chat_id)
-                    return {"ok": True}
+                # -------------------- Record Sale --------------------
+                elif action == "awaiting_sale":
+                    if step == 1:  # Product ID
+                        try:
+                            product_id = int(text.strip())
+                            data["id"] = product_id
+                            user_states[chat_id] = {"action": action, "step": 2, "data": data}
+                            send_message(chat_id, "📦 Enter quantity sold:")
+                        except ValueError:
+                            send_message(chat_id, "❌ Invalid product ID. Please enter a number:")
 
-                elif state == "awaiting_update":
-                    try:
-                        update_product(tenant_db, chat_id, text)
-                        send_message(chat_id, "✅ Product updated successfully.")
-                    except Exception as e:
-                        send_message(chat_id, f"⚠️ Failed to update product: {str(e)}")
-                    user_states.pop(chat_id)
-                    return {"ok": True}
+                    elif step == 2:  # Quantity
+                        try:
+                            qty = int(text.strip())
+                            data["quantity"] = qty
+                            record_sale(tenant_db, chat_id, data)
+                            send_message(chat_id, "✅ Sale recorded successfully.")
+                            user_states.pop(chat_id)
+                        except ValueError:
+                            send_message(chat_id, "❌ Invalid quantity. Please enter a number:")
+                        except Exception as e:
+                            send_message(chat_id, f"⚠️ Failed to record sale: {str(e)}")
+                            user_states.pop(chat_id)
 
-                elif state == "awaiting_sale":
-                    try:
-                        record_sale(tenant_db, chat_id, text)
-                        send_message(chat_id, "✅ Sale recorded successfully.")
-                    except Exception as e:
-                        send_message(chat_id, f"⚠️ Failed to record sale: {str(e)}")
-                    user_states.pop(chat_id)
                     return {"ok": True}
 
             # -------------------- Commands --------------------
             if text.lower() in ["/start", "menu"]:
                 role_menu(chat_id)
             else:
-                handled = False
-
-                if role == "owner":
-                    try:
-                        parse_input(text, 3)
-                        add_product(tenant_db, chat_id, text)
-                        handled = True
-                    except Exception as e:
-                        print("⚠️ add_product failed:", str(e))
-
-                    if not handled:
-                        try:
-                            parse_input(text, 4)
-                            update_product(tenant_db, chat_id, text)
-                            handled = True
-                        except Exception as e:
-                            print("⚠️ update_product failed:", str(e))
-
-                    if not handled:
-                        try:
-                            parse_input(text, 2)
-                            register_new_user(db, chat_id, text, role="keeper")
-                            handled = True
-                        except Exception as e:
-                            print("⚠️ register_new_user failed:", str(e))
-
-                if not handled:
-                    try:
-                        parse_input(text, 2)
-                        record_sale(tenant_db, chat_id, text)
-                        handled = True
-                    except Exception as e:
-                        print("⚠️ record_sale failed:", str(e))
-
-                if not handled:
-                    send_message(chat_id, f"⚠️ Invalid input or action not allowed for your role ({role}). Type *menu* to see instructions.")
+                send_message(chat_id,
+                    f"⚠️ Invalid input or action not allowed for your role ({role}). Type *menu* to see instructions.")
 
         # -------------------- Handle callbacks --------------------
         if "callback_query" in data:
