@@ -638,6 +638,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                     tenant_id=str(uuid.uuid4()),
                                     telegram_owner_id=chat_id,
                                     store_name=data["name"],
+                                    database_url="placeholder_db_url",
                                     location=data["location"],
                                     contact=data["contact"]
                                 )
