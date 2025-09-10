@@ -14,6 +14,7 @@ from app.telegram_notifications import notify_low_stock, notify_top_product, not
 from app.tenants import create_tenant_db, get_engine_for_tenant, get_session_for_tenant
 from config import DATABASE_URL
 from telebot import types
+import uuid 
 
 router = APIRouter()
 
@@ -634,6 +635,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                 tenant.contact = data["contact"]
                             else:
                                 tenant = Tenant(
+                                    tenant_id=str(uuid.uuid4()),
                                     telegram_owner_id=chat_id,
                                     store_name=data["name"],
                                     location=data["location"],
