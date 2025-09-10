@@ -793,7 +793,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             # -------------------- Shop Setup --------------------
             elif action == "setup_shop":
                 send_message(chat_id, "🏪 Please enter your shop name:")
-                user_states[chat_id] = {"action": "awaiting_shop_name"}
+                user_states[chat_id] = {"action": "setup_shop"}
 
             # -------------------- Product Management --------------------
             elif action == "add_product":
