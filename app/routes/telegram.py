@@ -17,6 +17,9 @@ from telebot import types
 from app.telegram_notifications import notify_owner_of_new_shopkeeper
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_API_URL
 from app.tenant_db import create_tenant_db, get_session_for_tenant
+import random
+import string
+import bcrypt
 from app.core import get_db
 import uuid
 
@@ -31,6 +34,27 @@ if not TELEGRAM_BOT_TOKEN:
 
 
 # -------------------- Helpers --------------------
+
+def create_username(full_name: str) -> str:
+    """Generate a simple username from full name."""
+    base = "".join(full_name.lower().split())  # remove spaces
+    suffix = str(random.randint(100, 999))
+    return f"{base}{suffix}"
+
+def generate_password(length: int = 10) -> str:
+    """Generate a secure random password."""
+    chars = string.ascii_letters + string.digits + "!@#$%^&*()"
+    return "".join(random.choice(chars) for _ in range(length))
+
+def hash_password(password: str) -> str:
+    """Hash password using bcrypt."""
+    salt = bcrypt.gensalt()
+    hashed = bcrypt.hashpw(password.encode("utf-8"), salt)
+    return hashed.decode("utf-8")
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verify a plain password against a hashed password."""
+    return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
 
 def get_tenant_session(global_db: Session, owner_chat_id: int):
     tenant = global_db.query(Tenant).filter(Tenant.telegram_owner_id == owner_chat_id).first()
@@ -818,11 +842,14 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 elif step == 2:
                     # Step 2: collect email
                     data["email"] = text.strip()
-            
+                    if not data["email"]:
+                        send_message(chat_id, "❌ Please enter a valid email address:")
+                        return {"ok": True}
                     # Generate username and password
                     generated_username = create_username(data["full_name"])
                     generated_password = generate_password()
-            
+                    hashed_pw = hash_password(generated_password)
+                    
                     # Save user to DB
                     new_user = create_user(
                         chat_id=chat_id,
