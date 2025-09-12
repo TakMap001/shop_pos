@@ -769,13 +769,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # Prompt setup shop
             send_message(chat_id, "🏪 Let's set up your shop! Please enter the shop name:")
-            set_user_state(chat_id, {"action": "setup_shop", "step": 1, "data": {}})
+            user_states[chat_id] = {"action": action, "step": 1, "data": data}
             return {"ok": True}
 
         # -------------------- Returning user: prompt login --------------------
         if text == "/start" and user:
             send_message(chat_id, "👋 Welcome back! Please enter your password to continue:")
-            set_user_state(chat_id, {"action": "login", "step": 1, "data": {}})
+            user_states[chat_id] = {"action": "login", "step": 1, "data": {}}
             return {"ok": True}
 
         # -------------------- User States --------------------
