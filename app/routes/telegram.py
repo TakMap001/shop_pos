@@ -879,12 +879,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     hashed_pw = hash_password(generated_password)
                     
                     # Save user to DB
-                    new_user = create_user(
-                        chat_id=chat_id,
+                    new_user = User(
                         username=generated_username,
-                        password=hash_password(generated_password),
-                        full_name=data["full_name"],
-                        email=data["email"]
+                        name=data["full_name"],
+                        email=data["email"],
+                        password_hash=hash_password(generated_password),  # correct
+                        chat_id=chat_id,
+                        role="user"
                     )
                     save_user(new_user)
 
