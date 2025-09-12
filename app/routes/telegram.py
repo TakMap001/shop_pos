@@ -17,6 +17,7 @@ from telebot import types
 from app.telegram_notifications import notify_owner_of_new_shopkeeper
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_API_URL
 from app.tenant_db import create_tenant_db, get_session_for_tenant
+from app.core import get_db
 import uuid
 
 router = APIRouter()
@@ -37,6 +38,11 @@ def get_tenant_session(global_db: Session, owner_chat_id: int):
         return None
     SessionLocal = get_session_for_tenant(tenant.database_url)  # returns sessionmaker
     return SessionLocal()  # <-- create actual session
+
+
+def get_user_by_chat_id(chat_id: int):
+    db = next(get_db())  # get a DB session
+    return db.query(User).filter(User.tenant_db_url == str(chat_id)).first()
 
 def role_menu(chat_id):
     """Role selection menu (Owner vs Shopkeeper)."""
