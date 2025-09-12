@@ -20,7 +20,8 @@ from app.tenant_db import create_tenant_db, get_session_for_tenant
 import random
 import string
 import bcrypt
-from app.core import get_db
+from app.core import SessionLocal, get_db
+from sqlalchemy.exc import SQLAlchemyError
 import uuid
 
 router = APIRouter()
@@ -205,6 +206,33 @@ def parse_input(text: str, expected_parts: int):
         raise ValueError(f"Expected {expected_parts} parts, got {len(parts)}")
     
     return parts
+
+
+def create_user(chat_id: int, username: str, password: str, full_name: str, email: str) -> User:
+    """Create a new user object and save to DB."""
+    db = SessionLocal()
+    try:
+        user = User(
+            chat_id=chat_id,
+            username=username,
+            password_hash=password,
+            full_name=full_name,
+            email=email
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        return user
+    except SQLAlchemyError as e:
+        db.rollback()
+        print("❌ Failed to create user:", e)
+        return None
+    finally:
+        db.close()
+
+def save_user(user: User):
+    """Optional helper, if you already commit in create_user, this can be just pass."""
+    pass
 
 def register_new_user(central_db: Session, chat_id: int, text: str, role="keeper"):
     """
