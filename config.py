@@ -30,3 +30,7 @@ TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}" if TELEGR
 
 # --- FastAPI ---
 FASTAPI_SECRET_KEY = os.getenv("FASTAPI_SECRET_KEY", "supersecret")
+
+# --- Redis ---
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
