@@ -24,3 +24,4 @@ sqlalchemy
 python-multipart
 python-telegram-bot==20.6
 telebot
+redis

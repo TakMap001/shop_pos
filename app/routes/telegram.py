@@ -14,15 +14,19 @@ from app.telegram_notifications import notify_low_stock, notify_top_product, not
 from app.tenants import create_tenant_db, get_engine_for_tenant, get_session_for_tenant
 from config import DATABASE_URL
 from telebot import types
-import uuid 
+from app.telegram_notifications import notify_owner_of_new_shopkeeper
+from config import TELEGRAM_BOT_TOKEN, TELEGRAM_API_URL
+from app.tenant_db import create_tenant_db, get_session_for_tenant
+import uuid
 
 router = APIRouter()
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-
 # Tracks multi-step actions per user
 user_states = {}  # chat_id -> {"action": "awaiting_shop_name" / "awaiting_product" / "awaiting_update" / "awaiting_sale"}
+
+# Ensure the token is set
+if not TELEGRAM_BOT_TOKEN:
+    raise RuntimeError("TELEGRAM_BOT_TOKEN is not set in environment or .env file")
 
 
 # -------------------- Helpers --------------------
@@ -45,39 +49,30 @@ def role_menu(chat_id):
 
 
 def main_menu(role: str):
-    """
-    Returns a menu dictionary for the given role.
-    """
-    keyboard = []
-
-    if role.lower() == "owner":
-        keyboard.append([
-            {"text": "🏪 Setup My Shop", "callback_data": "setup_shop"}
-        ])
-        keyboard.append([
-            {"text": "➕ Add Product", "callback_data": "add_product"},
-            {"text": "✏️ Update Product", "callback_data": "update_product"},
-        ])
-        keyboard.append([
-            {"text": "🛒 Record Sale", "callback_data": "record_sale"},
-            {"text": "📦 View Stock", "callback_data": "view_stock"},
-        ])
-        keyboard.append([
-            {"text": "📊 Reports", "callback_data": "reports"},
-            {"text": "ℹ️ Help", "callback_data": "help"},
-        ])
+    if role == "owner":
+        kb_dict = {
+            "inline_keyboard": [
+                [{"text": "➕ Add Product", "callback_data": "add_product"}],
+                [{"text": "✏️ Update Product", "callback_data": "update_product"}],
+                [{"text": "📦 View Stock", "callback_data": "view_stock"}],
+                [{"text": "📊 Reports", "callback_data": "report_menu"}],
+                [{"text": "🏪 Update Shop Info", "callback_data": "setup_shop"}],
+                [{"text": "❓ Help", "callback_data": "help"}]
+            ]
+        }
+    elif role == "shopkeeper":
+        kb_dict = {
+            "inline_keyboard": [
+                [{"text": "➕ Add Product", "callback_data": "add_product"}],  # limited access
+                [{"text": "✏️ Update Product", "callback_data": "update_product"}],  # limited access
+                [{"text": "📦 View Stock", "callback_data": "view_stock"}],
+                [{"text": "❓ Help", "callback_data": "help"}]
+            ]
+        }
     else:
-        # Shopkeeper menu
-        keyboard.append([
-            {"text": "🛒 Record Sale", "callback_data": "record_sale"},
-            {"text": "📦 View Stock", "callback_data": "view_stock"},
-        ])
-        keyboard.append([
-            {"text": "📊 Reports", "callback_data": "reports"},
-            {"text": "ℹ️ Help", "callback_data": "help"},
-        ])
+        kb_dict = {"inline_keyboard": []}
 
-    return {"inline_keyboard": keyboard}
+    return kb_dict
 
 
 def build_keyboard(kb_dict):
@@ -90,6 +85,70 @@ def build_keyboard(kb_dict):
         ]
         keyboard.add(*buttons)   # ✅ use add() instead of row()
     return keyboard
+
+def products_page_view(tenant_db, page: int = 1, per_page: int = 5):
+    """
+    Returns (text, kb_dict) showing products for `tenant_db` for the given page.
+    Buttons:
+      - Each product has a button labeled: "ID {id}: {name}"
+        callback_data -> "select_product:{product_id}"
+      - Navigation row with Back / Next where applicable:
+        callback_data -> "products_page:{page}"
+      - Always include "⬅️ Back to Menu" button
+    """
+    if not tenant_db:
+        return "❌ No tenant DB connected.", {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
+
+    # total count
+    total = tenant_db.query(func.count(ProductORM.product_id)).scalar() or 0
+    total_pages = max(1, -(-total // per_page))  # ceil division
+
+    page = max(1, int(page))
+    if page > total_pages:
+        page = total_pages
+
+    offset = (page - 1) * per_page
+    products = (
+        tenant_db.query(ProductORM)
+        .order_by(ProductORM.product_id)
+        .offset(offset)
+        .limit(per_page)
+        .all()
+    )
+
+    if not products:
+        text = "📦 No products found."
+        kb = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
+        return text, kb
+
+    # Prepare textual listing with clear IDs
+    lines = [f"📦 *Products — Page {page}/{total_pages}*"]
+    for p in products:
+        # Ensure price cast to float for printing
+        price = float(p.price) if p.price is not None else 0.0
+        lines.append(f"ID {p.product_id}: {p.name} — ${price:.2f} — Stock: {p.stock}")
+
+    text = "\n".join(lines)
+
+    # Build keyboard: one button per product (compact label) + nav row + back to menu
+    kb_rows = []
+    for p in products:
+        label = f"ID {p.product_id}: {p.name}"
+        kb_rows.append([{"text": label, "callback_data": f"select_product:{p.product_id}"}])
+
+    nav_row = []
+    if page > 1:
+        nav_row.append({"text": "⬅️ Back", "callback_data": f"products_page:{page-1}"})
+    if page < total_pages:
+        nav_row.append({"text": "Next ➡️", "callback_data": f"products_page:{page+1}"})
+    if nav_row:
+        kb_rows.append(nav_row)
+
+    # Always show back to main menu
+    kb_rows.append([{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}])
+
+    kb_dict = {"inline_keyboard": kb_rows}
+    return text, kb_dict
 
 def help_text():
     return (
@@ -296,66 +355,95 @@ def update_product(db: Session, chat_id: int, text: str):
         send_message(chat_id, f"❌ Database error: {str(e)}")
 
 
-# -------------------- Sales --------------------
-def record_sale(db: Session, chat_id: int, text: str):
+def record_sale(db: Session, chat_id: int, data: dict):
     """
-    Record a sale in a tenant-aware way.
-    All queries affect only the current tenant DB.
+    Record a sale in tenant DB.
+    Expects `data` dict with keys:
+    - product_id
+    - unit_type (optional, defaults to product.unit_type)
+    - quantity
+    - payment_type (full/partial/credit)
+    - amount_paid (required if partial/credit)
+    - customer_name (optional, only if credit/change)
+    - customer_contact (optional, only if credit/change)
     """
     try:
-        product_name, qty_str = parse_input(text, 2)
-        qty = int(qty_str)
+        # -------------------- Fetch Product --------------------
+        product = db.query(ProductORM).filter(ProductORM.product_id == data["product_id"]).first()
+        if not product:
+            send_message(chat_id, f"❌ Product not found.")
+            return
+
+        qty = int(data.get("quantity", 0))
         if qty <= 0:
-            raise ValueError("Quantity must be > 0")
-    except Exception as e:
-        send_message(chat_id, f"❌ Invalid input: {str(e)}\nSend as: `product_name;quantity` or `product_name,quantity`")
-        return
+            send_message(chat_id, "❌ Quantity must be > 0")
+            return
+        if product.stock < qty:
+            send_message(chat_id, f"❌ Insufficient stock. Available: {product.stock}")
+            return
 
-    # Find product in tenant DB
-    product = db.query(ProductORM).filter(func.lower(ProductORM.name) == product_name.lower()).first()
-    if not product:
-        send_message(chat_id, f"❌ Product '{product_name}' not found.")
-        return
+        # -------------------- Fetch User --------------------
+        user = db.query(User).filter(User.user_id == chat_id).first()
+        if not user:
+            send_message(chat_id, "❌ User not found.")
+            return
 
-    # Check stock
-    if product.stock < qty:
-        send_message(chat_id, f"❌ Insufficient stock. Available: {product.stock}")
-        return
+        # -------------------- Payment Calculations --------------------
+        payment_type = data.get("payment_type", "full")
+        amount_paid = float(data.get("amount_paid", 0.0))
+        total_amount = float(product.price) * qty
 
-    # Find user in tenant DB
-    user = db.query(User).filter(User.user_id == chat_id).first()
-    if not user:
-        send_message(chat_id, "❌ No users available in the system.")
-        return
+        pending_amount = max(total_amount - amount_paid, 0.0)
+        change_left = max(amount_paid - total_amount, 0.0)
+        unit_type = data.get("unit_type", product.unit_type)
 
-    # Calculate total and create sale
-    total_amount = Decimal(product.price) * qty
-    sale = SaleORM(
-        user_id=user.user_id,
-        product_id=product.product_id,
-        quantity=qty,
-        total_amount=total_amount
-    )
-    product.stock -= qty
+        # -------------------- Save Customer (if credit/partial or change) --------------------
+        customer_id = None
+        if pending_amount > 0.0 or change_left > 0.0:
+            if data.get("customer_name") or data.get("customer_contact"):
+                customer = CustomerORM(
+                    name=data.get("customer_name"),
+                    contact=data.get("customer_contact")
+                )
+                db.add(customer)
+                db.flush()  # get customer_id before commit
+                customer_id = customer.customer_id
 
-    # Commit to DB
-    try:
+        # -------------------- Create Sale --------------------
+        sale = SaleORM(
+            user_id=user.user_id,
+            product_id=product.product_id,
+            unit_type=unit_type,
+            quantity=qty,
+            total_amount=total_amount,
+            payment_type=payment_type,
+            amount_paid=amount_paid,
+            pending_amount=pending_amount,
+            change_left=change_left,
+            customer_id=customer_id  # link only if credit/change
+        )
+
+        # -------------------- Update Stock --------------------
+        product.stock = max(product.stock - qty, 0)
+
+        # -------------------- Commit to DB --------------------
         db.add(sale)
         db.commit()
         db.refresh(sale)
+
+        # -------------------- Notify User --------------------
+        send_message(chat_id, f"✅ Sale recorded: {qty} × {product.name} ({unit_type}) = ${total_amount}")
+        send_message(chat_id, get_stock_list(db))
+
+        # -------------------- Telegram Notifications --------------------
+        notify_low_stock(db, product)
+        notify_top_product(db, product)
+        notify_high_value_sale(db, sale)
+
     except Exception as e:
         db.rollback()
-        send_message(chat_id, f"❌ Database error: {str(e)}")
-        return
+        send_message(chat_id, f"❌ Failed to record sale: {str(e)}")
 
-    # Notify user
-    send_message(chat_id, f"✅ Sale recorded: {qty} × {product.name} = ${total_amount}")
-    send_message(chat_id, get_stock_list(db))
-
-    # --- Telegram Notifications ---
-    notify_low_stock(db, product)
-    notify_top_product(db, product)
-    notify_high_value_sale(db, sale)
 
 # -------------------- Clean Tenant-Aware Reports --------------------
 def generate_report(db: Session, report_type: str, tenant_id: int = None):
@@ -540,17 +628,104 @@ def generate_report(db: Session, report_type: str, tenant_id: int = None):
             lines.append(f"{p.name}: Sold {total_sold}, Stock {p.stock}, Turnover Rate {turnover_rate:.2f}")
         return "\n".join(lines)
 
+    # -------------------- Credit List --------------------
+    elif report_type == "report_credits":
+        sales_with_credit = (
+            apply_tenant_filter(db.query(SaleORM), SaleORM)
+            .filter(SaleORM.pending_amount > 0)
+            .order_by(SaleORM.sale_date.desc())
+            .all()
+        )
+        if not sales_with_credit:
+            return "No outstanding credits."
+        lines = ["💳 *Credit List*"]
+        for s in sales_with_credit:
+            customer = db.query(CustomerORM).filter(CustomerORM.customer_id == s.customer_id).first()
+            if customer:
+                lines.append(
+                    f"{customer.name} ({customer.contact}): ${float(s.pending_amount)} pending for {s.quantity} × {s.unit_type} of {s.product.name}"
+                )
+        return "\n".join(lines)
+
+    # -------------------- Change List --------------------
+    elif report_type == "report_change":
+        sales_with_change = (
+            apply_tenant_filter(db.query(SaleORM), SaleORM)
+            .filter(SaleORM.change_left > 0)
+            .order_by(SaleORM.sale_date.desc())
+            .all()
+        )
+        if not sales_with_change:
+            return "No sales with change."
+        lines = ["💵 *Change List*"]
+        for s in sales_with_change:
+            customer = db.query(CustomerORM).filter(CustomerORM.customer_id == s.customer_id).first()
+            if customer:
+                lines.append(
+                    f"{customer.name} ({customer.contact}): ${float(s.change_left)} change for {s.quantity} × {s.unit_type} of {s.product.name}"
+                )
+        return "\n".join(lines)
+
     else:
         return "❌ Unknown report type."
 
-# -------------------- Webhook --------------------
 
+def report_menu_keyboard(role: str):
+    """Build the reports submenu with buttons."""
+    if role == "owner":
+        kb_dict = {
+            "inline_keyboard": [
+                [{"text": "📅 Daily Sales", "callback_data": "report_daily"}],
+                [{"text": "📆 Weekly Sales", "callback_data": "report_weekly"}],
+                [{"text": "📊 Monthly Sales per Product", "callback_data": "report_monthly"}],
+                [{"text": "⚠️ Low Stock Products", "callback_data": "report_low_stock"}],
+                [{"text": "🏆 Top Products", "callback_data": "report_top_products"}],
+                [{"text": "👥 Top Customers", "callback_data": "report_top_customers"}],
+                [{"text": "🔁 Top Repeat Customers", "callback_data": "report_top_repeat_customers"}],
+                [{"text": "💰 Average Order Value", "callback_data": "report_aov"}],
+                [{"text": "📦 Stock Turnover", "callback_data": "report_stock_turnover"}],
+                [{"text": "💳 Credit List", "callback_data": "report_credits"}],
+                [{"text": "💵 Change List", "callback_data": "report_change"}],
+                [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}],
+            ]
+        }
+    elif role == "shopkeeper":
+        # Only daily, weekly, monthly + credit/change
+        kb_dict = {
+            "inline_keyboard": [
+                [{"text": "📅 Daily Sales", "callback_data": "report_daily"}],
+                [{"text": "📆 Weekly Sales", "callback_data": "report_weekly"}],
+                [{"text": "📊 Monthly Sales per Product", "callback_data": "report_monthly"}],
+                [{"text": "💳 Credit List", "callback_data": "report_credits"}],
+                [{"text": "💵 Change List", "callback_data": "report_change"}],
+                [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}],
+            ]
+        }
+    else:
+        kb_dict = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
+
+    return kb_dict
+
+# -------------------- Webhook --------------------
 @router.post("/telegram/webhook")
 async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
     try:
         data = await request.json()
         print("📩 Incoming Telegram update:", data)
 
+        chat_id = None
+        text = ""
+        if "message" in data:
+            chat_id = data["message"]["chat"]["id"]
+            text = data["message"].get("text", "").strip()
+        elif "callback_query" in data:
+            chat_id = data["callback_query"]["message"]["chat"]["id"]
+            text = data["callback_query"]["data"]
+
+        if not chat_id:
+            return {"ok": True}
+
+        # -------------------- Helpers --------------------
         def get_user(chat_id: int):
             return db.query(User).filter(User.user_id == chat_id).first()
 
@@ -559,106 +734,162 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 return None
             return get_session_for_tenant(user.tenant_db_url)
 
-        # -------------------- Handle messages --------------------
-        if "message" in data:
-            chat_id = data["message"]["chat"]["id"]
-            text = data["message"].get("text", "").strip()
-            user = get_user(chat_id)
+        def generate_owner_credentials(chat_id):
+            password = generate_random_password()
+            return chat_id, password
 
-            if not user:
-                # Auto-register first-time user
-                new_user = User(
-                    user_id=chat_id,
-                    name=f"User{chat_id}",
-                    email=f"{chat_id}@example.com",
-                    password_hash="",
-                    role=None,
-                    tenant_db_url=None
-                )
-                db.add(new_user)
-                db.commit()
-                db.refresh(new_user)
+        def send_owner_credentials(chat_id, username, password):
+            send_message(chat_id,
+                         f"✅ Welcome! Your Owner credentials:\n\n"
+                         f"🆔 Username: {username}\n"
+                         f"🔑 Password: {password}")
 
-                role_menu(chat_id)
+        user = get_user(chat_id)
+
+        # -------------------- First-time user --------------------
+        if not user:
+            # Auto-generate owner credentials
+            username = str(chat_id)
+            password = generate_random_password()
+            new_user = User(
+                user_id=chat_id,
+                name=f"Owner{chat_id}",
+                username=username,
+                email=f"{chat_id}@example.com",
+                password_hash=hash_password(password),
+                role="owner",
+                tenant_db_url=None
+            )
+            db.add(new_user)
+            db.commit()
+            db.refresh(new_user)
+
+            # Send credentials to owner
+            send_owner_credentials(chat_id, username, password)
+
+            # Prompt setup shop
+            send_message(chat_id, "🏪 Let's set up your shop! Please enter the shop name:")
+            set_user_state(chat_id, {"action": "setup_shop", "step": 1, "data": {}})
+            return {"ok": True}
+
+        # -------------------- Returning user: prompt login --------------------
+        if text == "/start" and user:
+            send_message(chat_id, "👋 Welcome back! Please enter your password to continue:")
+            set_user_state(chat_id, {"action": "login", "step": 1, "data": {}})
+            return {"ok": True}
+
+        # -------------------- User States --------------------
+        if chat_id in user_states:
+            state = user_states[chat_id]
+            action = state.get("action")
+            step = state.get("step", 1)
+            data = state.get("data", {})
+
+            # -------------------- Login --------------------
+            if action == "login" and step == 1:
+                password_input = text.strip()
+                if verify_password(password_input, user.password_hash):
+                    send_message(chat_id, "✅ Login successful!")
+                    tenant_db = get_tenant_session(user)
+                    kb = main_menu(user.role)
+                    send_message(chat_id, "🏠 Main Menu:", kb)
+                    clear_user_state(chat_id)
+                else:
+                    send_message(chat_id, "❌ Incorrect password. Try again:")
                 return {"ok": True}
 
-            role = user.role
-            tenant_db = get_tenant_session(user)
-            if not tenant_db and role == "owner":
-                send_message(chat_id, "❌ No tenant DB found. Please register as owner first.")
-                return {"ok": True}
+            # -------------------- Shop Setup (Owner only) --------------------
+            elif action == "setup_shop" and user.role == "owner":
+                if step == 1:  # Shop Name
+                    shop_name = text.strip()
+                    if shop_name:
+                        data["name"] = shop_name
+                        user_states[chat_id] = {"action": action, "step": 2, "data": data}
+                        send_message(chat_id, "📍 Now enter the shop location:")
+                    else:
+                        send_message(chat_id, "❌ Shop name cannot be empty. Please enter your shop name:")
 
-            # -------------------- Multi-step flows --------------------
-            if chat_id in user_states:
-                state = user_states[chat_id]
-                action = state.get("action")
-                step = state.get("step", 1)
-                data = state.get("data", {})
+                elif step == 2:  # Shop Location
+                    location = text.strip()
+                    if location:
+                        data["location"] = location
+                        user_states[chat_id] = {"action": action, "step": 3, "data": data}
+                        send_message(chat_id, "📞 Finally, enter the shop contact number:")
+                    else:
+                        send_message(chat_id, "❌ Location cannot be empty. Please enter your shop location:")
 
-                # -------------------- Shop Setup (Owner only) --------------------
-                if action == "setup_shop" and role == "owner":
-                    if step == 1:  # Shop Name
-                        shop_name = text.strip()
-                        if shop_name:
-                            # Check if shop name exists in tenant DB
-                            existing_tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
-                            if existing_tenant and existing_tenant.store_name:
-                                send_message(
-                                    chat_id,
-                                    f"⚠️ You already have a shop named '{existing_tenant.store_name}'. "
-                                    f"Type the same name to confirm or enter a new one:"
-                                )
-                            data["name"] = shop_name
-                            user_states[chat_id] = {"action": action, "step": 2, "data": data}
-                            send_message(chat_id, "📍 Now enter the shop location:")
-                        else:
-                            send_message(chat_id, "❌ Shop name cannot be empty. Please enter your shop name:")
+                elif step == 3:  # Shop Contact
+                    contact = text.strip()
+                    if contact:
+                        data["contact"] = contact
 
-                    elif step == 2:  # Shop Location
-                        location = text.strip()
-                        if location:
-                            data["location"] = location
-                            user_states[chat_id] = {"action": action, "step": 3, "data": data}
-                            send_message(chat_id, "📞 Finally, enter the shop contact number:")
-                        else:
-                            send_message(chat_id, "❌ Location cannot be empty. Please enter your shop location:")
+                        # -------------------- Generate tenant DB URL --------------------
+                        tenant_db_url = create_tenant_db(chat_id)
+                        tenant_db = get_session_for_tenant(tenant_db_url)
 
-                    elif step == 3:  # Shop Contact
-                        contact = text.strip()
-                        if contact:
-                            data["contact"] = contact
-                            # Save or update shop info
-                            tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
-                            if tenant:
-                                tenant.store_name = data["name"]
-                                tenant.location = data["location"]
-                                tenant.contact = data["contact"]
-                            else:
-                                tenant = Tenant(
-                                    tenant_id=str(uuid.uuid4()),
-                                    telegram_owner_id=chat_id,
-                                    store_name=data["name"],
-                                    database_url="placeholder_db_url",
-                                    location=data["location"],
-                                    contact=data["contact"]
-                                )
-                                db.add(tenant)
-                            db.commit()
+                        tenant = Tenant(
+                            tenant_id=str(uuid.uuid4()),
+                            telegram_owner_id=chat_id,
+                            store_name=data["name"],
+                            database_url=tenant_db_url,
+                            location=data["location"],
+                            contact=contact
+                        )
+                        db.add(tenant)
 
-                            send_message(
-                                chat_id,
-                                f"✅ Shop info saved!\n\n🏪 {data['name']}\n📍 {data['location']}\n📞 {data['contact']}"
-                            )
-                            # Go to Main Menu
-                            kb_dict = main_menu(role="owner")
-                            send_message(chat_id, "🏠 Main Menu:", kb_dict)
+                        # Link owner to tenant DB
+                        user.tenant_db_url = tenant_db_url
+                        db.commit()
 
-                            # Clear user state
-                            user_states.pop(chat_id)
-                        else:
-                            send_message(chat_id, "❌ Contact cannot be empty. Please enter the shop contact number:")
+                        # Notify owner
+                        send_message(chat_id, f"✅ Shop info saved!\n\n🏪 {data['name']}\n📍 {data['location']}\n📞 {contact}")
 
-                    return {"ok": True}
+                        # Prompt to create Shopkeeper
+                        send_message(chat_id, "👤 Now create Shopkeeper login credentials.\n\nEnter a username for the shopkeeper:")
+                        user_states[chat_id] = {"action": "create_shopkeeper", "step": 1, "data": {}}
+                    else:
+                        send_message(chat_id, "❌ Contact cannot be empty. Enter shop contact number:")
+
+            # -------------------- Create Shopkeeper (Owner only) --------------------
+            elif action == "create_shopkeeper" and user.role == "owner":
+                tenant_db = get_tenant_session(user)
+                if step == 1:  # Username
+                    username = text.strip()
+                    if not username:
+                        send_message(chat_id, "❌ Username cannot be empty. Enter again:")
+                        return {"ok": True}
+                    data["username"] = username
+                    user_states[chat_id] = {"action": action, "step": 2, "data": data}
+                    send_message(chat_id, "🔑 Enter password for the shopkeeper:")
+
+                elif step == 2:  # Password
+                    password = text.strip()
+                    if not password:
+                        send_message(chat_id, "❌ Password cannot be empty. Enter again:")
+                        return {"ok": True}
+                    data["password"] = hash_password(password)
+
+                    # Create shopkeeper user in tenant DB
+                    shopkeeper = User(
+                        user_id=int(uuid.uuid4().int >> 64),
+                        name=data["username"],
+                        username=data["username"],
+                        password_hash=data["password"],
+                        role="shopkeeper"
+                    )
+                    tenant_db.add(shopkeeper)
+                    tenant_db.commit()
+                    tenant_db.refresh(shopkeeper)
+
+                    send_message(chat_id, f"✅ Shopkeeper '{data['username']}' created successfully.")
+
+                    # Notify owner
+                    notify_owner_of_new_shopkeeper(shopkeeper, tenant_db)
+
+                    # Show Owner Menu
+                    kb = main_menu(user.role)
+                    send_message(chat_id, "🏠 Main Menu:", kb)
+                    clear_user_state(chat_id)
 
 
                 # -------------------- Add Product --------------------
@@ -668,112 +899,232 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         if product_name:
                             data["name"] = product_name
                             user_states[chat_id] = {"action": action, "step": 2, "data": data}
-                            send_message(chat_id, "💲 Enter product price:")
+                            send_message(chat_id, "📦 Enter quantity:")
                         else:
                             send_message(chat_id, "❌ Product name cannot be empty. Please enter again:")
-
-                    elif step == 2:  # Product Price
-                        try:
-                            price = float(text.strip())
-                            data["price"] = price
-                            user_states[chat_id] = {"action": action, "step": 3, "data": data}
-                            send_message(chat_id, "📦 Enter product quantity:")
-                        except ValueError:
-                            send_message(chat_id, "❌ Invalid price. Please enter a number:")
-
-                    elif step == 3:  # Product Quantity
-                        try:
-                            qty = int(text.strip())
-                            data["quantity"] = qty
-                            add_product(tenant_db, chat_id, data)
-                            send_message(chat_id, f"✅ Product *{data['name']}* added successfully.")
-                            user_states.pop(chat_id)
-                        except ValueError:
-                            send_message(chat_id, "❌ Invalid quantity. Please enter a number:")
-
-                    return {"ok": True}
-
-                # -------------------- Update Product --------------------
-                elif action == "awaiting_update":
-                    if step == 1:  # Product ID
-                        try:
-                            product_id = int(text.strip())
-                            data["id"] = product_id
-                            user_states[chat_id] = {"action": action, "step": 2, "data": data}
-                            send_message(chat_id, "✏️ Enter the field to update (name, price, quantity):")
-                        except ValueError:
-                            send_message(chat_id, "❌ Invalid product ID. Please enter a number:")
-
-                    elif step == 2:  # Field to Update
-                        field = text.strip().lower()
-                        if field in ["name", "price", "quantity"]:
-                            data["field"] = field
-                            user_states[chat_id] = {"action": action, "step": 3, "data": data}
-                            send_message(chat_id, f"✏️ Enter new value for {field}:")
-                        else:
-                            send_message(chat_id, "❌ Invalid field. Choose: name, price, or quantity.")
-
-                    elif step == 3:  # New Value
-                        field = data["field"]
-                        new_value = text.strip()
-
-                        if field == "price":
-                            try:
-                                new_value = float(new_value)
-                            except ValueError:
-                                send_message(chat_id, "❌ Invalid price. Please enter a number:")
-                                return {"ok": True}
-
-                        elif field == "quantity":
-                            try:
-                                new_value = int(new_value)
-                            except ValueError:
-                                send_message(chat_id, "❌ Invalid quantity. Please enter a number:")
-                                return {"ok": True}
-
-                        try:
-                            update_product(tenant_db, chat_id, data["id"], field, new_value)
-                            send_message(chat_id, f"✅ Product {field} updated successfully.")
-                        except Exception as e:
-                            send_message(chat_id, f"⚠️ Failed to update product: {str(e)}")
-
-                        user_states.pop(chat_id)
-                    return {"ok": True}
-
-                # -------------------- Record Sale --------------------
-                elif action == "awaiting_sale":
-                    if step == 1:  # Product ID
-                        try:
-                            product_id = int(text.strip())
-                            data["id"] = product_id
-                            user_states[chat_id] = {"action": action, "step": 2, "data": data}
-                            send_message(chat_id, "📦 Enter quantity sold:")
-                        except ValueError:
-                            send_message(chat_id, "❌ Invalid product ID. Please enter a number:")
 
                     elif step == 2:  # Quantity
                         try:
                             qty = int(text.strip())
                             data["quantity"] = qty
-                            record_sale(tenant_db, chat_id, data)
-                            send_message(chat_id, "✅ Sale recorded successfully.")
-                            user_states.pop(chat_id)
+                            user_states[chat_id] = {"action": action, "step": 3, "data": data}
+                            send_message(chat_id, "📏 Enter unit type (e.g., piece, pack, box):")
                         except ValueError:
                             send_message(chat_id, "❌ Invalid quantity. Please enter a number:")
+
+                    elif step == 3:  # Unit Type
+                        unit_type = text.strip()
+                        if unit_type:
+                            data["unit_type"] = unit_type
+                            if user.role == "owner":
+                                # Owner continues to set price and thresholds
+                                user_states[chat_id] = {"action": action, "step": 4, "data": data}
+                                send_message(chat_id, "💲 Enter product price:")
+                            else:
+                                # Shopkeeper: send notification to owner for approval
+                                add_product_pending_approval(tenant_db, chat_id, data)
+                                send_message(chat_id, f"✅ Product *{data['name']}* added for approval. Owner will review.")
+                                notify_owner_of_new_product(chat_id, data)
+                                user_states.pop(chat_id)
+                        else:
+                            send_message(chat_id, "❌ Unit type cannot be empty. Please enter:")
+
+                    elif step == 4:  # Price (Owner only)
+                        try:
+                            price = float(text.strip())
+                            data["price"] = price
+                            user_states[chat_id] = {"action": action, "step": 5, "data": data}
+                            send_message(chat_id, "📊 Enter minimum stock level (e.g., 10):")
+                        except ValueError:
+                            send_message(chat_id, "❌ Invalid price. Please enter a number:")
+
+                    elif step == 5:  # Min Stock Level (Owner)
+                        try:
+                            min_stock = int(text.strip())
+                            data["min_stock_level"] = min_stock
+                            user_states[chat_id] = {"action": action, "step": 6, "data": data}
+                            send_message(chat_id, "⚠️ Enter low stock threshold (alert level):")
+                        except ValueError:
+                            send_message(chat_id, "❌ Invalid number. Please enter a valid minimum stock level:")
+
+                    elif step == 6:  # Low Stock Threshold (Owner)
+                        try:
+                            threshold = int(text.strip())
+                            data["low_stock_threshold"] = threshold
+
+                            # Save product
+                            add_product(tenant_db, chat_id, data)
+                            send_message(chat_id, f"✅ Product *{data['name']}* added successfully.")
+                            user_states.pop(chat_id)
+                        except ValueError:
+                            send_message(chat_id, "❌ Invalid number. Please enter a valid low stock threshold:")
+
+
+
+                # -------------------- Update Product --------------------
+                elif action == "awaiting_update":
+                    # Step 1: Product selected via callback (product_id in data)
+                    product_id = data.get("product_id")
+                    if not product_id:
+                        send_message(chat_id, "⚠️ No product selected. Please try again from the menu.")
+                        user_states.pop(chat_id, None)
+                        return {"ok": True}
+
+                    product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
+                    if not product:
+                        send_message(chat_id, "⚠️ Product not found. Please try again.")
+                        user_states.pop(chat_id, None)
+                        return {"ok": True}
+
+                    # Step 2: Expect comma-separated updates
+                    parts = [p.strip() for p in text.split(",")]
+
+                    try:
+                        # Owner can update all fields
+                        if user.role == "owner":
+                            new_name = parts[0] if len(parts) > 0 and parts[0] else None
+                            new_price = parts[1] if len(parts) > 1 and parts[1] else None
+                            new_quantity = parts[2] if len(parts) > 2 and parts[2] else None
+                            new_unit = parts[3] if len(parts) > 3 and parts[3] else None
+                            new_min_stock = parts[4] if len(parts) > 4 and parts[4] else None
+                            new_threshold = parts[5] if len(parts) > 5 and parts[5] else None
+
+                            if new_name:
+                                product.name = new_name
+                            if new_price:
+                                product.price = float(new_price)
+                            if new_quantity:
+                                product.stock = int(new_quantity)
+                            if new_unit:
+                                product.unit_type = new_unit
+                            if new_min_stock:
+                                product.min_stock_level = int(new_min_stock)
+                            if new_threshold:
+                                product.low_stock_threshold = int(new_threshold)
+
+                        # Shopkeeper can only update quantity and unit_type
+                        else:
+                            new_quantity = parts[0] if len(parts) > 0 and parts[0] else None
+                            new_unit = parts[1] if len(parts) > 1 and parts[1] else None
+                            if new_quantity:
+                                product.stock = int(new_quantity)
+                            if new_unit:
+                                product.unit_type = new_unit
+                            notify_owner_of_product_update(chat_id, product, parts)
+
+                        tenant_db.commit()
+                        send_message(chat_id, f"✅ Product updated successfully: {product.name}")
+                        user_states.pop(chat_id)
+
+                    except Exception as e:
+                        tenant_db.rollback()
+                        send_message(chat_id, f"⚠️ Failed to update product: {str(e)}")
+
+
+                # -------------------- Record Sale --------------------
+                elif action == "awaiting_sale":
+                    if step == 1:  # Product search by name
+                        matches = tenant_db.query(ProductORM).filter(ProductORM.name.ilike(f"%{text}%")).all()
+                        if not matches:
+                            send_message(chat_id, "⚠️ No products found with that name. Try again:")
+                            return {"ok": True}
+                        elif len(matches) == 1:
+                            selected = matches[0]
+                            data["product_id"] = selected.product_id
+                            data["unit_type"] = selected.unit_type
+                            user_states[chat_id] = {"action": action, "step": 2, "data": data}
+                            send_message(chat_id, f"📦 Selected {selected.name} ({selected.unit_type}). Enter quantity sold:")
+                        else:
+                            # multiple options → show inline keyboard
+                            kb_rows = [
+                                [{"text": f"{p.name} — Stock: {p.stock} ({p.unit_type})", "callback_data": f"select_sale:{p.product_id}"}]
+                                for p in matches
+                            ]
+                            kb_rows.append([{"text": "⬅️ Cancel", "callback_data": "back_to_menu"}])
+                            send_message(chat_id, "🔹 Multiple products found. Please select:", {"inline_keyboard": kb_rows})
+                        return {"ok": True}
+
+                    elif step == 2:  # Quantity
+                        try:
+                            qty = int(text.strip())
+                            data["quantity"] = qty
+                            user_states[chat_id] = {"action": action, "step": 3, "data": data}
+                            send_message(chat_id, "💰 Enter payment type (full, partial, credit):")
+                        except ValueError:
+                            send_message(chat_id, "❌ Invalid quantity. Enter a number:")
+                        return {"ok": True}
+
+                    elif step == 3:  # Payment Type
+                        payment_type = text.strip().lower()
+                        if payment_type not in ["full", "partial", "credit"]:
+                            send_message(chat_id, "❌ Invalid type. Choose: full, partial, credit:")
+                            return {"ok": True}
+
+                        data["payment_type"] = payment_type
+                        if payment_type == "full":
+                            data["amount_paid"] = None
+                            data["pending_amount"] = 0
+                            data["change_left"] = 0
+                            user_states[chat_id] = {"action": action, "step": 5, "data": data}
+                            send_message(chat_id, "✅ Full payment selected. Confirm sale? (yes/no)")
+                        else:
+                            user_states[chat_id] = {"action": action, "step": 4, "data": data}
+                            send_message(chat_id, "💵 Enter amount paid by customer:")
+                        return {"ok": True}
+
+                    elif step == 4:  # Partial / Credit amount
+                        try:
+                            amount_paid = float(text.strip())
+                            data["amount_paid"] = amount_paid
+                            product = tenant_db.query(ProductORM).filter(ProductORM.product_id == data["product_id"]).first()
+                            total_price = float(product.price) * data["quantity"]
+                            data["pending_amount"] = max(total_price - amount_paid, 0)
+                            data["change_left"] = max(amount_paid - total_price, 0)
+            
+                            if data["pending_amount"] > 0 or data["change_left"] > 0:
+                                user_states[chat_id] = {"action": action, "step": 5, "data": data}
+                                send_message(chat_id, "👤 Enter customer name:")
+                            else:
+                                user_states[chat_id] = {"action": action, "step": 6, "data": data}
+                                send_message(chat_id, f"✅ Recorded amount paid: {amount_paid}. Confirm sale? (yes/no)")
+                        except ValueError:
+                            send_message(chat_id, "❌ Invalid number. Enter a valid amount:")
+                        return {"ok": True}
+
+                    elif step == 6:  # Customer Name
+                        customer_name = text.strip()
+                        if not customer_name:
+                            send_message(chat_id, "❌ Name cannot be empty. Enter customer name:")
+                            return {"ok": True}
+                        data["customer_name"] = customer_name
+                        user_states[chat_id] = {"action": action, "step": 7, "data": data}
+                        send_message(chat_id, "📞 Enter customer contact number:")
+                        return {"ok": True}
+
+                    elif step == 7:  # Customer Contact
+                        customer_contact = text.strip()
+                        if not customer_contact:
+                            send_message(chat_id, "❌ Contact cannot be empty. Enter customer contact number:")
+                            return {"ok": True}
+                        data["customer_contact"] = customer_contact
+                        user_states[chat_id] = {"action": action, "step": 8, "data": data}
+                        send_message(chat_id, f"✅ Customer info recorded. Confirm sale? (yes/no)")
+                        return {"ok": True}
+
+                    elif step == 8:  # Confirm sale
+                        if text.strip().lower() != "yes":
+                            send_message(chat_id, "❌ Sale cancelled.")
+                            user_states.pop(chat_id, None)
+                            return {"ok": True}
+
+                        try:
+                            record_sale(tenant_db, chat_id, data)
+                            send_message(chat_id, f"✅ Sale recorded successfully: {data['quantity']} {data['unit_type']} sold.")
                         except Exception as e:
                             send_message(chat_id, f"⚠️ Failed to record sale: {str(e)}")
-                            user_states.pop(chat_id)
+                        user_states.pop(chat_id, None)
+                        return {"ok": True}
 
-                    return {"ok": True}
-
-            # -------------------- Commands --------------------
-            if text.lower() in ["/start", "menu"]:
-                role_menu(chat_id)
-            else:
-                send_message(
-                    chat_id,
-                    f"⚠️ Invalid input or action not allowed for your role ({role}). Type *menu* to see instructions."
-                )
 
 
         # -------------------- Handle callbacks --------------------
@@ -782,7 +1133,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             action = data["callback_query"]["data"]
             callback_id = data["callback_query"]["id"]
 
-            # ✅ Explicitly answer callback to remove spinner
+            # ✅ Answer callback to remove spinner
             requests.post(
                 f"{TELEGRAM_API_URL}/answerCallbackQuery",
                 json={"callback_query_id": callback_id}
@@ -795,48 +1146,69 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             role = user.role
             tenant_db = get_tenant_session(user)
 
-            # -------------------- Role Selection --------------------
-            if action == "role_owner":
-                user.role = "owner"
-                tenant_db_url = DATABASE_URL.rsplit("/", 1)[0] + f"/tenant_{chat_id}"
-                create_tenant_db(tenant_db_url)
-                engine = get_engine_for_tenant(tenant_db_url)
-                TenantBase.metadata.create_all(bind=engine)
-
-                user.tenant_db_url = tenant_db_url
-                db.commit()
-
-                kb_dict = main_menu(role=user.role)
-                send_message(chat_id, "🏠 Main Menu:", kb_dict)
-
-            elif action == "role_keeper":
-                user.role = "keeper"
-                db.commit()
-
-                kb_dict = main_menu(role=user.role)
-                send_message(chat_id, "🏠 Main Menu:", kb_dict)
-
-            # -------------------- Shop Setup --------------------
-            elif action == "setup_shop":
+            # -------------------- Shop Setup (Owner only) --------------------
+            if action == "setup_shop" and role == "owner":
                 send_message(chat_id, "🏪 Please enter your shop name:")
-                user_states[chat_id] = {"action": "setup_shop"}
+                user_states[chat_id] = {"action": "setup_shop", "step": 1, "data": {}}
 
             # -------------------- Product Management --------------------
             elif action == "add_product":
-                send_message(chat_id, "➕ Please enter the product details in the format:\n\n`Name, Price, Quantity`")
-                user_states[chat_id] = {"action": "awaiting_product"}
+                if role == "owner":
+                    send_message(chat_id, "➕ Add a new product! 🛒\n\nEnter product name:")
+                    user_states[chat_id] = {"action": "awaiting_product", "step": 1, "data": {}}
+                else:  # Shopkeeper
+                    send_message(chat_id, "🛠 You can suggest a product. Enter product name:")
+                    user_states[chat_id] = {"action": "awaiting_product", "step": 1, "data": {"is_shopkeeper": True}}
 
             elif action == "update_product":
-                send_message(chat_id, "✏️ Please enter the product update in the format:\n\n`ProductID, NewName, NewPrice, NewQuantity`\n\n"
-                                      "👉 You can leave a field blank if not updating it.")
-                user_states[chat_id] = {"action": "awaiting_update"}
+                # Show first page of products
+                text, kb = products_page_view(tenant_db, page=1)
+                send_message(chat_id, text, kb)
 
-            # -------------------- Sales --------------------
+            elif action.startswith("products_page:"):
+                try:
+                    page = int(action.split(":")[1])
+                except (IndexError, ValueError):
+                    page = 1
+                text, kb = products_page_view(tenant_db, page=page)
+                send_message(chat_id, text, kb)
+
+            elif action.startswith("select_product:"):
+                try:
+                    product_id = int(action.split(":")[1])
+                except (IndexError, ValueError):
+                    send_message(chat_id, "⚠️ Invalid product selection.")
+                    return
+
+                product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
+                if not product:
+                    send_message(chat_id, "⚠️ Product not found.")
+                    return
+
+                # Ask what to update
+                if role == "owner":
+                    send_message(
+                        chat_id,
+                        f"✏️ Updating *{product.name}* (ID {product.product_id})\n"
+                        "Enter details as: `NewName, NewPrice, NewQuantity, UnitType, MinStock, LowStockThreshold`\n"
+                        "Leave blank to keep current values."
+                    )
+                else:  # Shopkeeper can only update quantity and unit type
+                    send_message(
+                        chat_id,
+                        f"✏️ Updating *{product.name}* (ID {product.product_id})\n"
+                        "Enter details as: `Quantity, UnitType`\n"
+                        "Leave blank to keep current values."
+                    )
+
+                user_states[chat_id] = {"action": "awaiting_update", "step": 1, "data": {"product_id": product_id}}
+
+            # -------------------- Record Sale --------------------
             elif action == "record_sale":
-                send_message(chat_id, "🛒 Please enter the sale in the format:\n\n`ProductID, Quantity`")
-                user_states[chat_id] = {"action": "awaiting_sale"}
+                send_message(chat_id, "🛒 Enter product name to sell:")
+                user_states[chat_id] = {"action": "awaiting_sale", "step": 1, "data": {}}
 
-            # -------------------- Stock --------------------
+            # -------------------- View Stock --------------------
             elif action == "view_stock":
                 if tenant_db:
                     stock_list = get_stock_list(tenant_db)
@@ -847,46 +1219,56 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     }
                     send_message(chat_id, stock_list, kb_dict)
 
-            # -------------------- Reports --------------------
+            # -------------------- Reports Callback --------------------
             elif action.startswith("report_"):
-                if role != "owner" and action not in ["report_daily", "report_weekly", "report_monthly"]:
+                # Determine accessible reports based on role
+                owner_only_reports = [
+                    "report_low_stock", "report_top_products", "report_top_customers",
+                    "report_top_repeat_customers", "report_aov", "report_stock_turnover"
+                ]
+
+                # Shopkeeper restriction: cannot access owner-only reports
+                if role == "shopkeeper" and action in owner_only_reports:
                     send_message(chat_id, "❌ Only owners can access this report.")
-                else:
-                    report_text = generate_report(tenant_db, action)
-                    kb_dict = {
-                        "inline_keyboard": [
-                            [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
-                        ]
-                    }
-                    send_message(chat_id, report_text, kb_dict)
+                    return {"ok": True}
+
+                # Generate the requested report
+                report_text = generate_report(tenant_db, action)
+                kb_dict = {
+                    "inline_keyboard": [
+                        [{"text": "⬅️ Back to Reports Menu", "callback_data": "report_menu"}],
+                        [{"text": "⬅️ Back to Main Menu", "callback_data": "back_to_menu"}]
+                    ]
+                }
+                send_message(chat_id, report_text, kb_dict)
+
+            # -------------------- Reports Menu --------------------
+            elif action == "report_menu":
+                kb_dict = report_menu_keyboard(role)
+                send_message(chat_id, "📊 Select a report:", kb_dict)
 
             # -------------------- Help --------------------
             elif action == "help":
                 help_text = (
                     "❓ *Help & FAQs*\n\n"
-                    "Here are some things you should know:\n\n"
                     "📌 *Getting Started*\n"
-                    "• Owners must first *setup the shop* from the Main Menu.\n"
-                    "• Shopkeepers can directly *record sales* and *check stock*.\n\n"
+                    "• Owners: setup shop and add products.\n"
+                    "• Shopkeepers: record sales, check stock.\n\n"
                     "🛒 *Managing Products*\n"
-                    "• Use *Add Product* to register new items (Name, Price, Quantity).\n"
-                    "• Use *Update Product* to adjust details (you can update just price or quantity).\n\n"
+                    "• Owners can add/update all product fields.\n"
+                    "• Shopkeepers can suggest new products or update quantity/unit only.\n\n"
                     "📦 *Stock Management*\n"
-                    "• Always check *View Stock* before recording a sale.\n"
-                    "• Low stock alerts will appear automatically.\n\n"
+                    "• Check View Stock before recording sales.\n"
+                    "• Low stock alerts will appear automatically to owners.\n\n"
                     "📊 *Reports*\n"
-                    "• Daily, weekly, and monthly sales summaries are available.\n"
-                    "• Owners can see all reports, Shopkeepers have limited access.\n\n"
+                    "• Owners: full reports\n"
+                    "• Shopkeepers: limited access\n\n"
                     "⚠️ *Common Issues*\n"
-                    "• If the bot is unresponsive, type /start to reset.\n"
-                    "• Always enter details in the format shown when prompted.\n\n"
-                    "👨‍💻 Need more help? Contact support."
+                    "• Bot unresponsive → /start\n"
+                    "• Always follow input formats.\n\n"
+                    "👨‍💻 Contact support for more help."
                 )
-                kb_dict = {
-                    "inline_keyboard": [
-                        [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
-                    ]
-                }
+                kb_dict = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
                 send_message(chat_id, help_text, kb_dict)
 
             # -------------------- Back to Menu --------------------
