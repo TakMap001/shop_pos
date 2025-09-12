@@ -773,10 +773,20 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             return {"ok": True}
 
         # -------------------- Returning user: prompt login --------------------
-        if text == "/start" and user:
-            send_message(chat_id, "👋 Welcome back! Please enter your password to continue:")
-            user_states[chat_id] = {"action": "login", "step": 1, "data": {}}
-            return {"ok": True}
+        if text == "/start":
+            user = get_user_by_chat_id(chat_id)
+            if user:
+                if user.username and user.password_hash:
+                    send_message(chat_id, "👋 Welcome back! Please enter your password to continue:")
+                    user_states[chat_id] = {"action": "login", "step": 1, "data": {}}
+                    return {"ok": True}
+                else:
+                    send_message(chat_id, "Welcome! Let's set up your account.")
+                    user_states[chat_id] = {"action": "onboarding", "step": 1, "data": {}}
+            else:
+                send_message(chat_id, "Welcome! Let's set up your account.")
+                user_states[chat_id] = {"action": "onboarding", "step": 1, "data": {}}
+
 
         # -------------------- User States --------------------
         if chat_id in user_states:
