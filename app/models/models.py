@@ -14,6 +14,7 @@ class User(Base):
     name = Column(String(255))
     email = Column(String(255))
     password_hash = Column(String(255))
+    chat_id = Column(BigInteger, unique=True, index=True, nullable=False)
     role = Column(String(50))
     tenant_db_url = Column(Text, nullable=True)  # link to tenant DB
     created_at = Column(TIMESTAMP, server_default=func.now())
