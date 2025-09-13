@@ -934,46 +934,70 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Create Shopkeeper (Owner only) --------------------
             elif action == "create_shopkeeper" and user.role == "owner":
+                # Get tenant session
                 tenant_db = get_tenant_session(user.tenant_db_url)
 
-                if step == 1:  # Username
+                # Step 1: Ask for username
+                if step == 1:
+                    send_message(chat_id, "👤 Enter a username for the new shopkeeper:")
+                    user_states[chat_id] = {"action": action, "step": 1, "data": {}}
+
+                # Step 2: Receive username and ask for password
+                elif step == 2:
                     username = text.strip()
                     if not username:
                         send_message(chat_id, "❌ Username cannot be empty. Enter again:")
                         return {"ok": True}
 
-                    data["username"] = username
-                    user_states[chat_id] = {"action": action, "step": 2, "data": data}
+                    # Save username in state
+                    user_states[chat_id]["step"] = 3
+                    user_states[chat_id]["data"]["username"] = username
+
                     send_message(chat_id, "🔑 Enter password for the shopkeeper:")
 
-                elif step == 2:  # Password
+                # Step 3: Receive password and create shopkeeper
+                elif step == 3:
                     password = text.strip()
                     if not password:
                         send_message(chat_id, "❌ Password cannot be empty. Enter again:")
                         return {"ok": True}
 
-                    # Create shopkeeper
+                    data = user_states[chat_id]["data"]
+                    username = data["username"]
+
+                    # Create shopkeeper user
                     shopkeeper = User(
-                        name=f"Shopkeeper {data['username']}",
-                        username=data["username"],
+                        name=f"Shopkeeper {username}",
+                        username=username,
                         password_hash=hash_password(password),
                         role="shopkeeper",
                         tenant_db_url=user.tenant_db_url,  # link to owner's tenant
-                        chat_id=None  # will be assigned on first login
+                        chat_id=None  # assigned on first login
                     )
                     tenant_db.add(shopkeeper)
                     tenant_db.commit()
                     tenant_db.refresh(shopkeeper)
 
-                    send_message(chat_id, f"✅ Shopkeeper '{data['username']}' created successfully.")
+                    send_message(chat_id, f"✅ Shopkeeper '{username}' created successfully.")
 
                     # Notify owner if needed
                     notify_owner_of_new_shopkeeper(shopkeeper, tenant_db)
 
-                    # Return to owner's main menu
-                    kb = main_menu(user.role)
-                    send_message(chat_id, "🏠 Main Menu:", kb)
-                    user_states.pop(chat_id)
+                    # -------------------- Show Owner Main Menu --------------------
+                    kb_dict = main_menu(user.role)  # returns dict
+                    markup = types.InlineKeyboardMarkup()
+                    for row in kb_dict["inline_keyboard"]:
+                        buttons = [
+                            types.InlineKeyboardButton(text=btn["text"], callback_data=btn["callback_data"])
+                            for btn in row
+                        ]
+                        markup.row(*buttons)
+
+                    send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+
+                    # Clear state
+                    user_states.pop(chat_id, None)
+
 
                 # -------------------- Add Product --------------------
                 elif action == "awaiting_product":
