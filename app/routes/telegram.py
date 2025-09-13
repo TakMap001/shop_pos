@@ -940,7 +940,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 # Step 1: Ask for username
                 if step == 1:
                     send_message(chat_id, "👤 Enter a username for the new shopkeeper:")
-                    user_states[chat_id] = {"action": action, "step": 1, "data": {}}
+                    user_states[chat_id] = {"action": action, "step": 2, "data": {}}
 
                 # Step 2: Receive username and ask for password
                 elif step == 2:
