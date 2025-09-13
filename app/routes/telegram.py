@@ -794,6 +794,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             return {"ok": True}
 
         # -------------------- First-time user --------------------
+        user = get_user_by_chat_id(chat_id)
         if not user:
             # Auto-generate owner credentials
             username = str(chat_id)
@@ -821,7 +822,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
         # -------------------- Returning user: prompt login --------------------
         if text == "/start":
-            user = get_user_by_chat_id(chat_id)
             if user:
                 if user.username and user.password_hash:
                     send_message(chat_id, "👋 Welcome back! Please enter your password to continue:")
