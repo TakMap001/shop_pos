@@ -57,13 +57,23 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a plain password against a hashed password."""
     return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
 
-def get_tenant_session(global_db: Session, owner_chat_id: int):
-    tenant = global_db.query(Tenant).filter(Tenant.telegram_owner_id == owner_chat_id).first()
-    if not tenant:
+def get_tenant_session(db_url: str):
+    """Return an active tenant Session given a tenant DB URL."""
+    if not db_url:
         return None
-    SessionLocal = get_session_for_tenant(tenant.database_url)  # returns sessionmaker
-    return SessionLocal()  # <-- create actual session
+    SessionLocal = get_session_for_tenant(db_url)
+    return SessionLocal()  # actual Session object
 
+def get_user(chat_id: int, db: Session):
+    return db.query(User).filter(User.user_id == chat_id).first()
+
+def send_owner_credentials(chat_id, username, password):
+    send_message(
+        chat_id,
+        f"✅ Welcome! Your Owner credentials:\n\n"
+        f"🆔 Username: {username}\n"
+        f"🔑 Password: {password}"
+    )
 
 def get_user_by_chat_id(chat_id: int):
     db = next(get_db())  # get a DB session
@@ -783,32 +793,11 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
         if not chat_id:
             return {"ok": True}
 
-        # -------------------- Helpers --------------------
-        def get_user(chat_id: int):
-            return db.query(User).filter(User.user_id == chat_id).first()
-
-        def get_tenant_session(user: User):
-            if not user or not user.tenant_db_url:
-                return None
-            return get_session_for_tenant(user.tenant_db_url)
-
-        def generate_owner_credentials(chat_id):
-            password = generate_random_password()
-            return chat_id, password
-
-        def send_owner_credentials(chat_id, username, password):
-            send_message(chat_id,
-                         f"✅ Welcome! Your Owner credentials:\n\n"
-                         f"🆔 Username: {username}\n"
-                         f"🔑 Password: {password}")
-
-        user = get_user(chat_id)
-
         # -------------------- First-time user --------------------
         if not user:
             # Auto-generate owner credentials
             username = str(chat_id)
-            password = generate_random_password()
+            password = generate_password()
             new_user = User(
                 user_id=chat_id,
                 name=f"Owner{chat_id}",
