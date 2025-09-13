@@ -1222,7 +1222,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 json={"callback_query_id": callback_id}
             )
 
-            user = get_user(chat_id)
+            user = get_user(chat_id, db)
             if not user:
                 return {"ok": True}
 
@@ -1236,7 +1236,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Create Shopkeeper --------------------
             elif action == "create_shopkeeper":
-                user = get_user(chat_id, db)   # ✅ fetch user from central DB
                 if not user:
                     send_message(chat_id, "❌ User not found. Please /start again.")
                     return {"ok": True}
