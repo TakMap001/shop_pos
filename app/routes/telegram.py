@@ -793,35 +793,39 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
         if not chat_id:
             return {"ok": True}
 
-        user = db.query(User).filter(User.chat_id == chat_id).first()  # Query by chat_id
-        # -------------------- /start handler --------------------
-        if text == "/start":
+        # 1. Check if user exists by chat_id
+        user = db.query(User).filter(User.chat_id == chat_id).first()
 
+        if text == "/start":
             if user:
-                # User exists
-                if user.username and user.password_hash:
-                    # Already has credentials → prompt login
-                    send_message(chat_id, "👋 Welcome back! Please enter your password to continue:")
-                    user_states[chat_id] = {"action": "login", "step": 1, "data": {}}
-                else:
-                    # Missing credentials → generate and update
-                    generated_username = user.username or create_username(f"Owner{chat_id}")
-                    generated_password = generate_password()
-                    user.username = generated_username
-                    user.password_hash = hash_password(generated_password)
+                # 2. User exists
+                if not user.username or not user.password_hash:
+                    # Missing credentials → generate new username/password, retain other fields
+                    if not user.username:
+                        user.username = create_username(f"Owner{chat_id}")
+                    if not user.password_hash:
+                        generated_password = generate_password()
+                        user.password_hash = hash_password(generated_password)
                     db.commit()
-                    send_owner_credentials(chat_id, generated_username, generated_password)
+
+                    send_owner_credentials(chat_id, user.username, generated_password)
                     send_message(chat_id, "🏪 Let's set up your shop! Please enter the shop name:")
                     user_states[chat_id] = {"action": "setup_shop", "step": 1, "data": {}}
+                else:
+                    # 3. User exists with everything → prompt login
+                    send_message(chat_id, "👋 Welcome back! Please enter your password to continue:")
+                    user_states[chat_id] = {"action": "login", "step": 1, "data": {}}
 
             else:
-                # New user → create account
+                # 4. New user → generate all fields and save
                 generated_username = create_username(f"Owner{chat_id}")
                 generated_password = generate_password()
+                generated_email = f"{chat_id}_{int(time.time())}@example.com"  # ensure unique email
+
                 new_user = User(
                     name=f"Owner{chat_id}",
                     username=generated_username,
-                    email=f"{chat_id}@example.com",
+                    email=generated_email,
                     password_hash=hash_password(generated_password),
                     chat_id=chat_id,
                     role="owner"
@@ -829,13 +833,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 db.add(new_user)
                 db.commit()
                 db.refresh(new_user)
-                
-                # Send credentials and prompt shop setup
+
                 send_owner_credentials(chat_id, generated_username, generated_password)
                 send_message(chat_id, "🏪 Let's set up your shop! Please enter the shop name:")
                 user_states[chat_id] = {"action": "setup_shop", "step": 1, "data": {}}
 
             return {"ok": True}
+
 
         if chat_id in user_states:
             state = user_states[chat_id]
