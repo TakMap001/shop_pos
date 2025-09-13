@@ -13,25 +13,38 @@ HIGH_VALUE_SALE_THRESHOLD = 100
 bot = TeleBot(TELEGRAM_BOT_TOKEN)
 
 # -------------------- Generic Message Sender --------------------
-def send_message(user_id, text, keyboard=None, reply_markup=None):
+def send_message(user_id, text, keyboard=None):
     """
-    Send Telegram message with optional inline keyboard.
+    Send Telegram message with optional inline keyboard (dict or InlineKeyboardMarkup).
     """
     try:
-        markup = reply_markup
-        if markup is None:
-            if isinstance(keyboard, types.InlineKeyboardMarkup):
-                markup = keyboard
-            elif keyboard and "inline_keyboard" in keyboard:
-                markup = types.InlineKeyboardMarkup()
-                for row in keyboard["inline_keyboard"]:
-                    buttons = [types.InlineKeyboardButton(text=btn["text"], callback_data=btn["callback_data"]) for btn in row]
-                    markup.add(*buttons)  # use add() instead of row()
+        markup = None
 
+        # Case 1: Already a valid InlineKeyboardMarkup
+        if isinstance(keyboard, types.InlineKeyboardMarkup):
+            markup = keyboard
+
+        # Case 2: Dict → Convert to InlineKeyboardMarkup
+        elif isinstance(keyboard, dict) and "inline_keyboard" in keyboard:
+            markup = types.InlineKeyboardMarkup()
+            for row in keyboard["inline_keyboard"]:
+                buttons = []
+                for btn in row:
+                    # Make sure both text and callback_data exist
+                    text_val = btn.get("text")
+                    cb_val = btn.get("callback_data")
+                    if not text_val or not cb_val:
+                        continue  # skip invalid buttons
+                    buttons.append(types.InlineKeyboardButton(text=text_val, callback_data=cb_val))
+                if buttons:
+                    markup.add(*buttons)  # add row
+
+        # Send with markup (if any)
         bot.send_message(user_id, text, reply_markup=markup, parse_mode="Markdown")
+
     except Exception as e:
         print("❌ Failed to send Telegram message:", e)
-
+        print("➡️ Keyboard passed in:", keyboard)  # DEBUG what you are sending
 
 # -------------------- Stock / Sales Notifications --------------------
 def notify_low_stock(tenant_db: Session, product: ProductORM):
