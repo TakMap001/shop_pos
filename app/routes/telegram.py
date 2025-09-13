@@ -900,7 +900,11 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             
                             # -------------------- Generate tenant DB URL --------------------
                             # No tenant → create new
-                            tenant_db_url = create_tenant_db(user.chat_id)
+                            if not user.tenant_db_url:
+                                user.tenant_db_url = create_tenant_db(user.chat_id)
+                                db.commit()
+
+                            print("DEBUG: tenant_db_url =", user.tenant_db_url)  # must be a valid URL string
                             tenant_db = get_tenant_session(user.tenant_db_url)
 
                             new_tenant = Tenant(
@@ -954,7 +958,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         send_message(chat_id, "❌ Password cannot be empty. Enter again:")
                         return {"ok": True}
 
+                    if not user.tenant_db_url:
+                        user.tenant_db_url = create_tenant_db(user.chat_id)
+                        db.commit()
+
+                    print("DEBUG: tenant_db_url =", user.tenant_db_url)  # must be a valid URL string
                     tenant_db = get_tenant_session(user.tenant_db_url)
+
                     if tenant_db is None:
                         send_message(chat_id, "❌ Unable to access tenant database.")
                         return {"ok": True}
