@@ -26,7 +26,7 @@ def send_message(user_id, text, keyboard=None, reply_markup=None):
                 markup = types.InlineKeyboardMarkup()
                 for row in keyboard["inline_keyboard"]:
                     buttons = [types.InlineKeyboardButton(text=btn["text"], callback_data=btn["callback_data"]) for btn in row]
-                    markup.row(*buttons)
+                    markup.add(*buttons)  # use add() instead of row()
 
         bot.send_message(user_id, text, reply_markup=markup, parse_mode="Markdown")
     except Exception as e:
