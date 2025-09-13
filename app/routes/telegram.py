@@ -16,7 +16,7 @@ from config import DATABASE_URL
 from telebot import types
 from app.telegram_notifications import notify_owner_of_new_shopkeeper
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_API_URL
-from app.tenant_db import create_tenant_db, get_session_for_tenant
+from app.tenant_db import get_tenant_session, create_tenant_db
 import random
 import string
 import bcrypt
@@ -58,12 +58,6 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a plain password against a hashed password."""
     return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
 
-def get_tenant_session(db_url: str):
-    """Return an active tenant Session given a tenant DB URL."""
-    if not db_url:
-        return None
-    SessionLocal = get_session_for_tenant(db_url)
-    return SessionLocal()  # actual Session object
 
 def get_user(chat_id: int, db: Session):
     return db.query(User).filter(User.user_id == chat_id).first()
@@ -906,8 +900,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             
                             # -------------------- Generate tenant DB URL --------------------
                             # No tenant → create new
-                            tenant_db_url = create_tenant_db(chat_id)
-                            tenant_db = get_session_for_tenant(tenant_db_url)
+                            tenant_db_url = create_tenant_db(user.chat_id)
+                            tenant_db = get_tenant_session(user.tenant_db_url)
 
                             new_tenant = Tenant(
                                 tenant_id=str(uuid.uuid4()),
@@ -932,56 +926,60 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         send_message(chat_id, "❌ Contact cannot be empty. Enter shop contact number:")
 
 
+
             # -------------------- Create Shopkeeper (Owner only) --------------------
             elif action == "create_shopkeeper" and user.role == "owner":
-                # Get tenant session
-                tenant_db = get_tenant_session(user.tenant_db_url)
-
-                # Step 1: Ask for username
-                if step == 1:
+                # Step 1: ask for username
+                if step == 0:
                     send_message(chat_id, "👤 Enter a username for the new shopkeeper:")
-                    user_states[chat_id] = {"action": action, "step": 2, "data": {}}
+                    user_states[chat_id] = {"action": action, "step": 1, "data": {}}
+                    return {"ok": True}
 
-                # Step 2: Receive username and ask for password
-                elif step == 2:
+                # Step 1: received username
+                if step == 1:
                     username = text.strip()
                     if not username:
                         send_message(chat_id, "❌ Username cannot be empty. Enter again:")
                         return {"ok": True}
 
-                    # Save username in state
-                    user_states[chat_id]["step"] = 3
-                    user_states[chat_id]["data"]["username"] = username
-
+                    data["username"] = username
+                    user_states[chat_id] = {"action": action, "step": 2, "data": data}
                     send_message(chat_id, "🔑 Enter password for the shopkeeper:")
+                    return {"ok": True}
 
-                # Step 3: Receive password and create shopkeeper
-                elif step == 3:
+                # Step 2: received password
+                if step == 2:
                     password = text.strip()
                     if not password:
                         send_message(chat_id, "❌ Password cannot be empty. Enter again:")
                         return {"ok": True}
 
-                    data = user_states[chat_id]["data"]
-                    username = data["username"]
+                    tenant_db = get_tenant_session(user.tenant_db_url)
+                    if tenant_db is None:
+                        send_message(chat_id, "❌ Unable to access tenant database.")
+                        return {"ok": True}
 
-                    # Create shopkeeper user
+                    # Create shopkeeper
                     shopkeeper = User(
-                        name=f"Shopkeeper {username}",
-                        username=username,
+                        name=f"Shopkeeper {data['username']}",
+                        username=data["username"],
                         password_hash=hash_password(password),
                         role="shopkeeper",
-                        tenant_db_url=user.tenant_db_url,  # link to owner's tenant
-                        chat_id=None  # assigned on first login
+                        tenant_db_url=user.tenant_db_url,
+                        chat_id=None
                     )
                     tenant_db.add(shopkeeper)
                     tenant_db.commit()
                     tenant_db.refresh(shopkeeper)
 
-                    send_message(chat_id, f"✅ Shopkeeper '{username}' created successfully.")
+                    send_message(chat_id, f"✅ Shopkeeper '{data['username']}' created successfully.")
+                    user_states.pop(chat_id)
 
-                    # Notify owner if needed
-                    notify_owner_of_new_shopkeeper(shopkeeper, tenant_db)
+                    # Return to main menu
+                    kb = main_menu(user.role)
+                    send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+                    return {"ok": True}
+
 
                     # -------------------- Show Owner Main Menu --------------------
                     kb_dict = main_menu(user.role)  # returns dict
@@ -1251,7 +1249,15 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 return {"ok": True}
 
             role = user.role
+            # Ensure tenant DB exists
+            if not user.tenant_db_url:
+                user.tenant_db_url = create_tenant_db(user.chat_id)
+                db.commit()  # save tenant_db_url in central DB
+
             tenant_db = get_tenant_session(user.tenant_db_url)
+            if tenant_db is None:
+                send_message(chat_id, "❌ Unable to access tenant database. Contact support.")
+                return {"ok": True}
 
             # -------------------- Shop Setup (Owner only) --------------------
             if action == "setup_shop" and role == "owner":
