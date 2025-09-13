@@ -862,7 +862,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                     # -------------------- Role-based Main Menu --------------------
                     kb = main_menu(user.role)
-                    send_message(chat_id, "🏠 Main Menu:", reply_markup=kb)
+                    send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                 else:
                     send_message(chat_id, "❌ Incorrect password. Please try again:")
 
