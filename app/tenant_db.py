@@ -39,6 +39,7 @@ def create_tenant_db(chat_id: int) -> str:
         conn.close()
 
     # Create tables in tenant DB
+    logger.info(f"Tenant DB URL: {tenant_db_url}")
     engine = create_engine(tenant_db_url)
     TenantBase.metadata.create_all(bind=engine)
     logger.info(f"✅ Tenant tables created in DB '{db_name}'.")
