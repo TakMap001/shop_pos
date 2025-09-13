@@ -823,13 +823,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     username=generated_username,
                     email=f"{chat_id}@example.com",
                     password_hash=hash_password(generated_password),
-                    chat_id=chat_id,  # <-- Telegram chat ID stored separately
+                    chat_id=chat_id,
                     role="owner"
                 )
                 db.add(new_user)
                 db.commit()
                 db.refresh(new_user)
-
+                
                 # Send credentials and prompt shop setup
                 send_owner_credentials(chat_id, generated_username, generated_password)
                 send_message(chat_id, "🏪 Let's set up your shop! Please enter the shop name:")
