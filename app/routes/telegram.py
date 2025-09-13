@@ -1234,6 +1234,19 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 send_message(chat_id, "🏪 Please enter your shop name:")
                 user_states[chat_id] = {"action": "setup_shop", "step": 1, "data": {}}
 
+            # -------------------- Create Shopkeeper --------------------
+            elif action == "create_shopkeeper":
+                user = get_user(chat_id, db)   # ✅ fetch user from central DB
+                if not user:
+                    send_message(chat_id, "❌ User not found. Please /start again.")
+                    return {"ok": True}
+
+                if user.role != "owner":
+                    send_message(chat_id, "❌ Only owners can create shopkeepers.")
+                else:
+                    send_message(chat_id, "👤 Enter a username for the new shopkeeper:")
+                    user_states[chat_id] = {"action": "create_shopkeeper", "step": 1, "data": {}}
+
             # -------------------- Product Management --------------------
             elif action == "add_product":
                 if role == "owner":
@@ -1242,12 +1255,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 else:  # Shopkeeper
                     send_message(chat_id, "🛠 You can suggest a product. Enter product name:")
                     user_states[chat_id] = {"action": "awaiting_product", "step": 1, "data": {"is_shopkeeper": True}}
-
-            # -------------------- Create Shopkeeper --------------------
-            elif action == "create_shopkeeper" and role == "owner":
-                # Start the flow: ask for username
-                send_message(chat_id, "👤 Enter a username for the new shopkeeper:")
-                user_states[chat_id] = {"action": "create_shopkeeper", "step": 1, "data": {}}
 
             elif action == "update_product":
                 # Show first page of products
