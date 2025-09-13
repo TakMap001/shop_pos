@@ -99,6 +99,7 @@ def main_menu(role: str):
                 [{"text": "📦 View Stock", "callback_data": "view_stock"}],
                 [{"text": "📊 Reports", "callback_data": "report_menu"}],
                 [{"text": "🏪 Update Shop Info", "callback_data": "setup_shop"}],
+                [{"text": "👤 Create Shopkeeper", "callback_data": "create_shopkeeper"}],  # NEW BUTTON
                 [{"text": "❓ Help", "callback_data": "help"}]
             ]
         }
@@ -115,7 +116,6 @@ def main_menu(role: str):
         kb_dict = {"inline_keyboard": []}
 
     return kb_dict
-
 
 def build_keyboard(kb_dict):
     """Convert our menu dict into a Telebot InlineKeyboardMarkup."""
@@ -847,8 +847,28 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             action = state.get("action")
             step = state.get("step", 1)
             data = state.get("data", {})
+           
+            # -------------------- Login handler --------------------
+            if action == "login" and step == 1:
+                entered_password = text.strip()
+                user = db.query(User).filter(User.chat_id == chat_id).first()
+
+                if not user:
+                    send_message(chat_id, "❌ User not found. Please /start to register.")
+                    user_states.pop(chat_id, None)
+                elif verify_password(entered_password, user.password_hash):
+                    send_message(chat_id, f"✅ Login successful! Welcome back, {user.name}.")
+                    user_states.pop(chat_id, None)
+
+                    # -------------------- Role-based Main Menu --------------------
+                    kb = main_menu(user.role)
+                    send_message(chat_id, "🏠 Main Menu:", reply_markup=kb)
+                else:
+                    send_message(chat_id, "❌ Incorrect password. Please try again:")
+
+
             # -------------------- Shop Setup (Owner only) --------------------
-            if action == "setup_shop" and user.role == "owner":
+            elif action == "setup_shop" and user.role == "owner":
                 if step == 1:  # Shop Name
                     shop_name = text.strip()
                     if shop_name:
@@ -915,11 +935,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             # -------------------- Create Shopkeeper (Owner only) --------------------
             elif action == "create_shopkeeper" and user.role == "owner":
                 tenant_db = get_tenant_session(user)
+
                 if step == 1:  # Username
                     username = text.strip()
                     if not username:
                         send_message(chat_id, "❌ Username cannot be empty. Enter again:")
                         return {"ok": True}
+
                     data["username"] = username
                     user_states[chat_id] = {"action": action, "step": 2, "data": data}
                     send_message(chat_id, "🔑 Enter password for the shopkeeper:")
@@ -929,15 +951,15 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     if not password:
                         send_message(chat_id, "❌ Password cannot be empty. Enter again:")
                         return {"ok": True}
-                    data["password"] = hash_password(password)
 
-                    # Create shopkeeper user in tenant DB
+                    # Create shopkeeper
                     shopkeeper = User(
-                        user_id=int(uuid.uuid4().int >> 64),
-                        name=data["username"],
+                        name=f"Shopkeeper {data['username']}",
                         username=data["username"],
-                        password_hash=data["password"],
-                        role="shopkeeper"
+                        password_hash=hash_password(password),
+                        role="shopkeeper",
+                        tenant_db_url=user.tenant_db_url,  # link to owner's tenant
+                        chat_id=None  # will be assigned on first login
                     )
                     tenant_db.add(shopkeeper)
                     tenant_db.commit()
@@ -945,14 +967,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                     send_message(chat_id, f"✅ Shopkeeper '{data['username']}' created successfully.")
 
-                    # Notify owner
+                    # Notify owner if needed
                     notify_owner_of_new_shopkeeper(shopkeeper, tenant_db)
 
-                    # Show Owner Menu
+                    # Return to owner's main menu
                     kb = main_menu(user.role)
                     send_message(chat_id, "🏠 Main Menu:", kb)
-                    clear_user_state(chat_id)
-
+                    user_states.pop(chat_id)
 
                 # -------------------- Add Product --------------------
                 elif action == "awaiting_product":
@@ -1221,6 +1242,12 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 else:  # Shopkeeper
                     send_message(chat_id, "🛠 You can suggest a product. Enter product name:")
                     user_states[chat_id] = {"action": "awaiting_product", "step": 1, "data": {"is_shopkeeper": True}}
+
+            # -------------------- Create Shopkeeper --------------------
+            elif action == "create_shopkeeper" and role == "owner":
+                # Start the flow: ask for username
+                send_message(chat_id, "👤 Enter a username for the new shopkeeper:")
+                user_states[chat_id] = {"action": "create_shopkeeper", "step": 1, "data": {}}
 
             elif action == "update_product":
                 # Show first page of products
