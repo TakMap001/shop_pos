@@ -1227,7 +1227,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 return {"ok": True}
 
             role = user.role
-            tenant_db = get_tenant_session(user)
+            tenant_db = get_tenant_session(user.tenant_db_url)
 
             # -------------------- Shop Setup (Owner only) --------------------
             if action == "setup_shop" and role == "owner":
