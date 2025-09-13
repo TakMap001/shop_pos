@@ -934,7 +934,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Create Shopkeeper (Owner only) --------------------
             elif action == "create_shopkeeper" and user.role == "owner":
-                tenant_db = get_tenant_session(user)
+                tenant_db = get_tenant_session(user.tenant_db_url)
 
                 if step == 1:  # Username
                     username = text.strip()
