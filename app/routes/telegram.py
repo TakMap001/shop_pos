@@ -793,118 +793,49 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
         if not chat_id:
             return {"ok": True}
 
-        # -------------------- First-time user --------------------
-        user = get_user_by_chat_id(chat_id)
-        if not user:
-            # Auto-generate owner credentials
-            username = str(chat_id)
-            password = generate_password()
-            new_user = User(
-                user_id=chat_id,
-                name=f"Owner{chat_id}",
-                username=username,
-                email=f"{chat_id}@example.com",
-                password_hash=hash_password(password),
-                role="owner",
-                tenant_db_url=None
-            )
-            db.add(new_user)
-            db.commit()
-            db.refresh(new_user)
-
-            # Send credentials to owner
-            send_owner_credentials(chat_id, username, password)
-
-            # Prompt setup shop
-            send_message(chat_id, "🏪 Let's set up your shop! Please enter the shop name:")
-            user_states[chat_id] = {"action": action, "step": 1, "data": data}
-            return {"ok": True}
-
-        # -------------------- Returning user: prompt login --------------------
+        # -------------------- /start handler --------------------
         if text == "/start":
+            user = get_user_by_chat_id(chat_id)
+
             if user:
+                # User exists
                 if user.username and user.password_hash:
+                    # Already has credentials → prompt login
                     send_message(chat_id, "👋 Welcome back! Please enter your password to continue:")
                     user_states[chat_id] = {"action": "login", "step": 1, "data": {}}
-                    return {"ok": True}
-                
                 else:
-                    # User exists but no password set → generate one
-                    generated_password = generate_password()  # <-- implement this helper
-                    user.password_hash = hash_password(generated_password)  # <-- hash before saving
-                    save_user(user)  # <-- commit to DB
-                    send_message(chat_id, f"Welcome! We have set up your account.\nYour password is: {generated_password}\nPlease save it for login.")
-            else:
-                send_message(chat_id, "Welcome! Let's set up your account.")
-                user_states[chat_id] = {"action": "onboarding", "step": 1, "data": {}}
-
-
-        # -------------------- User States --------------------
-        if chat_id in user_states:
-            state = user_states[chat_id]
-            action = state.get("action")
-            step = state.get("step", 1)
-            data = state.get("data", {})
-
-            # -------------------- Onboarding --------------------
-            if action == "onboarding":
-                if step == 1:
-                    # Step 1: collect full name
-                    data["full_name"] = text.strip()
-                    send_message(chat_id, "Great! Now enter your email address:")
-                    user_states[chat_id]["step"] = 2
-                    user_states[chat_id]["data"] = data
-                    return {"ok": True}
-
-                elif step == 2:
-                    # Step 2: collect email
-                    data["email"] = text.strip()
-                    if not data["email"]:
-                        send_message(chat_id, "❌ Please enter a valid email address:")
-                        return {"ok": True}
-                    # Generate username and password
-                    generated_username = create_username(data["full_name"])
+                    # Missing credentials → generate and update
+                    generated_username = user.username or create_username(f"Owner{chat_id}")
                     generated_password = generate_password()
-                    hashed_pw = hash_password(generated_password)
-                    
-                    # Save user to DB
-                    new_user = User(
-                        username=generated_username,
-                        name=data["full_name"],
-                        email=data["email"],
-                        password_hash=hash_password(generated_password),  # correct
-                        chat_id=chat_id,
-                        role="user"
-                    )
-                    save_user(new_user)
+                    user.username = generated_username
+                    user.password_hash = hash_password(generated_password)
+                    db.commit()
+                    send_owner_credentials(chat_id, generated_username, generated_password)
+                    send_message(chat_id, "🏪 Let's set up your shop! Please enter the shop name:")
+                    user_states[chat_id] = {"action": "setup_shop", "step": 1, "data": {}}
 
-                    # Send credentials to user
-                    send_message(chat_id, f"✅ Account created!\nUsername: {generated_username}\nPassword: {generated_password}")
+            else:
+                # New user → create account
+                generated_username = create_username(f"Owner{chat_id}")
+                generated_password = generate_password()
+                new_user = User(
+                    user_id=chat_id,
+                    name=f"Owner{chat_id}",
+                    username=generated_username,
+                    email=f"{chat_id}@example.com",
+                    password_hash=hash_password(generated_password),
+                    role="owner"
+                )
+                db.add(new_user)
+                db.commit()
+                db.refresh(new_user)
 
-                    # Move to login state
-                    user_states[chat_id] = {"action": "login", "step": 1, "data": {}}
-                    return {"ok": True}
+                # Send credentials and prompt shop setup
+                send_owner_credentials(chat_id, generated_username, generated_password)
+                send_message(chat_id, "🏪 Let's set up your shop! Please enter the shop name:")
+                user_states[chat_id] = {"action": "setup_shop", "step": 1, "data": {}}
 
-            # -------------------- Login --------------------
-            elif action == "login" and step == 1:
-                # Fetch user from DB
-                user = get_user_by_chat_id(chat_id)
-                if not user:
-                    send_message(chat_id, "❌ User not found. Please /start again.")
-                    clear_user_state(chat_id)
-                    return {"ok": True}
-
-                password_input = text.strip()
-                if verify_password(password_input, user.password_hash):
-                    send_message(chat_id, "✅ Login successful!")
-                    tenant_db = get_tenant_session(user.tenant_db_url)  # get tenant session
-                    kb = main_menu(user.role)
-                    send_message(chat_id, "🏠 Main Menu:", kb)
-                    clear_user_state(chat_id)
-                else:
-                    send_message(chat_id, "❌ Incorrect password. Try again:")
-                return {"ok": True}
-
+            return {"ok": True}
 
             # -------------------- Shop Setup (Owner only) --------------------
             elif action == "setup_shop" and user.role == "owner":
