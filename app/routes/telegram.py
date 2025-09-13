@@ -872,32 +872,45 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     if contact:
                         data["contact"] = contact
 
-                        # -------------------- Generate tenant DB URL --------------------
-                        tenant_db_url = create_tenant_db(chat_id)
-                        tenant_db = get_session_for_tenant(tenant_db_url)
+                        # -------------------- Check if tenant exists --------------------
+                        existing_tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
 
-                        tenant = Tenant(
-                            tenant_id=str(uuid.uuid4()),
-                            telegram_owner_id=chat_id,
-                            store_name=data["name"],
-                            database_url=tenant_db_url,
-                            location=data["location"],
-                            contact=contact
-                        )
-                        db.add(tenant)
+                        if existing_tenant:
+                            # Tenant already exists → update info
+                            existing_tenant.store_name = data["name"]
+                            existing_tenant.location = data["location"]
+                            existing_tenant.contact = contact
+                            tenant_db_url = existing_tenant.database_url
+                            send_message(chat_id, f"✅ Your existing shop info has been updated!\n\n🏪 {data['name']}\n📍 {data['location']}\n📞 {contact}")
+                        else:
+                            
+                            # -------------------- Generate tenant DB URL --------------------
+                            # No tenant → create new
+                            tenant_db_url = create_tenant_db(chat_id)
+                            tenant_db = get_session_for_tenant(tenant_db_url)
+
+                            new_tenant = Tenant(
+                                tenant_id=str(uuid.uuid4()),
+                                telegram_owner_id=chat_id,
+                                store_name=data["name"],
+                                database_url=tenant_db_url,
+                                location=data["location"],
+                                contact=contact
+                            )
+                            db.add(new_tenant)
+                            send_message(chat_id, f"✅ Shop info saved!\n\n🏪 {data['name']}\n📍 {data['location']}\n📞 {contact}")
 
                         # Link owner to tenant DB
                         user.tenant_db_url = tenant_db_url
                         db.commit()
 
-                        # Notify owner
-                        send_message(chat_id, f"✅ Shop info saved!\n\n🏪 {data['name']}\n📍 {data['location']}\n📞 {contact}")
-
                         # Prompt to create Shopkeeper
                         send_message(chat_id, "👤 Now create Shopkeeper login credentials.\n\nEnter a username for the shopkeeper:")
                         user_states[chat_id] = {"action": "create_shopkeeper", "step": 1, "data": {}}
+
                     else:
                         send_message(chat_id, "❌ Contact cannot be empty. Enter shop contact number:")
+
 
             # -------------------- Create Shopkeeper (Owner only) --------------------
             elif action == "create_shopkeeper" and user.role == "owner":
