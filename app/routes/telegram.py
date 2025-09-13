@@ -793,9 +793,9 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
         if not chat_id:
             return {"ok": True}
 
+        user = get_user_by_chat_id(chat_id)
         # -------------------- /start handler --------------------
         if text == "/start":
-            user = get_user_by_chat_id(chat_id)
 
             if user:
                 # User exists
@@ -837,8 +837,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             return {"ok": True}
 
+        if chat_id in user_states:
+            state = user_states[chat_id]
+            action = state.get("action")
+            step = state.get("step", 1)
+            data = state.get("data", {})
             # -------------------- Shop Setup (Owner only) --------------------
-            elif action == "setup_shop" and user.role == "owner":
+            if action == "setup_shop" and user.role == "owner":
                 if step == 1:  # Shop Name
                     shop_name = text.strip()
                     if shop_name:
