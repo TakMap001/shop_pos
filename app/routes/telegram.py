@@ -793,7 +793,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
         if not chat_id:
             return {"ok": True}
 
-        user = get_user_by_chat_id(chat_id)
+        user = db.query(User).filter(User.chat_id == chat_id).first()  # Query by chat_id
         # -------------------- /start handler --------------------
         if text == "/start":
 
@@ -819,11 +819,11 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 generated_username = create_username(f"Owner{chat_id}")
                 generated_password = generate_password()
                 new_user = User(
-                    user_id=chat_id,
                     name=f"Owner{chat_id}",
                     username=generated_username,
                     email=f"{chat_id}@example.com",
                     password_hash=hash_password(generated_password),
+                    chat_id=chat_id,  # <-- Telegram chat ID stored separately
                     role="owner"
                 )
                 db.add(new_user)
