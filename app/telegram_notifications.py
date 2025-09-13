@@ -13,26 +13,25 @@ HIGH_VALUE_SALE_THRESHOLD = 100
 bot = TeleBot(TELEGRAM_BOT_TOKEN)
 
 # -------------------- Generic Message Sender --------------------
-def send_message(user_id, text, keyboard=None):
+def send_message(user_id, text, keyboard=None, reply_markup=None):
     """
     Send Telegram message with optional inline keyboard.
     """
     try:
-        markup = None
-        if isinstance(keyboard, types.InlineKeyboardMarkup):
-            markup = keyboard
-        elif keyboard and "inline_keyboard" in keyboard:
-            # Convert dict to InlineKeyboardMarkup
-            markup = types.InlineKeyboardMarkup()
-            for row in keyboard["inline_keyboard"]:
-                buttons = []
-                for btn in row:
-                    buttons.append(types.InlineKeyboardButton(text=btn["text"], callback_data=btn["callback_data"]))
-                markup.row(*buttons)
+        markup = reply_markup
+        if markup is None:
+            if isinstance(keyboard, types.InlineKeyboardMarkup):
+                markup = keyboard
+            elif keyboard and "inline_keyboard" in keyboard:
+                markup = types.InlineKeyboardMarkup()
+                for row in keyboard["inline_keyboard"]:
+                    buttons = [types.InlineKeyboardButton(text=btn["text"], callback_data=btn["callback_data"]) for btn in row]
+                    markup.row(*buttons)
 
         bot.send_message(user_id, text, reply_markup=markup, parse_mode="Markdown")
     except Exception as e:
         print("❌ Failed to send Telegram message:", e)
+
 
 # -------------------- Stock / Sales Notifications --------------------
 def notify_low_stock(tenant_db: Session, product: ProductORM):
