@@ -902,6 +902,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             # No tenant → create new
                             if not user.tenant_db_url:
                                 user.tenant_db_url = create_tenant_db(user.chat_id)
+                                user.tenant_db_url = tenant_db_url
                                 db.commit()
 
                             print("DEBUG: tenant_db_url =", user.tenant_db_url)  # must be a valid URL string
@@ -960,6 +961,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                     if not user.tenant_db_url:
                         user.tenant_db_url = create_tenant_db(user.chat_id)
+                        user.tenant_db_url = tenant_db_url
                         db.commit()
 
                     print("DEBUG: tenant_db_url =", user.tenant_db_url)  # must be a valid URL string
@@ -1262,6 +1264,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             # Ensure tenant DB exists
             if not user.tenant_db_url:
                 user.tenant_db_url = create_tenant_db(user.chat_id)
+                user.tenant_db_url = tenant_db_url
                 db.commit()  # save tenant_db_url in central DB
 
             tenant_db = get_tenant_session(user.tenant_db_url)
