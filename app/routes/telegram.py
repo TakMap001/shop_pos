@@ -1320,7 +1320,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 send_message(chat_id, "👤 Enter a username for the new shopkeeper:")
                 return {"ok": True}
 
-            elif action == "create_shopkeeper":
             # -------------------- Product Management --------------------
             elif action == "add_product":
                 if role == "owner":
