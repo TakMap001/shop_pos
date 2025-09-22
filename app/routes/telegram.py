@@ -1016,25 +1016,35 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         send_message(chat_id, "❌ Unable to access tenant database.")
                         return {"ok": True}
 
-                    shopkeeper = User(
-                        name=f"Shopkeeper {data['username']}",
-                        username=data["username"],
-                        password_hash=hash_password(password),
-                        role="shopkeeper",
-                        tenant_db_url=user.tenant_db_url,
-                        chat_id=None
-                    )
-                    tenant_db.add(shopkeeper)
-                    tenant_db.commit()
-                    tenant_db.refresh(shopkeeper)
+                    # Safe retrieval of username
+                    shopkeeper_username = data.get("username") or text or "Unnamed"
+                    shopkeeper_name = f"Shopkeeper {shopkeeper_username}"
 
-                    send_message(chat_id, f"✅ Shopkeeper '{data['username']}' created successfully.")
+                    try:
+                        shopkeeper = User(
+                            name=shopkeeper_name,
+                            username=shopkeeper_username,
+                            password_hash=hash_password(password),
+                            role="shopkeeper",
+                            tenant_db_url=user.tenant_db_url,
+                            chat_id=None
+                        )
+                        tenant_db.add(shopkeeper)
+                        tenant_db.commit()
+                        tenant_db.refresh(shopkeeper)
+
+                        send_message(chat_id, f"✅ Shopkeeper '{shopkeeper_username}' created successfully.")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to create shopkeeper: {e}")
+                        send_message(chat_id, "❌ Failed to create shopkeeper. Please try again.")
+
+                    # Clear user state
                     user_states.pop(chat_id, None)
 
+                    # Send Main Menu
                     kb_dict = main_menu(user.role)
                     send_message(chat_id, "🏠 Main Menu:", kb_dict)
                     return {"ok": True}
-
 
             # -------------------- Add Product --------------------
             elif action == "awaiting_product":
