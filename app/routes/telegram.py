@@ -1251,6 +1251,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             action = data["callback_query"]["data"]
             callback_id = data["callback_query"]["id"]
 
+            print("DEBUG CALLBACK RECEIVED:", action, "from chat_id:", chat_id)
+
             # ✅ Answer callback to remove spinner
             requests.post(
                 f"{TELEGRAM_API_URL}/answerCallbackQuery",
@@ -1259,19 +1261,21 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             user = get_user(chat_id, db)
             if not user:
+                print("DEBUG: user not found in central DB")
+                send_message(chat_id, "❌ User not found in system.")
                 return {"ok": True}
+
+            print("DEBUG: user found", user.username, "role:", user.role, "tenant_db_url:", getattr(user, "tenant_db_url", None))
 
             role = user.role
+
             # Ensure tenant DB exists for owner/shopkeeper
-            if not user.tenant_db_url:
-                user.tenant_db_url = create_tenant_db(user.chat_id)
-                db.commit()  # save tenant_db_url in central DB
-
-            tenant_db = get_tenant_session(user.tenant_db_url)
-            if tenant_db is None:
-                send_message(chat_id, "❌ Unable to access tenant database. Contact support.")
-                return {"ok": True}
-
+            tenant_db = None
+            if user.tenant_db_url:
+                tenant_db = get_tenant_session(user.tenant_db_url)
+                if tenant_db is None:
+                    print("DEBUG: failed to connect tenant DB")
+                    send_message(chat_id, "⚠️ Warning: Unable to access tenant database. Some actions may be limited.")
 
             # -------------------- Shop Setup (Owner only) --------------------
             if action == "setup_shop" and role == "owner":
@@ -1280,11 +1284,10 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Create Shopkeeper --------------------
             elif action == "create_shopkeeper":
-                if user.role != "owner":
+                if role != "owner":
                     send_message(chat_id, "❌ Only owners can create shopkeepers.")
                     return {"ok": True}
 
-                # ✅ Set state to step 1 and prompt for username
                 user_states[chat_id] = {"action": "create_shopkeeper", "step": 1, "data": {}}
                 send_message(chat_id, "👤 Enter a username for the new shopkeeper:")
                 print("DEBUG: Create Shopkeeper prompt sent to chat_id", chat_id)
@@ -1300,86 +1303,64 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     user_states[chat_id] = {"action": "awaiting_product", "step": 1, "data": {"is_shopkeeper": True}}
 
             elif action == "update_product":
-                # Show first page of products
-                text, kb = products_page_view(tenant_db, page=1)
-                send_message(chat_id, text, kb)
+                if tenant_db:
+                    text, kb = products_page_view(tenant_db, page=1)
+                    send_message(chat_id, text, kb)
+                else:
+                    send_message(chat_id, "⚠️ Cannot fetch products: tenant DB unavailable.")
 
             elif action.startswith("products_page:"):
                 try:
                     page = int(action.split(":")[1])
                 except (IndexError, ValueError):
                     page = 1
-                text, kb = products_page_view(tenant_db, page=page)
-                send_message(chat_id, text, kb)
+                if tenant_db:
+                    text, kb = products_page_view(tenant_db, page=page)
+                    send_message(chat_id, text, kb)
+                else:
+                    send_message(chat_id, "⚠️ Cannot fetch products: tenant DB unavailable.")
 
             elif action.startswith("select_product:"):
-                try:
-                    product_id = int(action.split(":")[1])
-                except (IndexError, ValueError):
-                    send_message(chat_id, "⚠️ Invalid product selection.")
-                    return
+                if tenant_db:
+                    try:
+                        product_id = int(action.split(":")[1])
+                    except (IndexError, ValueError):
+                        send_message(chat_id, "⚠️ Invalid product selection.")
+                        return {"ok": True}
 
-                product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
-                if not product:
-                    send_message(chat_id, "⚠️ Product not found.")
-                    return
+                    product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
+                    if not product:
+                        send_message(chat_id, "⚠️ Product not found.")
+                        return {"ok": True}
 
-                # Ask what to update
-                if role == "owner":
-                    send_message(
-                        chat_id,
-                        f"✏️ Updating *{product.name}* (ID {product.product_id})\n"
-                        "Enter details as: `NewName, NewPrice, NewQuantity, UnitType, MinStock, LowStockThreshold`\n"
-                        "Leave blank to keep current values."
-                    )
-                else:  # Shopkeeper can only update quantity and unit type
-                    send_message(
-                        chat_id,
-                        f"✏️ Updating *{product.name}* (ID {product.product_id})\n"
-                        "Enter details as: `Quantity, UnitType`\n"
-                        "Leave blank to keep current values."
-                    )
+                    # Ask what to update
+                    if role == "owner":
+                        send_message(
+                            chat_id,
+                            f"✏️ Updating *{product.name}* (ID {product.product_id})\n"
+                            "Enter details as: `NewName, NewPrice, NewQuantity, UnitType, MinStock, LowStockThreshold`\n"
+                            "Leave blank to keep current values."
+                        )
+                    else:  # Shopkeeper
+                        send_message(
+                            chat_id,
+                            f"✏️ Updating *{product.name}* (ID {product.product_id})\n"
+                            "Enter details as: `Quantity, UnitType`\n"
+                            "Leave blank to keep current values."
+                        )
 
-                user_states[chat_id] = {"action": "awaiting_update", "step": 1, "data": {"product_id": product_id}}
-
-            # -------------------- Record Sale --------------------
-            elif action == "record_sale":
-                send_message(chat_id, "🛒 Enter product name to sell:")
-                user_states[chat_id] = {"action": "awaiting_sale", "step": 1, "data": {}}
+                    user_states[chat_id] = {"action": "awaiting_update", "step": 1, "data": {"product_id": product_id}}
+                else:
+                    send_message(chat_id, "⚠️ Cannot fetch product: tenant DB unavailable.")
 
             # -------------------- View Stock --------------------
             elif action == "view_stock":
                 if tenant_db:
                     stock_list = get_stock_list(tenant_db)
-                    kb_dict = {
-                        "inline_keyboard": [
-                            [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
-                        ]
-                    }
+                    kb_dict = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
                     send_message(chat_id, stock_list, kb_dict)
-
-            # -------------------- Reports Callback --------------------
-            elif action.startswith("report_"):
-                # Determine accessible reports based on role
-                owner_only_reports = [
-                    "report_low_stock", "report_top_products", "report_top_customers",
-                    "report_top_repeat_customers", "report_aov", "report_stock_turnover"
-                ]
-
-                # Shopkeeper restriction: cannot access owner-only reports
-                if role == "shopkeeper" and action in owner_only_reports:
-                    send_message(chat_id, "❌ Only owners can access this report.")
-                    return {"ok": True}
-
-                # Generate the requested report
-                report_text = generate_report(tenant_db, action)
-                kb_dict = {
-                    "inline_keyboard": [
-                        [{"text": "⬅️ Back to Reports Menu", "callback_data": "report_menu"}],
-                        [{"text": "⬅️ Back to Main Menu", "callback_data": "back_to_menu"}]
-                    ]
-                }
-                send_message(chat_id, report_text, kb_dict)
+                else:
+                    send_message(chat_id, "⚠️ Cannot view stock: tenant DB unavailable.")
 
             # -------------------- Reports Menu --------------------
             elif action == "report_menu":
@@ -1414,6 +1395,10 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             elif action == "back_to_menu":
                 kb_dict = main_menu(role=user.role)
                 send_message(chat_id, "🏠 Main Menu:", kb_dict)
+
+            else:
+                print("DEBUG: Unknown callback action:", action)
+                send_message(chat_id, f"⚠️ Unknown action: {action}")
 
         return {"ok": True}
 
