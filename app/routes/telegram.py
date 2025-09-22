@@ -70,9 +70,28 @@ def send_owner_credentials(chat_id, username, password):
         f"🔑 Password: {password}"
     )
 
-def get_user_by_chat_id(chat_id: int):
-    db = next(get_db())  # get a DB session
-    return db.query(User).filter(User.tenant_db_url == str(chat_id)).first()
+def get_user_by_chat(chat_id: int):
+    """
+    Return the central User row matching the Telegram chat_id.
+    """
+    if not chat_id:
+        return None
+    db = next(get_db())  # get a central DB session
+    return db.query(User).filter(User.chat_id == chat_id).first()
+
+def create_shopkeeper(tenant_session, username, password):
+    from app.models.models import User
+    from utils.security import hash_password
+
+    new_user = User(
+        username=username,
+        password_hash=hash_password(password),
+        role="shopkeeper",
+        chat_id=None  # intentionally blank until first login
+    )
+    tenant_session.add(new_user)
+    tenant_session.commit()
+    return new_user
 
 def role_menu(chat_id):
     """Role selection menu (Owner vs Shopkeeper)."""
@@ -844,22 +863,36 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
            
             # -------------------- Login handler --------------------
             if action == "login" and step == 1:
-                entered_password = text.strip()
+                entered_text = text.strip()
                 user = db.query(User).filter(User.chat_id == chat_id).first()
 
+                # Case 1: First-time shopkeeper login → "username password"
+                if not user and " " in entered_text:
+                    username, password = entered_text.split(" ", 1)
+                    candidate = db.query(User).filter(User.username == username).first()
+
+                    if candidate and verify_password(password, candidate.password_hash):
+                        # ✅ First-time login → update chat_id
+                        candidate.chat_id = chat_id
+                        db.commit()
+                        user = candidate
+
                 if not user:
-                    send_message(chat_id, "❌ User not found. Please /start to register.")
-                    user_states.pop(chat_id, None)
-                elif verify_password(entered_password, user.password_hash):
-                    send_message(chat_id, f"✅ Login successful! Welcome back, {user.name}.")
+                    send_message(chat_id, "❌ Invalid credentials. Please try again or /start.")
                     user_states.pop(chat_id, None)
 
-                    # -------------------- Role-based Main Menu --------------------
-                    kb = main_menu(user.role)
-                    send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                 else:
-                    send_message(chat_id, "❌ Incorrect password. Please try again:")
+                    # Case 2: Owner or returning shopkeeper → password only
+                    if verify_password(entered_text, user.password_hash):
+                        send_message(chat_id, f"✅ Login successful! Welcome, {user.name}.")
+                        user_states.pop(chat_id, None)
 
+                        # -------------------- Role-based Main Menu --------------------
+                        kb = main_menu(user.role)
+                        send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+
+                    else:
+                        send_message(chat_id, "❌ Incorrect password. Please try again:")
 
             # -------------------- Shop Setup (Owner only) --------------------
             elif action == "setup_shop" and user.role == "owner":
