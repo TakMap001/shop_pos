@@ -1294,15 +1294,16 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 return {"ok": True}
 
             role = user.role
-                # Ensure tenant DB exists for owner/shopkeeper
-                if not user.tenant_db_url:
-                    user.tenant_db_url = create_tenant_db(user.chat_id)
-                    db.commit()  # save tenant_db_url in central DB
+            # Ensure tenant DB exists for owner/shopkeeper
+            if not user.tenant_db_url:
+                user.tenant_db_url = create_tenant_db(user.chat_id)
+                db.commit()  # save tenant_db_url in central DB
 
-                tenant_db = get_tenant_session(user.tenant_db_url)
-                if tenant_db is None:
-                    send_message(chat_id, "❌ Unable to access tenant database. Contact support.")
-                    return {"ok": True}
+            tenant_db = get_tenant_session(user.tenant_db_url)
+            if tenant_db is None:
+                send_message(chat_id, "❌ Unable to access tenant database. Contact support.")
+                return {"ok": True}
+
 
             # -------------------- Shop Setup (Owner only) --------------------
             if action == "setup_shop" and role == "owner":
@@ -1315,7 +1316,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "❌ Only owners can create shopkeepers.")
                     return {"ok": True}
 
-                # Initialize step
+                # Initialize state
                 user_states[chat_id] = {"action": "create_shopkeeper", "step": 0, "data": {}}
                 send_message(chat_id, "👤 Enter a username for the new shopkeeper:")
                 return {"ok": True}
