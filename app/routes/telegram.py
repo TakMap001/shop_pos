@@ -966,13 +966,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
 
             # -------------------- Message handler for Create Shopkeeper --------------------
-            if user_states.get(chat_id, {}).get("action") == "create_shopkeeper":
-                state = user_states[chat_id]
-                step = state.get("step", 0)
+            state = user_states.get(chat_id)
+            if state and state.get("action") == "create_shopkeeper":
+                step = state.get("step", 1)
                 data = state.get("data", {})
 
-                # Step 0 -> Step 1: user types username
-                if step == 0 or step == 1:
+                # Step 1: received username
+                if step == 1:
                     username = text.strip()
                     if not username:
                         send_message(chat_id, "❌ Username cannot be empty. Enter again:")
@@ -983,7 +983,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "🔑 Enter password for the shopkeeper:")
                     return {"ok": True}
 
-                # Step 2: user types password
+                # Step 2: received password
                 if step == 2:
                     password = text.strip()
                     if not password:
@@ -1305,8 +1305,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "❌ Only owners can create shopkeepers.")
                     return {"ok": True}
 
-                # Initialize state
-                user_states[chat_id] = {"action": "create_shopkeeper", "step": 0, "data": {}}
+                # ✅ Set state to step 1 and prompt for username
+                user_states[chat_id] = {"action": "create_shopkeeper", "step": 1, "data": {}}
                 send_message(chat_id, "👤 Enter a username for the new shopkeeper:")
                 print("DEBUG: Create Shopkeeper prompt sent to chat_id", chat_id)
                 return {"ok": True}
