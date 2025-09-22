@@ -807,16 +807,17 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
         if not chat_id:
             return {"ok": True}
 
-        # 1. Check if user exists by chat_id
+        # 1. Get user from central DB
         user = db.query(User).filter(User.chat_id == chat_id).first()
 
+        # -------------------- /start --------------------
         if text == "/start":
             if user:
-                # 2. User exists
+                # Existing user
                 if not user.username or not user.password_hash:
-                    # Missing credentials → generate new username/password, retain other fields
+                    # Missing credentials → generate them
                     if not user.username:
-                        user.username = create_username(f"Owner{chat_id}")
+                        user.username = create_username(f"{user.role.capitalize()}{chat_id}")
                     if not user.password_hash:
                         generated_password = generate_password()
                         user.password_hash = hash_password(generated_password)
@@ -826,15 +827,14 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "🏪 Let's set up your shop! Please enter the shop name:")
                     user_states[chat_id] = {"action": "setup_shop", "step": 1, "data": {}}
                 else:
-                    # 3. User exists with everything → prompt login
+                    # All credentials exist → prompt password login
                     send_message(chat_id, "👋 Welcome back! Please enter your password to continue:")
                     user_states[chat_id] = {"action": "login", "step": 1, "data": {}}
-
             else:
-                # 4. New user → generate all fields and save
+                # New user → create owner by default
                 generated_username = create_username(f"Owner{chat_id}")
                 generated_password = generate_password()
-                generated_email = f"{chat_id}_{int(time.time())}@example.com"  # ensure unique email
+                generated_email = f"{chat_id}_{int(time.time())}@example.com"
 
                 new_user = User(
                     name=f"Owner{chat_id}",
@@ -848,31 +848,33 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 db.commit()
                 db.refresh(new_user)
 
+                # ✅ Create tenant DB for new owner immediately
+                tenant_db_url = create_tenant_db(chat_id)
+                new_user.tenant_db_url = tenant_db_url
+                db.commit()
+
                 send_owner_credentials(chat_id, generated_username, generated_password)
                 send_message(chat_id, "🏪 Let's set up your shop! Please enter the shop name:")
                 user_states[chat_id] = {"action": "setup_shop", "step": 1, "data": {}}
 
             return {"ok": True}
 
-
+        # -------------------- Login flow --------------------
         if chat_id in user_states:
             state = user_states[chat_id]
             action = state.get("action")
             step = state.get("step", 1)
-            data = state.get("data", {})
-           
-            # -------------------- Login handler --------------------
+            state_data = state.get("data", {})
+
             if action == "login" and step == 1:
                 entered_text = text.strip()
                 user = db.query(User).filter(User.chat_id == chat_id).first()
 
-                # Case 1: First-time shopkeeper login → "username password"
+                # First-time shopkeeper login with "username password"
                 if not user and " " in entered_text:
                     username, password = entered_text.split(" ", 1)
                     candidate = db.query(User).filter(User.username == username).first()
-
                     if candidate and verify_password(password, candidate.password_hash):
-                        # ✅ First-time login → update chat_id
                         candidate.chat_id = chat_id
                         db.commit()
                         user = candidate
@@ -880,19 +882,43 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 if not user:
                     send_message(chat_id, "❌ Invalid credentials. Please try again or /start.")
                     user_states.pop(chat_id, None)
+                    return {"ok": True}
 
-                else:
-                    # Case 2: Owner or returning shopkeeper → password only
-                    if verify_password(entered_text, user.password_hash):
-                        send_message(chat_id, f"✅ Login successful! Welcome, {user.name}.")
-                        user_states.pop(chat_id, None)
+                # Verify password for owner or returning shopkeeper
+                if not verify_password(entered_text, user.password_hash):
+                    send_message(chat_id, "❌ Incorrect password. Please try again:")
+                    return {"ok": True}
 
-                        # -------------------- Role-based Main Menu --------------------
-                        kb = main_menu(user.role)
-                        send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+                # ✅ Login successful
+                send_message(chat_id, f"✅ Login successful! Welcome, {user.name}.")
+                user_states.pop(chat_id, None)
 
-                    else:
-                        send_message(chat_id, "❌ Incorrect password. Please try again:")
+                # -------------------- Ensure tenant DB --------------------
+                if user.role == "owner":
+                    if not user.tenant_db_url:
+                        tenant_db_url = create_tenant_db(chat_id)
+                        user.tenant_db_url = tenant_db_url
+                        db.commit()
+                elif user.role == "shopkeeper":
+                    if not user.tenant_db_url:
+                        owner = db.query(User).filter(User.user_id == user.owner_id).first()
+                        if owner and owner.tenant_db_url:
+                            user.tenant_db_url = owner.tenant_db_url
+                            db.commit()
+                        else:
+                            send_message(chat_id, "❌ Unable to access tenant database. Contact support.")
+                            return {"ok": True}
+
+                # Get tenant DB session
+                tenant_db = get_tenant_session(user.tenant_db_url)
+                if tenant_db is None:
+                    send_message(chat_id, "❌ Unable to access tenant database. Contact support.")
+                    return {"ok": True}
+
+                # -------------------- Show main menu --------------------
+                kb = main_menu(user.role)
+                send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+                return {"ok": True}
 
             # -------------------- Shop Setup (Owner only) --------------------
             elif action == "setup_shop" and user.role == "owner":
