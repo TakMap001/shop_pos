@@ -1259,7 +1259,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 json={"callback_query_id": callback_id}
             )
 
-            user = get_user(chat_id, db)
+            user = get_user_by_chat(chat_id)
             if not user:
                 print("DEBUG: user not found in central DB")
                 send_message(chat_id, "❌ User not found in system.")
