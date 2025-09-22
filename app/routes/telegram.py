@@ -928,17 +928,15 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             existing_tenant.location = data["location"]
                             existing_tenant.contact = contact
                             tenant_db_url = existing_tenant.database_url
-                            send_message(chat_id, f"✅ Your existing shop info has been updated!\n\n🏪 {data['name']}\n📍 {data['location']}\n📞 {contact}")
+                            send_message(chat_id, f"✅ Your existing shop info has been updated!\n\n"
+                                      f"🏪 {data['name']}\n📍 {data['location']}\n📞 {contact}")
                         else:
-                            
                             # -------------------- Generate tenant DB URL --------------------
-                            # No tenant → create new
                             if not user.tenant_db_url:
                                 user.tenant_db_url = create_tenant_db(user.chat_id)
                                 tenant_db_url = user.tenant_db_url
                                 db.commit()
 
-                            print("DEBUG: tenant_db_url =", user.tenant_db_url)  # must be a valid URL string
                             tenant_db = get_tenant_session(user.tenant_db_url)
 
                             new_tenant = Tenant(
@@ -950,29 +948,27 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                 contact=contact
                             )
                             db.add(new_tenant)
-                            send_message(chat_id, f"✅ Shop info saved!\n\n🏪 {data['name']}\n📍 {data['location']}\n📞 {contact}")
+                            send_message(chat_id, f"✅ Shop info saved!\n\n"
+                                      f"🏪 {data['name']}\n📍 {data['location']}\n📞 {contact}")
 
                         # Link owner to tenant DB
                         user.tenant_db_url = tenant_db_url
                         db.commit()
 
-                        # Prompt to create Shopkeeper
-                        send_message(chat_id, "👤 Now create Shopkeeper login credentials.\n\nEnter a username for the shopkeeper:")
-                        user_states[chat_id] = {"action": "create_shopkeeper", "step": 1, "data": {}}
+                        # -------------------- Show Owner Main Menu --------------------
+                        kb_dict = main_menu(user.role)  # role-based menu
+                        send_message(chat_id, "🏠 Main Menu:", kb_dict)
+
+                        # Clear state
+                        user_states.pop(chat_id, None)
 
                     else:
                         send_message(chat_id, "❌ Contact cannot be empty. Enter shop contact number:")
 
 
-
-            # -------------------- Message handler for Create Shopkeeper --------------------
-            state = user_states.get(chat_id)
-            if state and state.get("action") == "create_shopkeeper":
-                step = state.get("step", 1)
-                data = state.get("data", {})
-
-                # Step 1: received username
-                if step == 1:
+            # -------------------- Create Shopkeeper (Owner only, from Main Menu) --------------------
+            elif action == "create_shopkeeper" and user.role == "owner":
+                if step == 1:  # Username
                     username = text.strip()
                     if not username:
                         send_message(chat_id, "❌ Username cannot be empty. Enter again:")
@@ -983,8 +979,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "🔑 Enter password for the shopkeeper:")
                     return {"ok": True}
 
-                # Step 2: received password
-                if step == 2:
+                elif step == 2:  # Password
                     password = text.strip()
                     if not password:
                         send_message(chat_id, "❌ Password cannot be empty. Enter again:")
@@ -1008,27 +1003,11 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     tenant_db.refresh(shopkeeper)
 
                     send_message(chat_id, f"✅ Shopkeeper '{data['username']}' created successfully.")
-                    user_states.pop(chat_id)
-
-                    kb = main_menu(user.role)
-                    send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
-                    return {"ok": True}
-
-
-                    # -------------------- Show Owner Main Menu --------------------
-                    kb_dict = main_menu(user.role)  # returns dict
-                    markup = types.InlineKeyboardMarkup()
-                    for row in kb_dict["inline_keyboard"]:
-                        buttons = [
-                            types.InlineKeyboardButton(text=btn["text"], callback_data=btn["callback_data"])
-                            for btn in row
-                        ]
-                        markup.row(*buttons)
-
-                    send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
-
-                    # Clear state
                     user_states.pop(chat_id, None)
+
+                    kb_dict = main_menu(user.role)
+                    send_message(chat_id, "🏠 Main Menu:", kb_dict)
+                    return {"ok": True}
 
 
                 # -------------------- Add Product --------------------
