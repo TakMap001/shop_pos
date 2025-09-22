@@ -965,46 +965,36 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
 
 
-            # -------------------- Create Shopkeeper (Owner only) --------------------
-            elif action == "create_shopkeeper" and user.role == "owner":
-                # Step 1: ask for username
-                if step == 0:
-                    send_message(chat_id, "👤 Enter a username for the new shopkeeper:")
-                    user_states[chat_id] = {"action": action, "step": 1, "data": {}}
-                    return {"ok": True}
+            # -------------------- Message handler for Create Shopkeeper --------------------
+            if user_states.get(chat_id, {}).get("action") == "create_shopkeeper":
+                state = user_states[chat_id]
+                step = state.get("step", 0)
+                data = state.get("data", {})
 
-                # Step 1: received username
-                if step == 1:
+                # Step 0 -> Step 1: user types username
+                if step == 0 or step == 1:
                     username = text.strip()
                     if not username:
                         send_message(chat_id, "❌ Username cannot be empty. Enter again:")
                         return {"ok": True}
 
                     data["username"] = username
-                    user_states[chat_id] = {"action": action, "step": 2, "data": data}
+                    user_states[chat_id] = {"action": "create_shopkeeper", "step": 2, "data": data}
                     send_message(chat_id, "🔑 Enter password for the shopkeeper:")
                     return {"ok": True}
 
-                # Step 2: received password
+                # Step 2: user types password
                 if step == 2:
                     password = text.strip()
                     if not password:
                         send_message(chat_id, "❌ Password cannot be empty. Enter again:")
                         return {"ok": True}
 
-                    if not user.tenant_db_url:
-                        user.tenant_db_url = create_tenant_db(user.chat_id)
-                        tenant_db_url = user.tenant_db_url
-                        db.commit()
-
-                    print("DEBUG: tenant_db_url =", user.tenant_db_url)  # must be a valid URL string
                     tenant_db = get_tenant_session(user.tenant_db_url)
-
                     if tenant_db is None:
                         send_message(chat_id, "❌ Unable to access tenant database.")
                         return {"ok": True}
 
-                    # Create shopkeeper
                     shopkeeper = User(
                         name=f"Shopkeeper {data['username']}",
                         username=data["username"],
@@ -1020,7 +1010,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, f"✅ Shopkeeper '{data['username']}' created successfully.")
                     user_states.pop(chat_id)
 
-                    # Return to main menu
                     kb = main_menu(user.role)
                     send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                     return {"ok": True}
@@ -1319,6 +1308,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 # Initialize state
                 user_states[chat_id] = {"action": "create_shopkeeper", "step": 0, "data": {}}
                 send_message(chat_id, "👤 Enter a username for the new shopkeeper:")
+                print("DEBUG: Create Shopkeeper prompt sent to chat_id", chat_id)
                 return {"ok": True}
 
             # -------------------- Product Management --------------------
