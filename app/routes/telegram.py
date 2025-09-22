@@ -1294,16 +1294,15 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 return {"ok": True}
 
             role = user.role
-            # Ensure tenant DB exists
-            if not user.tenant_db_url:
-                user.tenant_db_url = create_tenant_db(user.chat_id)
-                tenant_db_url = user.tenant_db_url
-                db.commit()  # save tenant_db_url in central DB
+                # Ensure tenant DB exists for owner/shopkeeper
+                if not user.tenant_db_url:
+                    user.tenant_db_url = create_tenant_db(user.chat_id)
+                    db.commit()  # save tenant_db_url in central DB
 
-            tenant_db = get_tenant_session(user.tenant_db_url)
-            if tenant_db is None:
-                send_message(chat_id, "❌ Unable to access tenant database. Contact support.")
-                return {"ok": True}
+                tenant_db = get_tenant_session(user.tenant_db_url)
+                if tenant_db is None:
+                    send_message(chat_id, "❌ Unable to access tenant database. Contact support.")
+                    return {"ok": True}
 
             # -------------------- Shop Setup (Owner only) --------------------
             if action == "setup_shop" and role == "owner":
@@ -1312,16 +1311,16 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Create Shopkeeper --------------------
             elif action == "create_shopkeeper":
-                if not user:
-                    send_message(chat_id, "❌ User not found. Please /start again.")
-                    return {"ok": True}
-
                 if user.role != "owner":
                     send_message(chat_id, "❌ Only owners can create shopkeepers.")
-                else:
-                    send_message(chat_id, "👤 Enter a username for the new shopkeeper:")
-                    user_states[chat_id] = {"action": "create_shopkeeper", "step": 1, "data": {}}
+                    return {"ok": True}
 
+                # Initialize step
+                user_states[chat_id] = {"action": "create_shopkeeper", "step": 0, "data": {}}
+                send_message(chat_id, "👤 Enter a username for the new shopkeeper:")
+                return {"ok": True}
+
+            elif action == "create_shopkeeper":
             # -------------------- Product Management --------------------
             elif action == "add_product":
                 if role == "owner":
