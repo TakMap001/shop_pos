@@ -1046,8 +1046,14 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "🏠 Main Menu:", kb_dict)
                     return {"ok": True}
 
+
             # -------------------- Add Product --------------------
             elif action == "awaiting_product":
+                tenant_db = get_tenant_session(user.tenant_db_url)
+                if tenant_db is None:
+                    send_message(chat_id, "❌ Unable to access tenant database.")
+                    return {"ok": True}
+
                 if step == 1:  # Product Name
                     product_name = text.strip()
                     if product_name:
@@ -1071,14 +1077,15 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     if unit_type:
                         data["unit_type"] = unit_type
                         if user.role == "owner":
-                            # Owner continues to set price and thresholds
                             user_states[chat_id] = {"action": action, "step": 4, "data": data}
                             send_message(chat_id, "💲 Enter product price:")
                         else:
-                            # Shopkeeper: send notification to owner for approval
-                            add_product_pending_approval(tenant_db, chat_id, data)
-                            send_message(chat_id, f"✅ Product *{data['name']}* added for approval. Owner will review.")
-                            notify_owner_of_new_product(chat_id, data)
+                            try:
+                                add_product_pending_approval(tenant_db, chat_id, data)
+                                send_message(chat_id, f"✅ Product *{data['name']}* added for approval. Owner will review.")
+                                notify_owner_of_new_product(chat_id, data)
+                            except Exception as e:
+                                send_message(chat_id, f"⚠️ Failed to submit product for approval: {str(e)}")
                             user_states.pop(chat_id)
                     else:
                         send_message(chat_id, "❌ Unit type cannot be empty. Please enter:")
@@ -1106,18 +1113,24 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         threshold = int(text.strip())
                         data["low_stock_threshold"] = threshold
 
-                        # Save product
-                        add_product(tenant_db, chat_id, data)
-                        send_message(chat_id, f"✅ Product *{data['name']}* added successfully.")
+                        try:
+                            add_product(tenant_db, chat_id, data)
+                            send_message(chat_id, f"✅ Product *{data['name']}* added successfully.")
+                        except Exception as e:
+                            send_message(chat_id, f"⚠️ Failed to add product: {str(e)}")
+
                         user_states.pop(chat_id)
                     except ValueError:
                         send_message(chat_id, "❌ Invalid number. Please enter a valid low stock threshold:")
 
 
-
             # -------------------- Update Product --------------------
             elif action == "awaiting_update":
-                # Step 1: Product selected via callback (product_id in data)
+                tenant_db = get_tenant_session(user.tenant_db_url)
+                if tenant_db is None:
+                    send_message(chat_id, "❌ Unable to access tenant database.")
+                    return {"ok": True}
+
                 product_id = data.get("product_id")
                 if not product_id:
                     send_message(chat_id, "⚠️ No product selected. Please try again from the menu.")
@@ -1130,11 +1143,9 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     user_states.pop(chat_id, None)
                     return {"ok": True}
 
-                # Step 2: Expect comma-separated updates
                 parts = [p.strip() for p in text.split(",")]
 
                 try:
-                    # Owner can update all fields
                     if user.role == "owner":
                         new_name = parts[0] if len(parts) > 0 and parts[0] else None
                         new_price = parts[1] if len(parts) > 1 and parts[1] else None
@@ -1155,8 +1166,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             product.min_stock_level = int(new_min_stock)
                         if new_threshold:
                             product.low_stock_threshold = int(new_threshold)
-
-                    # Shopkeeper can only update quantity and unit_type
                     else:
                         new_quantity = parts[0] if len(parts) > 0 and parts[0] else None
                         new_unit = parts[1] if len(parts) > 1 and parts[1] else None
@@ -1169,7 +1178,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     tenant_db.commit()
                     send_message(chat_id, f"✅ Product updated successfully: {product.name}")
                     user_states.pop(chat_id)
-
                 except Exception as e:
                     tenant_db.rollback()
                     send_message(chat_id, f"⚠️ Failed to update product: {str(e)}")
@@ -1177,7 +1185,12 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Record Sale --------------------
             elif action == "awaiting_sale":
-                if step == 1:  # Product search by name
+                tenant_db = get_tenant_session(user.tenant_db_url)
+                if tenant_db is None:
+                    send_message(chat_id, "❌ Unable to access tenant database.")
+                    return {"ok": True}
+
+                if step == 1:
                     matches = tenant_db.query(ProductORM).filter(ProductORM.name.ilike(f"%{text}%")).all()
                     if not matches:
                         send_message(chat_id, "⚠️ No products found with that name. Try again:")
@@ -1189,7 +1202,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         user_states[chat_id] = {"action": action, "step": 2, "data": data}
                         send_message(chat_id, f"📦 Selected {selected.name} ({selected.unit_type}). Enter quantity sold:")
                     else:
-                        # multiple options → show inline keyboard
                         kb_rows = [
                             [{"text": f"{p.name} — Stock: {p.stock} ({p.unit_type})", "callback_data": f"select_sale:{p.product_id}"}]
                             for p in matches
@@ -1198,7 +1210,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         send_message(chat_id, "🔹 Multiple products found. Please select:", {"inline_keyboard": kb_rows})
                     return {"ok": True}
 
-                elif step == 2:  # Quantity
+                elif step == 2:
                     try:
                         qty = int(text.strip())
                         data["quantity"] = qty
@@ -1208,7 +1220,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         send_message(chat_id, "❌ Invalid quantity. Enter a number:")
                     return {"ok": True}
 
-                elif step == 3:  # Payment Type
+                elif step == 3:
                     payment_type = text.strip().lower()
                     if payment_type not in ["full", "partial", "credit"]:
                         send_message(chat_id, "❌ Invalid type. Choose: full, partial, credit:")
@@ -1226,7 +1238,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         send_message(chat_id, "💵 Enter amount paid by customer:")
                     return {"ok": True}
 
-                elif step == 4:  # Partial / Credit amount
+                elif step == 4:
                     try:
                         amount_paid = float(text.strip())
                         data["amount_paid"] = amount_paid
@@ -1234,7 +1246,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         total_price = float(product.price) * data["quantity"]
                         data["pending_amount"] = max(total_price - amount_paid, 0)
                         data["change_left"] = max(amount_paid - total_price, 0)
-            
+
                         if data["pending_amount"] > 0 or data["change_left"] > 0:
                             user_states[chat_id] = {"action": action, "step": 5, "data": data}
                             send_message(chat_id, "👤 Enter customer name:")
@@ -1245,7 +1257,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         send_message(chat_id, "❌ Invalid number. Enter a valid amount:")
                     return {"ok": True}
 
-                elif step == 6:  # Customer Name
+                elif step == 6:
                     customer_name = text.strip()
                     if not customer_name:
                         send_message(chat_id, "❌ Name cannot be empty. Enter customer name:")
@@ -1255,7 +1267,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "📞 Enter customer contact number:")
                     return {"ok": True}
 
-                elif step == 7:  # Customer Contact
+                elif step == 7:
                     customer_contact = text.strip()
                     if not customer_contact:
                         send_message(chat_id, "❌ Contact cannot be empty. Enter customer contact number:")
@@ -1265,7 +1277,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, f"✅ Customer info recorded. Confirm sale? (yes/no)")
                     return {"ok": True}
 
-                elif step == 8:  # Confirm sale
+                elif step == 8:
                     if text.strip().lower() != "yes":
                         send_message(chat_id, "❌ Sale cancelled.")
                         user_states.pop(chat_id, None)
@@ -1276,10 +1288,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         send_message(chat_id, f"✅ Sale recorded successfully: {data['quantity']} {data['unit_type']} sold.")
                     except Exception as e:
                         send_message(chat_id, f"⚠️ Failed to record sale: {str(e)}")
-                    user_states.pop(chat_id, None)
+                        user_states.pop(chat_id, None)
                     return {"ok": True}
-
-
 
         # -------------------- Handle callbacks --------------------
         if "callback_query" in data:
