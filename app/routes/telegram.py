@@ -426,29 +426,69 @@ def update_product(db: Session, chat_id: int, product: ProductORM, data: dict):
     """
     Update a product in a tenant-aware way.
     Accepts a ProductORM instance and a `data` dict containing any updated fields.
-    Only updates fields provided in `data`.
+    Supports "-" to keep existing values.
     """
     try:
-        # Apply updates if present in data
-        if "new_name" in data:
-            product.name = data["new_name"]
-        if "new_price" in data:
-            product.price = data["new_price"]
-        if "new_quantity" in data:
-            product.stock = data["new_quantity"]
-        if "new_unit" in data:
-            product.unit_type = data["new_unit"]
-        if "new_min_stock" in data:
-            product.min_stock_level = data["new_min_stock"]
-        if "new_low_threshold" in data:
-            product.low_stock_threshold = data["new_low_threshold"]
+        # -------------------- Name --------------------
+        if "new_name" in data and data["new_name"] != "-":
+            product.name = data["new_name"].strip()
 
+        # -------------------- Price --------------------
+        if "new_price" in data and data["new_price"] != "-":
+            try:
+                product.price = float(data["new_price"])
+                if product.price <= 0:
+                    raise ValueError("Price must be greater than 0.")
+            except ValueError:
+                send_message(chat_id, "❌ Invalid price. Please enter a number.")
+                return
+
+        # -------------------- Quantity --------------------
+        if "new_quantity" in data and data["new_quantity"] != "-":
+            try:
+                product.stock = int(data["new_quantity"])
+                if product.stock < 0:
+                    raise ValueError("Stock cannot be negative.")
+            except ValueError:
+                send_message(chat_id, "❌ Invalid quantity. Please enter a whole number.")
+                return
+
+        # -------------------- Unit Type --------------------
+        if "new_unit" in data and data["new_unit"] != "-":
+            product.unit_type = data["new_unit"].strip()
+
+        # -------------------- Min Stock Level --------------------
+        if "new_min_stock" in data and data["new_min_stock"] != "-":
+            try:
+                product.min_stock_level = int(data["new_min_stock"])
+            except ValueError:
+                send_message(chat_id, "❌ Invalid minimum stock level. Please enter a whole number.")
+                return
+
+        # -------------------- Low Stock Threshold --------------------
+        if "new_low_threshold" in data and data["new_low_threshold"] != "-":
+            try:
+                product.low_stock_threshold = int(data["new_low_threshold"])
+            except ValueError:
+                send_message(chat_id, "❌ Invalid low stock threshold. Please enter a whole number.")
+                return
+
+        # -------------------- Commit --------------------
         db.commit()
         db.refresh(product)
-        send_message(chat_id, f"✅ Product updated successfully: {product.name}")
+        send_message(
+            chat_id,
+            f"✅ Product updated successfully:\n"
+            f"📦 {product.name}\n"
+            f"💲 Price: {product.price}\n"
+            f"📊 Stock: {product.stock} {product.unit_type}\n"
+            f"📉 Min Level: {product.min_stock_level}, ⚠️ Alert: {product.low_stock_threshold}"
+        )
+
     except Exception as e:
         db.rollback()
         send_message(chat_id, f"❌ Failed to update product: {str(e)}")
+
 
 def record_sale(db: Session, chat_id: int, data: dict):
     """
@@ -1059,6 +1099,14 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Add Product --------------------
             elif action == "awaiting_product":
+                # -------------------- Ensure tenant DB --------------------
+                tenant_db = get_tenant_session(user.tenant_db_url)
+                if tenant_db is None:
+                    send_message(chat_id, "❌ Unable to access tenant database.")
+                    return {"ok": True}
+
+                data = state.get("data", {})
+                # -------------------- Step Handling --------------------
                 if step == 1:  # Product Name
                     product_name = text.strip()
                     if product_name:
