@@ -368,29 +368,44 @@ def get_stock_list(db: Session):
     return "\n".join(lines)
 
 
-def add_product(db: Session, chat_id: int, text: str):
+def add_product(db: Session, chat_id: int, data: dict):
     """
-    Add a product in a tenant-aware way.
+    Add a product in a tenant-aware way using structured `data` collected step by step.
     The `db` session is already connected to the tenant's DB.
     """
     try:
-        name, price_str, stock_str = parse_input(text, 3)
-        price = float(price_str)
-        stock = int(stock_str)
+        name = data.get("name")
+        price = float(data.get("price", 0))
+        stock = int(data.get("quantity", 0))
+        unit_type = data.get("unit_type", "unit")
+        min_stock_level = int(data.get("min_stock_level", 0))
+        low_stock_threshold = int(data.get("low_stock_threshold", 0))
 
-        if price <= 0 or stock < 0:
-            raise ValueError("Price must be > 0 and stock >= 0")
+        if not name:
+            raise ValueError("Missing product name.")
+        if price <= 0:
+            raise ValueError("Price must be greater than 0.")
+        if stock < 0:
+            raise ValueError("Stock cannot be negative.")
     except Exception as e:
-        send_message(chat_id, f"❌ Invalid input: {str(e)}\nSend as: `name;price;stock` or `name,price,stock`")
+        send_message(chat_id, f"❌ Invalid product data: {str(e)}")
         return
 
-    # Tenant DB only contains products for this tenant
+    # Ensure product is unique for this tenant
     existing = db.query(ProductORM).filter(func.lower(ProductORM.name) == name.lower()).first()
     if existing:
         send_message(chat_id, f"❌ Product '{name}' already exists.")
         return
 
-    new_product = ProductORM(name=name, price=price, stock=stock)
+    new_product = ProductORM(
+        name=name,
+        price=price,
+        stock=stock,
+        unit_type=unit_type,
+        min_stock_level=min_stock_level,
+        low_stock_threshold=low_stock_threshold,
+    )
+
     try:
         db.add(new_product)
         db.commit()
@@ -400,60 +415,58 @@ def add_product(db: Session, chat_id: int, text: str):
         send_message(chat_id, f"❌ Database error: {str(e)}")
         return
 
-    send_message(chat_id, f"✅ Product added: {name} — ${price}, Stock: {stock}")
+    send_message(
+        chat_id,
+        f"✅ Product added: *{name}*\n💲 Price: {price}\n📦 Stock: {stock} {unit_type}\n"
+        f"📊 Min Level: {min_stock_level}, ⚠️ Low Stock Alert: {low_stock_threshold}"
+    )
 
 
-def update_product(db: Session, chat_id: int, text: str):
+def update_product(db: Session, chat_id: int, product: ProductORM, data: dict):
     """
     Update a product in a tenant-aware way.
-    Only products in the current tenant DB are affected.
+    Accepts a ProductORM instance and a `data` dict containing any updated fields.
+    Only updates fields provided in `data`.
     """
     try:
-        prod_id_str, new_name, price_str, stock_str = parse_input(text, 4)
-        prod_id = int(prod_id_str)
-        price = float(price_str)
-        stock = int(stock_str)
+        # Apply updates if present in data
+        if "new_name" in data:
+            product.name = data["new_name"]
+        if "new_price" in data:
+            product.price = data["new_price"]
+        if "new_quantity" in data:
+            product.stock = data["new_quantity"]
+        if "new_unit" in data:
+            product.unit_type = data["new_unit"]
+        if "new_min_stock" in data:
+            product.min_stock_level = data["new_min_stock"]
+        if "new_low_threshold" in data:
+            product.low_stock_threshold = data["new_low_threshold"]
 
-        if price <= 0 or stock < 0:
-            raise ValueError("Price must be > 0 and stock >= 0")
-
-        # Tenant DB only contains products for this tenant
-        product = db.query(ProductORM).filter(ProductORM.product_id == prod_id).first()
-        if not product:
-            raise ValueError(f"No product found with ID {prod_id}")
-    except Exception as e:
-        send_message(chat_id, f"❌ Invalid input: {str(e)}\nSend as: `id;new_name;price;stock` or `id,new_name,price,stock`")
-        return
-
-    product.name = new_name
-    product.price = price
-    product.stock = stock
-
-    try:
         db.commit()
-        send_message(chat_id, f"✅ Product updated: {product.name} — ${product.price}, Stock: {product.stock}")
+        db.refresh(product)
+        send_message(chat_id, f"✅ Product updated successfully: {product.name}")
     except Exception as e:
         db.rollback()
-        send_message(chat_id, f"❌ Database error: {str(e)}")
-
+        send_message(chat_id, f"❌ Failed to update product: {str(e)}")
 
 def record_sale(db: Session, chat_id: int, data: dict):
     """
-    Record a sale in tenant DB.
+    Record a sale in tenant DB step-by-step.
     Expects `data` dict with keys:
     - product_id
     - unit_type (optional, defaults to product.unit_type)
     - quantity
     - payment_type (full/partial/credit)
-    - amount_paid (required if partial/credit)
-    - customer_name (optional, only if credit/change)
-    - customer_contact (optional, only if credit/change)
+    - amount_paid (optional if full)
+    - customer_name (optional)
+    - customer_contact (optional)
     """
     try:
         # -------------------- Fetch Product --------------------
         product = db.query(ProductORM).filter(ProductORM.product_id == data["product_id"]).first()
         if not product:
-            send_message(chat_id, f"❌ Product not found.")
+            send_message(chat_id, "❌ Product not found.")
             return
 
         qty = int(data.get("quantity", 0))
@@ -472,23 +485,22 @@ def record_sale(db: Session, chat_id: int, data: dict):
 
         # -------------------- Payment Calculations --------------------
         payment_type = data.get("payment_type", "full")
-        amount_paid = float(data.get("amount_paid", 0.0))
+        amount_paid = float(data.get("amount_paid", 0.0)) if data.get("amount_paid") is not None else 0.0
         total_amount = float(product.price) * qty
-
         pending_amount = max(total_amount - amount_paid, 0.0)
         change_left = max(amount_paid - total_amount, 0.0)
         unit_type = data.get("unit_type", product.unit_type)
 
-        # -------------------- Save Customer (if credit/partial or change) --------------------
+        # -------------------- Save Customer (if partial/credit or change) --------------------
         customer_id = None
-        if pending_amount > 0.0 or change_left > 0.0:
+        if payment_type in ["partial", "credit"] or change_left > 0.0:
             if data.get("customer_name") or data.get("customer_contact"):
                 customer = CustomerORM(
                     name=data.get("customer_name"),
                     contact=data.get("customer_contact")
                 )
                 db.add(customer)
-                db.flush()  # get customer_id before commit
+                db.flush()  # assign customer_id before commit
                 customer_id = customer.customer_id
 
         # -------------------- Create Sale --------------------
@@ -502,13 +514,13 @@ def record_sale(db: Session, chat_id: int, data: dict):
             amount_paid=amount_paid,
             pending_amount=pending_amount,
             change_left=change_left,
-            customer_id=customer_id  # link only if credit/change
+            customer_id=customer_id
         )
 
         # -------------------- Update Stock --------------------
         product.stock = max(product.stock - qty, 0)
 
-        # -------------------- Commit to DB --------------------
+        # -------------------- Commit --------------------
         db.add(sale)
         db.commit()
         db.refresh(sale)
@@ -517,7 +529,7 @@ def record_sale(db: Session, chat_id: int, data: dict):
         send_message(chat_id, f"✅ Sale recorded: {qty} × {product.name} ({unit_type}) = ${total_amount}")
         send_message(chat_id, get_stock_list(db))
 
-        # -------------------- Telegram Notifications --------------------
+        # -------------------- Additional Notifications --------------------
         notify_low_stock(db, product)
         notify_top_product(db, product)
         notify_high_value_sale(db, sale)
@@ -525,7 +537,6 @@ def record_sale(db: Session, chat_id: int, data: dict):
     except Exception as e:
         db.rollback()
         send_message(chat_id, f"❌ Failed to record sale: {str(e)}")
-
 
 # -------------------- Clean Tenant-Aware Reports --------------------
 def generate_report(db: Session, report_type: str, tenant_id: int = None):
@@ -1046,77 +1057,73 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "🏠 Main Menu:", kb_dict)
                     return {"ok": True}
 
-
             # -------------------- Add Product --------------------
             elif action == "awaiting_product":
-                if step == 1:  # Product name
-                    data["name"] = text.strip()
-                    user_states[chat_id] = {"action": "awaiting_product", "step": 2, "data": data}
-                    send_message(chat_id, "💲 Enter price:")
-                    return {"ok": True}
+                if step == 1:  # Product Name
+                    product_name = text.strip()
+                    if product_name:
+                        data["name"] = product_name
+                        user_states[chat_id] = {"action": action, "step": 2, "data": data}
+                        send_message(chat_id, "📦 Enter quantity:")
+                    else:
+                        send_message(chat_id, "❌ Product name cannot be empty. Please enter again:")
 
-                elif step == 2:  # Price
+                elif step == 2:  # Quantity
                     try:
-                        data["price"] = float(text.strip())
+                        qty = int(text.strip())
+                        data["quantity"] = qty
+                        user_states[chat_id] = {"action": action, "step": 3, "data": data}
+                        send_message(chat_id, "📏 Enter unit type (e.g., piece, pack, box, carton):")
                     except ValueError:
-                        send_message(chat_id, "❌ Invalid price. Enter a numeric value:")
-                        return {"ok": True}
-                    user_states[chat_id] = {"action": "awaiting_product", "step": 3, "data": data}
-                    send_message(chat_id, "📦 Enter unit of measure (e.g., pack, kg):")
-                    return {"ok": True}
+                        send_message(chat_id, "❌ Invalid quantity. Please enter a number:")
 
-                elif step == 3:  # Unit
-                    data["unit"] = text.strip()
-                    user_states[chat_id] = {"action": "awaiting_product", "step": 4, "data": data}
-                    send_message(chat_id, "🔢 Enter initial stock quantity:")
-                    return {"ok": True}
+                elif step == 3:  # Unit Type
+                    unit_type = text.strip()
+                    if unit_type:
+                        data["unit_type"] = unit_type
+                        if user.role == "owner":
+                            # Owner continues to set price and thresholds
+                            user_states[chat_id] = {"action": action, "step": 4, "data": data}
+                            send_message(chat_id, "💲 Enter product price:")
+                        else:
+                            # Shopkeeper: send notification to owner for approval
+                            add_product_pending_approval(tenant_db, chat_id, data)
+                            send_message(chat_id, f"✅ Product *{data['name']}* added for approval. Owner will review.")
+                            notify_owner_of_new_product(chat_id, data)
+                            user_states.pop(chat_id, None)
+                    else:
+                        send_message(chat_id, "❌ Unit type cannot be empty. Please enter:")
 
-                elif step == 4:  # Stock
+                elif step == 4:  # Price (Owner only)
                     try:
-                        data["stock"] = int(text.strip())
+                        price = float(text.strip())
+                        data["price"] = price
+                        user_states[chat_id] = {"action": action, "step": 5, "data": data}
+                        send_message(chat_id, "📊 Enter minimum stock level (e.g., 10):")
                     except ValueError:
-                        send_message(chat_id, "❌ Invalid stock. Enter an integer value:")
-                        return {"ok": True}
-                    user_states[chat_id] = {"action": "awaiting_product", "step": 5, "data": data}
-                    send_message(chat_id, "⚠️ Enter low stock alert level:")
-                    return {"ok": True}
+                        send_message(chat_id, "❌ Invalid price. Please enter a number:")
 
-                elif step == 5:  # Low stock alert
+                elif step == 5:  # Min Stock Level (Owner)
                     try:
-                        data["low_stock_alert"] = int(text.strip())
+                        min_stock = int(text.strip())
+                        data["min_stock_level"] = min_stock
+                        user_states[chat_id] = {"action": action, "step": 6, "data": data}
+                        send_message(chat_id, "⚠️ Enter low stock threshold (alert level):")
                     except ValueError:
-                        send_message(chat_id, "❌ Invalid number. Enter an integer value:")
-                        return {"ok": True}
+                        send_message(chat_id, "❌ Invalid number. Please enter a valid minimum stock level:")
 
-                    # Save product in tenant DB
-                    tenant_db = get_tenant_session(user.tenant_db_url)
-                    if tenant_db is None:
-                        send_message(chat_id, "❌ Unable to access tenant database.")
-                        return {"ok": True}
-
+                elif step == 6:  # Low Stock Threshold (Owner)
                     try:
-                        product = ProductORM(
-                            name=data["name"],
-                            price=Decimal(str(data["price"])),
-                            unit=data["unit"],
-                            stock=data["stock"],
-                            low_stock_alert=data["low_stock_alert"]
-                        )
-                        tenant_db.add(product)
-                        tenant_db.commit()
-                        tenant_db.refresh(product)
+                        threshold = int(text.strip())
+                        data["low_stock_threshold"] = threshold
 
-                        send_message(chat_id, f"✅ Product '{product.name}' added successfully.")
-                    except Exception as e:
-                        send_message(chat_id, f"❌ Failed to add product: {str(e)}")
-                    finally:
-                        tenant_db.close()
+                        # Save product
+                        add_product(tenant_db, chat_id, data)
+                        send_message(chat_id, f"✅ Product *{data['name']}* added successfully.")
+                        user_states.pop(chat_id, None)
+                    except ValueError:
+                        send_message(chat_id, "❌ Invalid number. Please enter a valid low stock threshold:")
 
-                    # Clear state and return to menu
-                    user_states.pop(chat_id, None)
-                    kb_dict = main_menu(user.role)
-                    send_message(chat_id, "🏠 Main Menu:", kb_dict)
-                    return {"ok": True}
 
             # -------------------- Update Product (step-by-step, search by name) --------------------
             elif action == "awaiting_update":
@@ -1162,7 +1169,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     return {"ok": True}
 
                 # STEP 2+: Owner walks through fields one-by-one, Shopkeeper only quantity->unit
-                # For convenience we accept '-' or empty to skip / keep current.
                 if step >= 2:
                     product_id = data.get("product_id")
                     if not product_id:
@@ -1176,10 +1182,9 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         user_states.pop(chat_id, None)
                         return {"ok": True}
 
-                    # OWNER flow: name -> price -> quantity -> unit -> min_stock -> low_threshold -> SAVE
+                    # OWNER flow
                     if user.role == "owner":
-                        # step 2: new name
-                        if step == 2:
+                        if step == 2:  # new name
                             new_name = text.strip()
                             if new_name and new_name != "-":
                                 data["new_name"] = new_name
@@ -1187,8 +1192,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             send_message(chat_id, "💲 Enter new price (or send `-` to keep current):")
                             return {"ok": True}
 
-                        # step 3: price
-                        if step == 3:
+                        if step == 3:  # new price
                             val = text.strip()
                             if val and val != "-":
                                 try:
@@ -1200,8 +1204,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             send_message(chat_id, "🔢 Enter new quantity (or send `-` to keep current):")
                             return {"ok": True}
 
-                        # step 4: quantity
-                        if step == 4:
+                        if step == 4:  # new quantity
                             val = text.strip()
                             if val and val != "-":
                                 try:
@@ -1213,8 +1216,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             send_message(chat_id, "📦 Enter new unit type (or send `-` to keep current):")
                             return {"ok": True}
 
-                        # step 5: unit type
-                        if step == 5:
+                        if step == 5:  # new unit
                             val = text.strip()
                             if val and val != "-":
                                 data["new_unit"] = val
@@ -1222,8 +1224,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             send_message(chat_id, "📊 Enter new minimum stock level (or send `-` to keep current):")
                             return {"ok": True}
 
-                        # step 6: min stock
-                        if step == 6:
+                        if step == 6:  # new min stock
                             val = text.strip()
                             if val and val != "-":
                                 try:
@@ -1235,8 +1236,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             send_message(chat_id, "⚠️ Enter new low stock threshold (or send `-` to keep current):")
                             return {"ok": True}
 
-                        # step 7: low stock threshold -> perform update & save
-                        if step == 7:
+                        if step == 7:  # low stock threshold -> SAVE
                             val = text.strip()
                             if val and val != "-":
                                 try:
@@ -1245,34 +1245,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                     send_message(chat_id, "❌ Invalid number. Enter an integer or `-` to keep current:")
                                     return {"ok": True}
 
-                            # apply updates
-                            try:
-                                if data.get("new_name"):
-                                    product.name = data["new_name"]
-                                if "new_price" in data:
-                                    product.price = data["new_price"]
-                                if "new_quantity" in data:
-                                    product.stock = data["new_quantity"]
-                                if "new_unit" in data:
-                                    product.unit_type = data["new_unit"]
-                                if "new_min_stock" in data:
-                                    product.min_stock_level = data["new_min_stock"]
-                                if "new_low_threshold" in data:
-                                    product.low_stock_threshold = data["new_low_threshold"]
-
-                                tenant_db.commit()
-                                send_message(chat_id, f"✅ Product updated successfully: {product.name}")
-                            except Exception as e:
-                                tenant_db.rollback()
-                                send_message(chat_id, f"⚠️ Failed to update product: {str(e)}")
-
+                            update_product(tenant_db, chat_id, product, data)
                             user_states.pop(chat_id, None)
                             return {"ok": True}
 
-                    # SHOPKEEPER flow: step2 quantity -> step3 unit -> SAVE
+                    # SHOPKEEPER flow
                     else:
-                        # step 2: quantity
-                        if step == 2:
+                        if step == 2:  # new quantity
                             val = text.strip()
                             if val and val != "-":
                                 try:
@@ -1284,29 +1263,17 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             send_message(chat_id, "📦 Enter unit type (or send `-` to keep current):")
                             return {"ok": True}
 
-                        # step 3: unit type -> apply and notify owner
-                        if step == 3:
+                        if step == 3:  # new unit -> SAVE
                             val = text.strip()
                             if val and val != "-":
                                 data["new_unit"] = val
 
-                            try:
-                                if "new_quantity" in data:
-                                    product.stock = data["new_quantity"]
-                                if "new_unit" in data:
-                                    product.unit_type = data["new_unit"]
-
-                                tenant_db.commit()
-                                # optionally notify owner about change
-                                notify_owner_of_product_update(chat_id, product, {
-                                    "quantity": data.get("new_quantity"),
-                                    "unit_type": data.get("new_unit")
-                                })
-                                send_message(chat_id, f"✅ Product updated successfully: {product.name}")
-                            except Exception as e:
-                                tenant_db.rollback()
-                                send_message(chat_id, f"⚠️ Failed to update product: {str(e)}")
-
+                            update_product(tenant_db, chat_id, product, data)
+                            # optionally notify owner
+                            notify_owner_of_product_update(chat_id, product, {
+                                "quantity": data.get("new_quantity"),
+                                "unit_type": data.get("new_unit")
+                            })
                             user_states.pop(chat_id, None)
                             return {"ok": True}
 
@@ -1372,7 +1339,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         data["amount_paid"] = None
                         data["pending_amount"] = 0
                         data["change_left"] = 0
-                        user_states[chat_id] = {"action": "awaiting_sale", "step": 5, "data": data}
+                        user_states[chat_id] = {"action": "awaiting_sale", "step": 6, "data": data}
                         send_message(chat_id, "✅ Full payment selected. Confirm sale? (yes/no)")
                     else:
                         user_states[chat_id] = {"action": "awaiting_sale", "step": 4, "data": data}
@@ -1389,43 +1356,24 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         data["pending_amount"] = max(total_price - amount_paid, 0)
                         data["change_left"] = max(amount_paid - total_price, 0)
 
-                        if data["pending_amount"] > 0 or data["change_left"] > 0:
-                            user_states[chat_id] = {"action": "awaiting_sale", "step": 5, "data": data}
-                            send_message(chat_id, "👤 Enter customer name:")
-                        else:
-                            user_states[chat_id] = {"action": "awaiting_sale", "step": 6, "data": data}
-                            send_message(chat_id, f"✅ Recorded amount paid: {amount_paid}. Confirm sale? (yes/no)")
+                        user_states[chat_id] = {"action": "awaiting_sale", "step": 5, "data": data}
+                        send_message(chat_id, "👤 Enter customer name:")
                     except ValueError:
                         send_message(chat_id, "❌ Invalid number. Enter a valid amount:")
                     return {"ok": True}
 
-                # STEP 5: (either customer name after partial/credit OR confirmation for full)
+                # STEP 5: customer name
                 elif step == 5:
-                    # If this reached because partial payment and we asked for customer name:
-                    if "customer_name" not in data:
-                        customer_name = text.strip()
-                        if not customer_name:
-                            send_message(chat_id, "❌ Name cannot be empty. Enter customer name:")
-                            return {"ok": True}
-                        data["customer_name"] = customer_name
-                        user_states[chat_id] = {"action": "awaiting_sale", "step": 7, "data": data}
-                        send_message(chat_id, "📞 Enter customer contact number:")
+                    customer_name = text.strip()
+                    if not customer_name:
+                        send_message(chat_id, "❌ Name cannot be empty. Enter customer name:")
                         return {"ok": True}
-                    else:
-                        # defensive fallback; treat as confirm step
-                        if text.strip().lower() != "yes":
-                            send_message(chat_id, "❌ Sale cancelled.")
-                            user_states.pop(chat_id, None)
-                            return {"ok": True}
-                        try:
-                            record_sale(tenant_db, chat_id, data)
-                            send_message(chat_id, f"✅ Sale recorded successfully: {data['quantity']} {data['unit_type']} sold.")
-                        except Exception as e:
-                            send_message(chat_id, f"⚠️ Failed to record sale: {str(e)}")
-                        user_states.pop(chat_id, None)
-                        return {"ok": True}
+                    data["customer_name"] = customer_name
+                    user_states[chat_id] = {"action": "awaiting_sale", "step": 7, "data": data}
+                    send_message(chat_id, "📞 Enter customer contact number:")
+                    return {"ok": True}
 
-                # STEP 6: confirm sale for the simple path
+                # STEP 6: confirm sale for full payment
                 elif step == 6:
                     if text.strip().lower() != "yes":
                         send_message(chat_id, "❌ Sale cancelled.")
@@ -1439,7 +1387,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     user_states.pop(chat_id, None)
                     return {"ok": True}
 
-                # STEP 7: reached after we collected customer name -> ask contact (already handled above)
+                # STEP 7: customer contact
                 elif step == 7:
                     customer_contact = text.strip()
                     if not customer_contact:
@@ -1450,6 +1398,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, f"✅ Customer info recorded. Confirm sale? (yes/no)")
                     return {"ok": True}
 
+                # STEP 8: final confirmation
                 elif step == 8:
                     if text.strip().lower() != "yes":
                         send_message(chat_id, "❌ Sale cancelled.")
