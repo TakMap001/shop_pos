@@ -1048,178 +1048,319 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
 
             # -------------------- Add Product --------------------
-            elif action == "awaiting_product":
-                tenant_db = get_tenant_session(user.tenant_db_url)
-                if tenant_db is None:
-                    send_message(chat_id, "❌ Unable to access tenant database.")
+            elif action == "add_product":
+                if step == 1:  # Product name
+                    data["name"] = text.strip()
+                    user_states[chat_id] = {"action": "add_product", "step": 2, "data": data}
+                    send_message(chat_id, "💲 Enter price:")
                     return {"ok": True}
 
-                if step == 1:  # Product Name
-                    product_name = text.strip()
-                    if product_name:
-                        data["name"] = product_name
-                        user_states[chat_id] = {"action": action, "step": 2, "data": data}
-                        send_message(chat_id, "📦 Enter quantity:")
-                    else:
-                        send_message(chat_id, "❌ Product name cannot be empty. Please enter again:")
-
-                elif step == 2:  # Quantity
+                elif step == 2:  # Price
                     try:
-                        qty = int(text.strip())
-                        data["quantity"] = qty
-                        user_states[chat_id] = {"action": action, "step": 3, "data": data}
-                        send_message(chat_id, "📏 Enter unit type (e.g., piece, pack, box):")
+                        data["price"] = float(text.strip())
                     except ValueError:
-                        send_message(chat_id, "❌ Invalid quantity. Please enter a number:")
+                        send_message(chat_id, "❌ Invalid price. Enter a numeric value:")
+                        return {"ok": True}
+                    user_states[chat_id] = {"action": "add_product", "step": 3, "data": data}
+                    send_message(chat_id, "📦 Enter unit of measure (e.g., pack, kg):")
+                    return {"ok": True}
 
-                elif step == 3:  # Unit Type
-                    unit_type = text.strip()
-                    if unit_type:
-                        data["unit_type"] = unit_type
-                        if user.role == "owner":
-                            user_states[chat_id] = {"action": action, "step": 4, "data": data}
-                            send_message(chat_id, "💲 Enter product price:")
-                        else:
-                            try:
-                                add_product_pending_approval(tenant_db, chat_id, data)
-                                send_message(chat_id, f"✅ Product *{data['name']}* added for approval. Owner will review.")
-                                notify_owner_of_new_product(chat_id, data)
-                            except Exception as e:
-                                send_message(chat_id, f"⚠️ Failed to submit product for approval: {str(e)}")
-                            user_states.pop(chat_id)
-                    else:
-                        send_message(chat_id, "❌ Unit type cannot be empty. Please enter:")
+                elif step == 3:  # Unit
+                    data["unit"] = text.strip()
+                    user_states[chat_id] = {"action": "add_product", "step": 4, "data": data}
+                    send_message(chat_id, "🔢 Enter initial stock quantity:")
+                    return {"ok": True}
 
-                elif step == 4:  # Price (Owner only)
+                elif step == 4:  # Stock
                     try:
-                        price = float(text.strip())
-                        data["price"] = price
-                        user_states[chat_id] = {"action": action, "step": 5, "data": data}
-                        send_message(chat_id, "📊 Enter minimum stock level (e.g., 10):")
+                        data["stock"] = int(text.strip())
                     except ValueError:
-                        send_message(chat_id, "❌ Invalid price. Please enter a number:")
+                        send_message(chat_id, "❌ Invalid stock. Enter an integer value:")
+                        return {"ok": True}
+                    user_states[chat_id] = {"action": "add_product", "step": 5, "data": data}
+                    send_message(chat_id, "⚠️ Enter low stock alert level:")
+                    return {"ok": True}
 
-                elif step == 5:  # Min Stock Level (Owner)
+                elif step == 5:  # Low stock alert
                     try:
-                        min_stock = int(text.strip())
-                        data["min_stock_level"] = min_stock
-                        user_states[chat_id] = {"action": action, "step": 6, "data": data}
-                        send_message(chat_id, "⚠️ Enter low stock threshold (alert level):")
+                        data["low_stock_alert"] = int(text.strip())
                     except ValueError:
-                        send_message(chat_id, "❌ Invalid number. Please enter a valid minimum stock level:")
+                        send_message(chat_id, "❌ Invalid number. Enter an integer value:")
+                        return {"ok": True}
 
-                elif step == 6:  # Low Stock Threshold (Owner)
+                    # Save product in tenant DB
+                    tenant_db = get_tenant_session(user.tenant_db_url)
+                    if tenant_db is None:
+                        send_message(chat_id, "❌ Unable to access tenant database.")
+                        return {"ok": True}
+
                     try:
-                        threshold = int(text.strip())
-                        data["low_stock_threshold"] = threshold
+                        product = ProductORM(
+                            name=data["name"],
+                            price=Decimal(str(data["price"])),
+                            unit=data["unit"],
+                            stock=data["stock"],
+                            low_stock_alert=data["low_stock_alert"]
+                        )
+                        tenant_db.add(product)
+                        tenant_db.commit()
+                        tenant_db.refresh(product)
 
-                        try:
-                            add_product(tenant_db, chat_id, data)
-                            send_message(chat_id, f"✅ Product *{data['name']}* added successfully.")
-                        except Exception as e:
-                            send_message(chat_id, f"⚠️ Failed to add product: {str(e)}")
+                        send_message(chat_id, f"✅ Product '{product.name}' added successfully.")
+                    except Exception as e:
+                        send_message(chat_id, f"❌ Failed to add product: {str(e)}")
+                    finally:
+                        tenant_db.close()
 
-                        user_states.pop(chat_id)
-                    except ValueError:
-                        send_message(chat_id, "❌ Invalid number. Please enter a valid low stock threshold:")
+                    # Clear state and return to menu
+                    user_states.pop(chat_id, None)
+                    kb_dict = main_menu(user.role)
+                    send_message(chat_id, "🏠 Main Menu:", kb_dict)
+                    return {"ok": True}
 
-
-            # -------------------- Update Product --------------------
+            # -------------------- Update Product (step-by-step, search by name) --------------------
             elif action == "awaiting_update":
+                # ensure tenant DB
                 tenant_db = get_tenant_session(user.tenant_db_url)
                 if tenant_db is None:
                     send_message(chat_id, "❌ Unable to access tenant database.")
                     return {"ok": True}
 
-                product_id = data.get("product_id")
-                if not product_id:
-                    send_message(chat_id, "⚠️ No product selected. Please try again from the menu.")
-                    user_states.pop(chat_id, None)
+                # keep using state/data from user_states
+                data = state.get("data", {})
+
+                # STEP 1: Search by product name
+                if step == 1:
+                    if not text:
+                        send_message(chat_id, "⚠️ Please enter a product name (or part of it) to search:")
+                        return {"ok": True}
+
+                    matches = tenant_db.query(ProductORM).filter(ProductORM.name.ilike(f"%{text}%")).all()
+                    if not matches:
+                        send_message(chat_id, "⚠️ No products found with that name. Try again:")
+                        return {"ok": True}
+
+                    if len(matches) == 1:
+                        selected = matches[0]
+                        data["product_id"] = selected.product_id
+                        user_states[chat_id] = {"action": "awaiting_update", "step": 2, "data": data}
+
+                        if user.role == "owner":
+                            send_message(chat_id, f"✏️ Updating *{selected.name}*.\nEnter NEW name (or send `-` to keep current):")
+                        else:
+                            send_message(chat_id, f"✏️ Updating *{selected.name}*.\nEnter quantity (or send `-` to keep current):")
+
+                        return {"ok": True}
+
+                    # multiple matches -> ask user to pick via inline keyboard
+                    kb_rows = [
+                        [{"text": f"{p.name} — Stock: {p.stock} ({p.unit_type})", "callback_data": f"select_update:{p.product_id}"}]
+                        for p in matches
+                    ]
+                    kb_rows.append([{"text": "⬅️ Cancel", "callback_data": "back_to_menu"}])
+                    send_message(chat_id, "🔹 Multiple products found. Please select:", {"inline_keyboard": kb_rows})
                     return {"ok": True}
 
-                product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
-                if not product:
-                    send_message(chat_id, "⚠️ Product not found. Please try again.")
-                    user_states.pop(chat_id, None)
-                    return {"ok": True}
+                # STEP 2+: Owner walks through fields one-by-one, Shopkeeper only quantity->unit
+                # For convenience we accept '-' or empty to skip / keep current.
+                if step >= 2:
+                    product_id = data.get("product_id")
+                    if not product_id:
+                        send_message(chat_id, "⚠️ No product selected. Please start again from Update Product.")
+                        user_states.pop(chat_id, None)
+                        return {"ok": True}
 
-                parts = [p.strip() for p in text.split(",")]
+                    product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
+                    if not product:
+                        send_message(chat_id, "⚠️ Product not found. Please try again.")
+                        user_states.pop(chat_id, None)
+                        return {"ok": True}
 
-                try:
+                    # OWNER flow: name -> price -> quantity -> unit -> min_stock -> low_threshold -> SAVE
                     if user.role == "owner":
-                        new_name = parts[0] if len(parts) > 0 and parts[0] else None
-                        new_price = parts[1] if len(parts) > 1 and parts[1] else None
-                        new_quantity = parts[2] if len(parts) > 2 and parts[2] else None
-                        new_unit = parts[3] if len(parts) > 3 and parts[3] else None
-                        new_min_stock = parts[4] if len(parts) > 4 and parts[4] else None
-                        new_threshold = parts[5] if len(parts) > 5 and parts[5] else None
+                        # step 2: new name
+                        if step == 2:
+                            new_name = text.strip()
+                            if new_name and new_name != "-":
+                                data["new_name"] = new_name
+                            user_states[chat_id] = {"action": "awaiting_update", "step": 3, "data": data}
+                            send_message(chat_id, "💲 Enter new price (or send `-` to keep current):")
+                            return {"ok": True}
 
-                        if new_name:
-                            product.name = new_name
-                        if new_price:
-                            product.price = float(new_price)
-                        if new_quantity:
-                            product.stock = int(new_quantity)
-                        if new_unit:
-                            product.unit_type = new_unit
-                        if new_min_stock:
-                            product.min_stock_level = int(new_min_stock)
-                        if new_threshold:
-                            product.low_stock_threshold = int(new_threshold)
+                        # step 3: price
+                        if step == 3:
+                            val = text.strip()
+                            if val and val != "-":
+                                try:
+                                    data["new_price"] = float(val)
+                                except ValueError:
+                                    send_message(chat_id, "❌ Invalid price. Enter a number or `-` to keep current:")
+                                    return {"ok": True}
+                            user_states[chat_id] = {"action": "awaiting_update", "step": 4, "data": data}
+                            send_message(chat_id, "🔢 Enter new quantity (or send `-` to keep current):")
+                            return {"ok": True}
+
+                        # step 4: quantity
+                        if step == 4:
+                            val = text.strip()
+                            if val and val != "-":
+                                try:
+                                    data["new_quantity"] = int(val)
+                                except ValueError:
+                                    send_message(chat_id, "❌ Invalid quantity. Enter an integer or `-` to keep current:")
+                                    return {"ok": True}
+                            user_states[chat_id] = {"action": "awaiting_update", "step": 5, "data": data}
+                            send_message(chat_id, "📦 Enter new unit type (or send `-` to keep current):")
+                            return {"ok": True}
+
+                        # step 5: unit type
+                        if step == 5:
+                            val = text.strip()
+                            if val and val != "-":
+                                data["new_unit"] = val
+                            user_states[chat_id] = {"action": "awaiting_update", "step": 6, "data": data}
+                            send_message(chat_id, "📊 Enter new minimum stock level (or send `-` to keep current):")
+                            return {"ok": True}
+
+                        # step 6: min stock
+                        if step == 6:
+                            val = text.strip()
+                            if val and val != "-":
+                                try:
+                                    data["new_min_stock"] = int(val)
+                                except ValueError:
+                                    send_message(chat_id, "❌ Invalid number. Enter an integer or `-` to keep current:")
+                                    return {"ok": True}
+                            user_states[chat_id] = {"action": "awaiting_update", "step": 7, "data": data}
+                            send_message(chat_id, "⚠️ Enter new low stock threshold (or send `-` to keep current):")
+                            return {"ok": True}
+
+                        # step 7: low stock threshold -> perform update & save
+                        if step == 7:
+                            val = text.strip()
+                            if val and val != "-":
+                                try:
+                                    data["new_low_threshold"] = int(val)
+                                except ValueError:
+                                    send_message(chat_id, "❌ Invalid number. Enter an integer or `-` to keep current:")
+                                    return {"ok": True}
+
+                            # apply updates
+                            try:
+                                if data.get("new_name"):
+                                    product.name = data["new_name"]
+                                if "new_price" in data:
+                                    product.price = data["new_price"]
+                                if "new_quantity" in data:
+                                    product.stock = data["new_quantity"]
+                                if "new_unit" in data:
+                                    product.unit_type = data["new_unit"]
+                                if "new_min_stock" in data:
+                                    product.min_stock_level = data["new_min_stock"]
+                                if "new_low_threshold" in data:
+                                    product.low_stock_threshold = data["new_low_threshold"]
+
+                                tenant_db.commit()
+                                send_message(chat_id, f"✅ Product updated successfully: {product.name}")
+                            except Exception as e:
+                                tenant_db.rollback()
+                                send_message(chat_id, f"⚠️ Failed to update product: {str(e)}")
+
+                            user_states.pop(chat_id, None)
+                            return {"ok": True}
+
+                    # SHOPKEEPER flow: step2 quantity -> step3 unit -> SAVE
                     else:
-                        new_quantity = parts[0] if len(parts) > 0 and parts[0] else None
-                        new_unit = parts[1] if len(parts) > 1 and parts[1] else None
-                        if new_quantity:
-                            product.stock = int(new_quantity)
-                        if new_unit:
-                            product.unit_type = new_unit
-                        notify_owner_of_product_update(chat_id, product, parts)
+                        # step 2: quantity
+                        if step == 2:
+                            val = text.strip()
+                            if val and val != "-":
+                                try:
+                                    data["new_quantity"] = int(val)
+                                except ValueError:
+                                    send_message(chat_id, "❌ Invalid quantity. Enter an integer or `-` to keep current:")
+                                    return {"ok": True}
+                            user_states[chat_id] = {"action": "awaiting_update", "step": 3, "data": data}
+                            send_message(chat_id, "📦 Enter unit type (or send `-` to keep current):")
+                            return {"ok": True}
 
-                    tenant_db.commit()
-                    send_message(chat_id, f"✅ Product updated successfully: {product.name}")
-                    user_states.pop(chat_id)
-                except Exception as e:
-                    tenant_db.rollback()
-                    send_message(chat_id, f"⚠️ Failed to update product: {str(e)}")
+                        # step 3: unit type -> apply and notify owner
+                        if step == 3:
+                            val = text.strip()
+                            if val and val != "-":
+                                data["new_unit"] = val
 
+                            try:
+                                if "new_quantity" in data:
+                                    product.stock = data["new_quantity"]
+                                if "new_unit" in data:
+                                    product.unit_type = data["new_unit"]
 
-            # -------------------- Record Sale --------------------
+                                tenant_db.commit()
+                                # optionally notify owner about change
+                                notify_owner_of_product_update(chat_id, product, {
+                                    "quantity": data.get("new_quantity"),
+                                    "unit_type": data.get("new_unit")
+                                })
+                                send_message(chat_id, f"✅ Product updated successfully: {product.name}")
+                            except Exception as e:
+                                tenant_db.rollback()
+                                send_message(chat_id, f"⚠️ Failed to update product: {str(e)}")
+
+                            user_states.pop(chat_id, None)
+                            return {"ok": True}
+
+            # -------------------- Record Sale (step-by-step, search by name) --------------------
             elif action == "awaiting_sale":
                 tenant_db = get_tenant_session(user.tenant_db_url)
                 if tenant_db is None:
                     send_message(chat_id, "❌ Unable to access tenant database.")
                     return {"ok": True}
 
+                data = state.get("data", {})
+
+                # STEP 1: search by product name
                 if step == 1:
+                    if not text:
+                        send_message(chat_id, "🛒 Enter product name to sell:")
+                        return {"ok": True}
+
                     matches = tenant_db.query(ProductORM).filter(ProductORM.name.ilike(f"%{text}%")).all()
                     if not matches:
                         send_message(chat_id, "⚠️ No products found with that name. Try again:")
                         return {"ok": True}
-                    elif len(matches) == 1:
+
+                    if len(matches) == 1:
                         selected = matches[0]
                         data["product_id"] = selected.product_id
                         data["unit_type"] = selected.unit_type
-                        user_states[chat_id] = {"action": action, "step": 2, "data": data}
+                        user_states[chat_id] = {"action": "awaiting_sale", "step": 2, "data": data}
                         send_message(chat_id, f"📦 Selected {selected.name} ({selected.unit_type}). Enter quantity sold:")
-                    else:
-                        kb_rows = [
-                            [{"text": f"{p.name} — Stock: {p.stock} ({p.unit_type})", "callback_data": f"select_sale:{p.product_id}"}]
-                            for p in matches
-                        ]
-                        kb_rows.append([{"text": "⬅️ Cancel", "callback_data": "back_to_menu"}])
-                        send_message(chat_id, "🔹 Multiple products found. Please select:", {"inline_keyboard": kb_rows})
+                        return {"ok": True}
+
+                    # multiple matches -> show inline keyboard for user to pick
+                    kb_rows = [
+                        [{"text": f"{p.name} — Stock: {p.stock} ({p.unit_type})", "callback_data": f"select_sale:{p.product_id}"}]
+                        for p in matches
+                    ]
+                    kb_rows.append([{"text": "⬅️ Cancel", "callback_data": "back_to_menu"}])
+                    send_message(chat_id, "🔹 Multiple products found. Please select:", {"inline_keyboard": kb_rows})
                     return {"ok": True}
 
+                # STEP 2: quantity
                 elif step == 2:
                     try:
                         qty = int(text.strip())
+                        if qty <= 0:
+                            raise ValueError("quantity must be > 0")
                         data["quantity"] = qty
-                        user_states[chat_id] = {"action": action, "step": 3, "data": data}
+                        user_states[chat_id] = {"action": "awaiting_sale", "step": 3, "data": data}
                         send_message(chat_id, "💰 Enter payment type (full, partial, credit):")
                     except ValueError:
-                        send_message(chat_id, "❌ Invalid quantity. Enter a number:")
+                        send_message(chat_id, "❌ Invalid quantity. Enter a positive integer:")
                     return {"ok": True}
 
+                # STEP 3: payment type
                 elif step == 3:
                     payment_type = text.strip().lower()
                     if payment_type not in ["full", "partial", "credit"]:
@@ -1231,13 +1372,14 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         data["amount_paid"] = None
                         data["pending_amount"] = 0
                         data["change_left"] = 0
-                        user_states[chat_id] = {"action": action, "step": 5, "data": data}
+                        user_states[chat_id] = {"action": "awaiting_sale", "step": 5, "data": data}
                         send_message(chat_id, "✅ Full payment selected. Confirm sale? (yes/no)")
                     else:
-                        user_states[chat_id] = {"action": action, "step": 4, "data": data}
+                        user_states[chat_id] = {"action": "awaiting_sale", "step": 4, "data": data}
                         send_message(chat_id, "💵 Enter amount paid by customer:")
                     return {"ok": True}
 
+                # STEP 4: amount paid (partial / credit)
                 elif step == 4:
                     try:
                         amount_paid = float(text.strip())
@@ -1248,32 +1390,63 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         data["change_left"] = max(amount_paid - total_price, 0)
 
                         if data["pending_amount"] > 0 or data["change_left"] > 0:
-                            user_states[chat_id] = {"action": action, "step": 5, "data": data}
+                            user_states[chat_id] = {"action": "awaiting_sale", "step": 5, "data": data}
                             send_message(chat_id, "👤 Enter customer name:")
                         else:
-                            user_states[chat_id] = {"action": action, "step": 6, "data": data}
+                            user_states[chat_id] = {"action": "awaiting_sale", "step": 6, "data": data}
                             send_message(chat_id, f"✅ Recorded amount paid: {amount_paid}. Confirm sale? (yes/no)")
                     except ValueError:
                         send_message(chat_id, "❌ Invalid number. Enter a valid amount:")
                     return {"ok": True}
 
-                elif step == 6:
-                    customer_name = text.strip()
-                    if not customer_name:
-                        send_message(chat_id, "❌ Name cannot be empty. Enter customer name:")
+                # STEP 5: (either customer name after partial/credit OR confirmation for full)
+                elif step == 5:
+                    # If this reached because partial payment and we asked for customer name:
+                    if "customer_name" not in data:
+                        customer_name = text.strip()
+                        if not customer_name:
+                            send_message(chat_id, "❌ Name cannot be empty. Enter customer name:")
+                            return {"ok": True}
+                        data["customer_name"] = customer_name
+                        user_states[chat_id] = {"action": "awaiting_sale", "step": 7, "data": data}
+                        send_message(chat_id, "📞 Enter customer contact number:")
                         return {"ok": True}
-                    data["customer_name"] = customer_name
-                    user_states[chat_id] = {"action": action, "step": 7, "data": data}
-                    send_message(chat_id, "📞 Enter customer contact number:")
+                    else:
+                        # defensive fallback; treat as confirm step
+                        if text.strip().lower() != "yes":
+                            send_message(chat_id, "❌ Sale cancelled.")
+                            user_states.pop(chat_id, None)
+                            return {"ok": True}
+                        try:
+                            record_sale(tenant_db, chat_id, data)
+                            send_message(chat_id, f"✅ Sale recorded successfully: {data['quantity']} {data['unit_type']} sold.")
+                        except Exception as e:
+                            send_message(chat_id, f"⚠️ Failed to record sale: {str(e)}")
+                        user_states.pop(chat_id, None)
+                        return {"ok": True}
+
+                # STEP 6: confirm sale for the simple path
+                elif step == 6:
+                    if text.strip().lower() != "yes":
+                        send_message(chat_id, "❌ Sale cancelled.")
+                        user_states.pop(chat_id, None)
+                        return {"ok": True}
+                    try:
+                        record_sale(tenant_db, chat_id, data)
+                        send_message(chat_id, f"✅ Sale recorded successfully: {data['quantity']} {data['unit_type']} sold.")
+                    except Exception as e:
+                        send_message(chat_id, f"⚠️ Failed to record sale: {str(e)}")
+                    user_states.pop(chat_id, None)
                     return {"ok": True}
 
+                # STEP 7: reached after we collected customer name -> ask contact (already handled above)
                 elif step == 7:
                     customer_contact = text.strip()
                     if not customer_contact:
                         send_message(chat_id, "❌ Contact cannot be empty. Enter customer contact number:")
                         return {"ok": True}
                     data["customer_contact"] = customer_contact
-                    user_states[chat_id] = {"action": action, "step": 8, "data": data}
+                    user_states[chat_id] = {"action": "awaiting_sale", "step": 8, "data": data}
                     send_message(chat_id, f"✅ Customer info recorded. Confirm sale? (yes/no)")
                     return {"ok": True}
 
@@ -1282,14 +1455,14 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         send_message(chat_id, "❌ Sale cancelled.")
                         user_states.pop(chat_id, None)
                         return {"ok": True}
-
                     try:
                         record_sale(tenant_db, chat_id, data)
                         send_message(chat_id, f"✅ Sale recorded successfully: {data['quantity']} {data['unit_type']} sold.")
                     except Exception as e:
                         send_message(chat_id, f"⚠️ Failed to record sale: {str(e)}")
-                        user_states.pop(chat_id, None)
+                    user_states.pop(chat_id, None)
                     return {"ok": True}
+
 
         # -------------------- Handle callbacks --------------------
         if "callback_query" in data:
@@ -1348,10 +1521,11 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "🛠 You can suggest a product. Enter product name:")
                     user_states[chat_id] = {"action": "awaiting_product", "step": 1, "data": {"is_shopkeeper": True}}
 
+            # -------------------- Update Product --------------------
             elif action == "update_product":
                 if tenant_db:
-                    text, kb = products_page_view(tenant_db, page=1)
-                    send_message(chat_id, text, kb)
+                    send_message(chat_id, "✏️ Enter the product name to update:")
+                    user_states[chat_id] = {"action": "awaiting_product_search", "step": 1, "data": {}}
                 else:
                     send_message(chat_id, "⚠️ Cannot fetch products: tenant DB unavailable.")
 
@@ -1383,14 +1557,14 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     if role == "owner":
                         send_message(
                             chat_id,
-                            f"✏️ Updating *{product.name}* (ID {product.product_id})\n"
+                            f"✏️ Updating *{product.name}*\n"
                             "Enter details as: `NewName, NewPrice, NewQuantity, UnitType, MinStock, LowStockThreshold`\n"
                             "Leave blank to keep current values."
                         )
                     else:  # Shopkeeper
                         send_message(
                             chat_id,
-                            f"✏️ Updating *{product.name}* (ID {product.product_id})\n"
+                            f"✏️ Updating *{product.name}*\n"
                             "Enter details as: `Quantity, UnitType`\n"
                             "Leave blank to keep current values."
                         )
@@ -1398,6 +1572,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     user_states[chat_id] = {"action": "awaiting_update", "step": 1, "data": {"product_id": product_id}}
                 else:
                     send_message(chat_id, "⚠️ Cannot fetch product: tenant DB unavailable.")
+
 
             # -------------------- View Stock --------------------
             elif action == "view_stock":
