@@ -110,18 +110,20 @@ def main_menu(role: str):
                 [{"text": "➕ Add Product", "callback_data": "add_product"}],
                 [{"text": "✏️ Update Product", "callback_data": "update_product"}],
                 [{"text": "📦 View Stock", "callback_data": "view_stock"}],
+                [{"text": "💰 Record Sale", "callback_data": "record_sale"}],  # NEW BUTTON
                 [{"text": "📊 Reports", "callback_data": "report_menu"}],
                 [{"text": "🏪 Update Shop Info", "callback_data": "setup_shop"}],
-                [{"text": "👤 Create Shopkeeper", "callback_data": "create_shopkeeper"}],  # NEW BUTTON
+                [{"text": "👤 Create Shopkeeper", "callback_data": "create_shopkeeper"}],
                 [{"text": "❓ Help", "callback_data": "help"}]
             ]
         }
     elif role == "shopkeeper":
         kb_dict = {
             "inline_keyboard": [
-                [{"text": "➕ Add Product", "callback_data": "add_product"}],  # limited access
-                [{"text": "✏️ Update Product", "callback_data": "update_product"}],  # limited access
+                [{"text": "➕ Add Product", "callback_data": "add_product"}],
+                [{"text": "✏️ Update Product", "callback_data": "update_product"}],
                 [{"text": "📦 View Stock", "callback_data": "view_stock"}],
+                [{"text": "💰 Record Sale", "callback_data": "record_sale"}],  # NEW BUTTON
                 [{"text": "❓ Help", "callback_data": "help"}]
             ]
         }
@@ -1590,6 +1592,15 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "⚠️ Cannot fetch product: tenant DB unavailable.")
 
 
+            # -------------------- Record Sale --------------------
+            elif action == "record_sale":
+                if tenant_db:
+                    # Start the sale flow
+                    send_message(chat_id, "💰 Record a new sale!\nEnter product name:")
+                    user_states[chat_id] = {"action": "awaiting_sale", "step": 1, "data": {}}
+                else:
+                    send_message(chat_id, "⚠️ Cannot record sale: tenant DB unavailable.")
+  
             # -------------------- View Stock --------------------
             elif action == "view_stock":
                 if tenant_db:
