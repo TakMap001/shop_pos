@@ -1,4 +1,3 @@
-# app/tenant_db.py
 import os
 import logging
 from sqlalchemy import create_engine, text
@@ -54,52 +53,42 @@ def create_tenant_db(chat_id: int) -> str:
         else:
             logger.info(f"ℹ️ Tenant DB '{db_name}' already exists.")
 
-    # Create tenant tables safely
-    try:
-        engine = create_engine(tenant_db_url, future=True, pool_pre_ping=True)
-        TenantBase.metadata.create_all(bind=engine)
-        logger.info(f"✅ Tenant tables created/verified in DB '{db_name}'.")
-    except Exception as e:
-        logger.error(f"❌ Failed to create tenant tables in '{db_name}': {e}")
-        raise RuntimeError(f"Cannot initialize tenant DB '{db_name}'") from e
+    # Ensure tables exist
+    ensure_tenant_tables(tenant_db_url)
 
     return tenant_db_url
 
 
-# -------------------- Tenant Engine --------------------
-def get_engine_for_tenant(tenant_db_url: str):
-    """Return a SQLAlchemy engine for a tenant DB."""
-    return create_engine(tenant_db_url, future=True, pool_pre_ping=True)
+# -------------------- Ensure tenant tables exist --------------------
+def ensure_tenant_tables(tenant_db_url: str):
+    """Ensure all tenant tables exist in the given DB."""
+    if not tenant_db_url:
+        raise ValueError("Tenant DB URL is missing")
+
+    try:
+        engine = create_engine(tenant_db_url, future=True, pool_pre_ping=True)
+        TenantBase.metadata.create_all(bind=engine)
+        logger.info(f"✅ Tenant tables created/verified in DB '{tenant_db_url}'.")
+    except Exception as e:
+        logger.error(f"❌ Failed to create tenant tables in '{tenant_db_url}': {e}")
+        raise RuntimeError(f"Cannot initialize tenant tables for DB '{tenant_db_url}'") from e
 
 
-# -------------------- Tenant Session Factory --------------------
+# -------------------- Tenant Session --------------------
 def get_session_for_tenant(tenant_db_url: str):
-    """
-    Return a SQLAlchemy session factory for a given tenant DB URL.
-    Usage:
-        SessionLocal = get_session_for_tenant(url)
-        db = SessionLocal()
-    """
-    engine = get_engine_for_tenant(tenant_db_url)
-    SessionLocal = sessionmaker(
-        autocommit=False,
-        autoflush=False,
-        bind=engine,
-        future=True
-    )
-    return SessionLocal
+    """Return a SQLAlchemy session for a given tenant DB URL."""
+    engine = create_engine(tenant_db_url, future=True, pool_pre_ping=True)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
+    return SessionLocal()
 
 
-# -------------------- Get Active Tenant Session --------------------
+# -------------------- Get tenant session safely --------------------
 def get_tenant_session(db_url: str):
-    """
-    Return an active tenant session. Returns None if db_url is missing or fails.
-    """
+    """Return an active tenant Session. Returns None if db_url is missing."""
     if not db_url:
         return None
     try:
-        SessionLocal = get_session_for_tenant(db_url)
-        return SessionLocal()
+        return get_session_for_tenant(db_url)
     except Exception as e:
         logger.error(f"❌ Failed to create tenant session: {e}")
         return None
