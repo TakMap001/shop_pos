@@ -66,21 +66,40 @@ def create_tenant_db(chat_id: int) -> str:
     return tenant_db_url
 
 
-# -------------------- Tenant Session --------------------
+# -------------------- Tenant Engine --------------------
+def get_engine_for_tenant(tenant_db_url: str):
+    """Return a SQLAlchemy engine for a tenant DB."""
+    return create_engine(tenant_db_url, future=True, pool_pre_ping=True)
+
+
+# -------------------- Tenant Session Factory --------------------
 def get_session_for_tenant(tenant_db_url: str):
-    """Return a SQLAlchemy session for a given tenant DB URL."""
-    engine = create_engine(tenant_db_url, future=True, pool_pre_ping=True)
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
-    return SessionLocal()
+    """
+    Return a SQLAlchemy session factory for a given tenant DB URL.
+    Usage:
+        SessionLocal = get_session_for_tenant(url)
+        db = SessionLocal()
+    """
+    engine = get_engine_for_tenant(tenant_db_url)
+    SessionLocal = sessionmaker(
+        autocommit=False,
+        autoflush=False,
+        bind=engine,
+        future=True
+    )
+    return SessionLocal
 
 
-# -------------------- Get tenant session safely --------------------
+# -------------------- Get Active Tenant Session --------------------
 def get_tenant_session(db_url: str):
-    """Return an active tenant Session. Returns None if db_url is missing."""
+    """
+    Return an active tenant session. Returns None if db_url is missing or fails.
+    """
     if not db_url:
         return None
     try:
-        return get_session_for_tenant(db_url)
+        SessionLocal = get_session_for_tenant(db_url)
+        return SessionLocal()
     except Exception as e:
         logger.error(f"❌ Failed to create tenant session: {e}")
         return None
