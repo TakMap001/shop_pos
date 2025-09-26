@@ -1184,6 +1184,12 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         user_states.pop(chat_id, None)
                     except ValueError:
                         send_message(chat_id, "❌ Invalid number. Please enter a valid low stock threshold:")
+                    
+                    # -------------------- Return to role-based main menu --------------------
+                    user = db.query(User).filter(User.chat_id == chat_id).first()
+                    if user:
+                        kb = main_menu(user.role)
+                        send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
 
 
             # -------------------- Update Product (step-by-step, search by name) --------------------
