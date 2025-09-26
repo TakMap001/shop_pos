@@ -947,9 +947,15 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 # -------------------- Ensure tenant DB --------------------
                 if user.role == "owner":
                     if not user.tenant_db_url:
-                        tenant_db_url = create_tenant_db(chat_id)  # creates DB + tables
-                        user.tenant_db_url = tenant_db_url
-                        db.commit()
+                        try:
+                            tenant_db_url = create_tenant_db(chat_id)  # creates DB + tables
+                            user.tenant_db_url = tenant_db_url
+                            db.commit()
+                        except Exception as e:
+                            logger.error(f"❌ Failed to create tenant DB for owner {user.username}: {e}")
+                            send_message(chat_id, "❌ Could not initialize tenant database.")
+                            return {"ok": True}
+
                 elif user.role == "shopkeeper":
                     if not user.tenant_db_url:
                         owner = db.query(User).filter(User.user_id == user.owner_id).first()
@@ -960,14 +966,19 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             send_message(chat_id, "❌ Unable to access tenant database. Contact support.")
                             return {"ok": True}
 
-                # -------------------- Create tables if missing --------------------
-                create_tenant_db(user.tenant_db_url)  # ✅ this ensures all tables exist
+                # -------------------- Verify tables + open session --------------------
+                try:
+                    # ensure schema exists even if DB was already created
+                    create_tenant_db(user.tenant_db_url)
+                    tenant_db = get_tenant_session(user.tenant_db_url)
+                except Exception as e:
+                    logger.error(f"❌ Tenant DB session init failed: {e}")
+                    tenant_db = None
 
-                # Get tenant DB session
-                tenant_db = get_tenant_session(user.tenant_db_url)
                 if tenant_db is None:
                     send_message(chat_id, "❌ Unable to access tenant database. Contact support.")
                     return {"ok": True}
+
 
                 # -------------------- Show main menu --------------------
                 kb = main_menu(user.role)

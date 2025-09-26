@@ -3,7 +3,7 @@ import os
 import logging
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
-from app.models.models import Base as TenantBase
+from app.models.models import Base as TenantBase, ProductORM, SaleORM  # ✅ ensure models are imported
 
 logger = logging.getLogger("tenant_db")
 
@@ -25,14 +25,13 @@ def create_tenant_db(chat_id: int) -> str:
 
     logger.info(f"📌 Preparing tenant DB: {db_name}")
 
-    # Connect to default 'postgres' DB to create new tenant DB
+    # Connect to default 'postgres' DB to try creating a new tenant DB
     default_engine = create_engine(
         base_url.rsplit("/", 1)[0] + "/postgres",
         execution_options={"isolation_level": "AUTOCOMMIT"}
     )
 
     with default_engine.connect() as conn:
-        # Check if database exists
         try:
             result = conn.execute(
                 text("SELECT 1 FROM pg_database WHERE datname=:dbname"),
@@ -43,7 +42,6 @@ def create_tenant_db(chat_id: int) -> str:
             raise
 
         if not result:
-            # Try creating DB, but Railway may forbid it
             try:
                 conn.execute(text(f'CREATE DATABASE "{db_name}"'))
                 logger.info(f"✅ Tenant DB '{db_name}' created successfully.")
@@ -54,7 +52,7 @@ def create_tenant_db(chat_id: int) -> str:
         else:
             logger.info(f"ℹ️ Tenant DB '{db_name}' already exists.")
 
-    # Create tables safely even if DB already exists
+    # ✅ Ensure tenant tables are created
     try:
         engine = create_engine(tenant_db_url)
         TenantBase.metadata.create_all(bind=engine)
@@ -71,6 +69,14 @@ def get_session_for_tenant(tenant_db_url: str):
     """Return a SQLAlchemy session for a given tenant DB URL."""
     engine = create_engine(tenant_db_url)
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+    # ✅ Extra safety: ensure tables exist before returning session
+    try:
+        TenantBase.metadata.create_all(bind=engine)
+    except Exception as e:
+        logger.error(f"❌ Failed to ensure tables for tenant DB: {e}")
+        raise
+
     return SessionLocal()
 
 
