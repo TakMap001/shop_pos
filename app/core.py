@@ -4,7 +4,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base
 from config import DATABASE_URL
 
 # -------------------- Central DB Base --------------------
-Base = declarative_base()  # <-- central DB models import this
+Base = declarative_base()  # shared by all central DB models
 
 # -------------------- Engine & Session --------------------
 engine = create_engine(
@@ -22,9 +22,10 @@ SessionLocal = sessionmaker(
 
 def init_db():
     """Initialize central database tables (Tenant, User, etc.)"""
-    from app.models.central_models import Base as CentralBase
+    # ✅ just import models so they register with Base
+    from app.models import central_models, models  
     try:
-        CentralBase.metadata.create_all(bind=engine)
+        Base.metadata.create_all(bind=engine)
         print("✅ Central DB tables created / verified successfully.")
     except Exception as e:
         print("❌ Failed to initialize central DB:", e)
@@ -36,7 +37,6 @@ def get_db():
         yield db
     finally:
         db.close()
-
 
 # -------------------- Tenant DB Helper --------------------
 def get_engine_for_tenant(tenant_db_url: str):
@@ -53,4 +53,3 @@ def get_tenant_session(tenant_db_url: str):
     engine = get_engine_for_tenant(tenant_db_url)
     Session = sessionmaker(bind=engine, autocommit=False, autoflush=False, future=True)
     return Session()
-

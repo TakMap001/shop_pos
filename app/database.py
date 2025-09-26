@@ -1,21 +1,24 @@
 # app/database.py
-from app.core import engine, SessionLocal
-from app.models.central_models import Base as CentralBase  # Only Base
 import logging
+from app.core import engine, SessionLocal
+from app.models.central_models import Base as CentralBase  # Only central DB Base
 
 logger = logging.getLogger("database")
 
-# -------------------- Create Tables Safely --------------------
+
+# -------------------- Initialize Central DB --------------------
 def init_db():
-    """Initialize the central database tables (Tenant, etc.)."""
+    """Initialize the central database tables (Tenant, User, etc.)."""
     try:
         CentralBase.metadata.create_all(bind=engine)
-        logger.info("✅ Central database tables created / verified successfully.")
+        logger.info("✅ Central database tables created or verified successfully.")
     except Exception as e:
-        logger.error(f"❌ Failed to initialize central database: {e}")
+        logger.exception(f"❌ Failed to initialize central database: {e}")
 
-# -------------------- Dependency --------------------
+
+# -------------------- Dependency for FastAPI --------------------
 def get_db():
+    """Yield a central DB session for FastAPI routes."""
     db = SessionLocal()
     try:
         yield db

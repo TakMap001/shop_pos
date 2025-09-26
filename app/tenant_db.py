@@ -1,18 +1,22 @@
+# app/tenant_db.py
 import os
 import logging
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
-from app.models.models import Base as TenantBase
+from app.models.tenant_base import TenantBase  # tenant DB Base
 
 logger = logging.getLogger("tenant_db")
 
 
-# -------------------- Create or Ensure Tenant DB --------------------
+# -------------------- Create Tenant DB --------------------
 def create_tenant_db(chat_id: int) -> str:
     """
-    Ensure tenant DB exists (for new tenants).
-    Returns tenant_db_url.
+    Create a dedicated PostgreSQL database for the tenant if it doesn't exist.
+    Returns the database URL for SQLAlchemy session creation.
     """
+    if not chat_id:
+        raise ValueError("❌ Cannot create tenant DB: chat_id is None or invalid")
+
     base_url = os.getenv("DATABASE_URL")
     if not base_url:
         raise RuntimeError("❌ DATABASE_URL environment variable is missing")
@@ -22,58 +26,60 @@ def create_tenant_db(chat_id: int) -> str:
 
     logger.info(f"📌 Preparing tenant DB: {db_name}")
 
-    # Connect to default DB
+    # Connect to default 'postgres' DB to create new tenant DB
     default_engine = create_engine(
         base_url.rsplit("/", 1)[0] + "/postgres",
         execution_options={"isolation_level": "AUTOCOMMIT"}
     )
 
     with default_engine.connect() as conn:
-        result = conn.execute(
-            text("SELECT 1 FROM pg_database WHERE datname=:dbname"),
-            {"dbname": db_name}
-        ).fetchone()
+        # Check if database exists
+        try:
+            result = conn.execute(
+                text("SELECT 1 FROM pg_database WHERE datname=:dbname"),
+                {"dbname": db_name}
+            ).fetchone()
+        except Exception as e:
+            logger.error(f"❌ Failed to check DB existence: {e}")
+            raise
 
         if not result:
             try:
                 conn.execute(text(f'CREATE DATABASE "{db_name}"'))
                 logger.info(f"✅ Tenant DB '{db_name}' created successfully.")
             except Exception as e:
-                logger.warning(f"⚠️ Could not create tenant DB '{db_name}': {e}")
+                logger.warning(
+                    f"⚠️ Could not create tenant DB '{db_name}' (likely permissions issue): {e}"
+                )
         else:
             logger.info(f"ℹ️ Tenant DB '{db_name}' already exists.")
 
-    # Ensure tables inside it
-    ensure_tenant_tables(tenant_db_url)
+    # Create tenant tables safely
+    try:
+        engine = create_engine(tenant_db_url, future=True, pool_pre_ping=True)
+        TenantBase.metadata.create_all(bind=engine)
+        logger.info(f"✅ Tenant tables created/verified in DB '{db_name}'.")
+    except Exception as e:
+        logger.error(f"❌ Failed to create tenant tables in '{db_name}': {e}")
+        raise RuntimeError(f"Cannot initialize tenant DB '{db_name}'") from e
 
     return tenant_db_url
 
 
-# -------------------- Ensure Tables in Existing Tenant DB --------------------
-def ensure_tenant_tables(tenant_db_url: str):
-    """
-    Ensure tenant tables exist inside a tenant DB.
-    Run this every time you open a tenant connection.
-    """
-    engine = create_engine(tenant_db_url)
-    TenantBase.metadata.create_all(bind=engine)   # <-- this creates products table etc.
-    logger.info(f"✅ Tenant tables ensured in {tenant_db_url}")
-
-
 # -------------------- Tenant Session --------------------
 def get_session_for_tenant(tenant_db_url: str):
-    engine = create_engine(tenant_db_url)
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    """Return a SQLAlchemy session for a given tenant DB URL."""
+    engine = create_engine(tenant_db_url, future=True, pool_pre_ping=True)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
     return SessionLocal()
 
 
 # -------------------- Get tenant session safely --------------------
 def get_tenant_session(db_url: str):
+    """Return an active tenant Session. Returns None if db_url is missing."""
     if not db_url:
         return None
     try:
-        # Always ensure tables before returning a session
-        ensure_tenant_tables(db_url)
         return get_session_for_tenant(db_url)
     except Exception as e:
         logger.error(f"❌ Failed to create tenant session: {e}")

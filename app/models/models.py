@@ -1,20 +1,23 @@
 # app/models/models.py
-from sqlalchemy import Column, Integer, String, Text, Numeric, DateTime, TIMESTAMP, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, Numeric, DateTime, TIMESTAMP, ForeignKey, BigInteger
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
-from app.core import Base  # Central DB uses Base
 from datetime import datetime
-from sqlalchemy import BigInteger
+
+# ✅ Import central DB Base
+from app.core import Base  
 
 # -------------------- Central DB Models --------------------
+
 class User(Base):
     __tablename__ = "users"
 
-    user_id = Column(BigInteger, primary_key=True, index=True)
+    user_id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(255))
+    username = Column(String(255), unique=True, index=True)
     email = Column(String(255))
     password_hash = Column(String(255))
-    chat_id = Column(BigInteger, unique=True, index=True, nullable=False)
+    chat_id = Column(BigInteger, unique=True, nullable=True) 
     role = Column(String(50))
     tenant_db_url = Column(Text, nullable=True)  # link to tenant DB
     created_at = Column(TIMESTAMP, server_default=func.now())
@@ -48,7 +51,6 @@ class CustomerORM(TenantBase):
     contact = Column(String(50), nullable=True)
     created_at = Column(TIMESTAMP, server_default=func.now())
 
-    # Optional: relationship with sales
     sales = relationship("SaleORM", back_populates="customer")
 
 
@@ -56,7 +58,7 @@ class SaleORM(TenantBase):
     __tablename__ = "sales"
 
     sale_id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, nullable=True)  # shopkeeper ID (from central DB, stored as int only)
+    user_id = Column(Integer, nullable=True)  # shopkeeper ID (from central DB)
     product_id = Column(Integer, ForeignKey("products.product_id"))
     customer_id = Column(Integer, ForeignKey("customers.customer_id"), nullable=True)
 
@@ -70,6 +72,5 @@ class SaleORM(TenantBase):
     pending_amount = Column(Numeric(10, 2), default=0.0)
     change_left = Column(Numeric(10, 2), default=0.0)
 
-    # Relationships
     product = relationship("ProductORM", back_populates="sales")
     customer = relationship("CustomerORM", back_populates="sales")

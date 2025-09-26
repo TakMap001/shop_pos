@@ -1,9 +1,10 @@
 # app/models/central_models.py
 from sqlalchemy import Column, String, BigInteger, DateTime
-from sqlalchemy.orm import declarative_base
 from datetime import datetime
 
-Base = declarative_base()
+# ✅ Import the shared Base from core
+from app.core import Base
+
 
 class Tenant(Base):
     __tablename__ = "tenants"
@@ -13,9 +14,8 @@ class Tenant(Base):
     telegram_owner_id = Column(BigInteger, unique=True, nullable=False)
     database_url = Column(String, nullable=False)
 
-    # ✅ New fields
+    # Optional metadata
     location = Column(String, nullable=True)
     contact = Column(String, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
-
