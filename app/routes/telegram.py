@@ -1514,6 +1514,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     print("DEBUG: failed to connect tenant DB")
                     send_message(chat_id, "⚠️ Warning: Unable to access tenant database. Some actions may be limited.")
 
+            # -------------------- Cancel button --------------------
+            if action == "back_to_menu":
+                user_states.pop(chat_id, None)  # cancel any ongoing action
+                kb_dict = main_menu(user.role)
+                send_message(chat_id, "🏠 Main Menu:", kb_dict)
+                return {"ok": True}
+        
             # -------------------- Shop Setup (Owner only) --------------------
             if action == "setup_shop" and role == "owner":
                 send_message(chat_id, "🏪 Please enter your shop name:")
@@ -1601,6 +1608,37 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 else:
                     send_message(chat_id, "⚠️ Cannot record sale: tenant DB unavailable.")
   
+            # -------------------- Handle selected product from inline keyboard --------------------
+            elif action.startswith("select_sale:"):
+                if tenant_db is None:
+                    send_message(chat_id, "⚠️ Cannot record sale: tenant DB unavailable.")
+                    return {"ok": True}
+
+                try:
+                    product_id = int(action.split(":")[1])
+                except (IndexError, ValueError):
+                    send_message(chat_id, "⚠️ Invalid product selection.")
+                    return {"ok": True}
+
+                # Fetch the product by ID
+                product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
+                if not product:
+                    send_message(chat_id, "⚠️ Product not found. Try again.")
+                    return {"ok": True}
+
+                # Store product info and go to quantity step
+                user_states[chat_id] = {
+                    "action": "awaiting_sale",
+                    "step": 2,
+                    "data": {
+                        "product_id": product.product_id,
+                        "unit_type": product.unit_type
+                    }
+                }
+
+                send_message(chat_id, f"📦 Selected {product.name} ({product.unit_type}). Enter quantity sold:")
+                return {"ok": True}
+
             # -------------------- View Stock --------------------
             elif action == "view_stock":
                 if tenant_db:
@@ -1638,11 +1676,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 )
                 kb_dict = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
                 send_message(chat_id, help_text, kb_dict)
-
-            # -------------------- Back to Menu --------------------
-            elif action == "back_to_menu":
-                kb_dict = main_menu(role=user.role)
-                send_message(chat_id, "🏠 Main Menu:", kb_dict)
 
             else:
                 print("DEBUG: Unknown callback action:", action)
