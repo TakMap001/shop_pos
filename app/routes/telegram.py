@@ -971,12 +971,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             return {"ok": True}
 
                 elif user.role == "shopkeeper":
-                    if not user.tenant_db_url:
+                    tenant_db_url = user.get_tenant_db_url(BASE_TENANT_URL)
+                    if not tenant_db_url:
+                        # Attempt to get owner's tenant schema
                         owner = db.query(User).filter(User.user_id == user.owner_id).first()
-                        if owner and owner.tenant_db_url:
-                            user.tenant_db_url = owner.tenant_db_url
-                            db.commit()
-                        else:
+                        if owner:
+                            tenant_db_url = owner.get_tenant_db_url(BASE_TENANT_URL)
+                        if not tenant_db_url:
                             send_message(chat_id, "❌ Unable to access tenant database. Contact support.")
                             return {"ok": True}
 
@@ -1039,12 +1040,16 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             send_message(chat_id, f"✅ Your existing shop info has been updated!\n\n"
                                       f"🏪 {data['name']}\n📍 {data['location']}\n📞 {contact}")
                         else:
-                            if not user.tenant_db_url:
-                                user.tenant_db_url = create_tenant_db(user.chat_id)
-                                tenant_db_url = user.tenant_db_url
+                            tenant_db_url = user.get_tenant_db_url(BASE_TENANT_URL)
+                            if not tenant_db_url:
+                                # Create tenant DB and tenant schema
+                                tenant_schema = f"tenant_{user.chat_id}"
+                                create_tenant_db(user.chat_id)  # assumes this creates DB/schema
+                                user.tenant_schema = tenant_schema
                                 db.commit()
+                                tenant_db_url = user.get_tenant_db_url(BASE_TENANT_URL)
 
-                            tenant_db = get_tenant_session(user.tenant_db_url)
+                            tenant_db = get_tenant_session(tenant_db_url)
 
                             new_tenant = Tenant(
                                 tenant_id=str(uuid.uuid4()),
