@@ -883,6 +883,18 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     # All credentials exist → prompt password login
                     send_message(chat_id, "👋 Welcome back! Please enter your password to continue:")
                     user_states[chat_id] = {"action": "login", "step": 1, "data": {}}
+
+                # Ensure tenant schema exists for owner
+                if user.role == "owner" and not user.tenant_db_url:
+                    try:
+                        tenant_db_url = create_tenant_db(chat_id)  # creates schema + tables
+                        user.tenant_db_url = tenant_db_url
+                        db.commit()
+                    except Exception as e:
+                        logger.error(f"❌ Failed to create tenant schema for owner {user.username}: {e}")
+                        send_message(chat_id, "❌ Could not initialize tenant database.")
+                        return {"ok": True}
+
             else:
                 # New user → create owner by default
                 generated_username = create_username(f"Owner{chat_id}")
@@ -901,8 +913,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 db.commit()
                 db.refresh(new_user)
 
-                # ✅ Create tenant DB for new owner immediately
-                tenant_db_url = create_tenant_db(chat_id)
+                # ✅ Create tenant schema immediately
+                tenant_db_url = create_tenant_db(chat_id)  # schema creation
                 new_user.tenant_db_url = tenant_db_url
                 db.commit()
 
@@ -910,7 +922,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 send_message(chat_id, "🏪 Let's set up your shop! Please enter the shop name:")
                 user_states[chat_id] = {"action": "setup_shop", "step": 1, "data": {}}
 
-            return {"ok": True}
+        return {"ok": True}
 
         # -------------------- Login flow --------------------
         if chat_id in user_states:
