@@ -946,15 +946,16 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 send_message(chat_id, f"✅ Login successful! Welcome, {user.name}.")
                 user_states.pop(chat_id, None)
 
-                # -------------------- Ensure tenant DB --------------------
+                # -------------------- Ensure tenant schema --------------------
                 if user.role == "owner":
                     if not user.tenant_db_url:
                         try:
-                            tenant_db_url = create_tenant_db(chat_id)  # creates DB + tables
+                            # 🔑 Now creates schema instead of full DB
+                            tenant_db_url = create_tenant_db(chat_id)  
                             user.tenant_db_url = tenant_db_url
                             db.commit()
                         except Exception as e:
-                            logger.error(f"❌ Failed to create tenant DB for owner {user.username}: {e}")
+                            logger.error(f"❌ Failed to create tenant schema for owner {user.username}: {e}")
                             send_message(chat_id, "❌ Could not initialize tenant database.")
                             return {"ok": True}
 
@@ -970,8 +971,15 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                 # -------------------- Verify tables + open session --------------------
                 try:
-                    ensure_tenant_tables(user.tenant_db_url)  # ✅ ensures tables exist
-                    tenant_db = get_tenant_session(user.tenant_db_url)
+                    # tenant_db_url looks like: base_url#schema_name
+                    tenant_db_url = user.tenant_db_url
+                    if "#" in tenant_db_url:
+                        base_url, schema_name = tenant_db_url.split("#", 1)
+                        ensure_tenant_tables(base_url, schema_name)
+                    else:
+                        ensure_tenant_tables(tenant_db_url, "public")
+
+                    tenant_db = get_tenant_session(tenant_db_url)
                 except Exception as e:
                     logger.error(f"❌ Tenant DB session init failed: {e}")
                     send_message(chat_id, "❌ Unable to access tenant database. Contact support.")

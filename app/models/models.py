@@ -19,8 +19,20 @@ class User(Base):
     password_hash = Column(String(255))
     chat_id = Column(BigInteger, unique=True, nullable=True) 
     role = Column(String(50))
-    tenant_db_url = Column(Text, nullable=True)  # link to tenant DB
+
+    # Store only tenant schema name (e.g., 'tenant_782962404')
+    tenant_schema = Column(String(255), nullable=True)
+
     created_at = Column(TIMESTAMP, server_default=func.now())
+
+    def get_tenant_db_url(self, base_url: str):
+        """
+        Returns full SQLAlchemy DB URL for this tenant.
+        base_url should be DATABASE_URL without DB name (e.g., postgresql://user:pass@host:port)
+        """
+        if not self.tenant_schema:
+            return None
+        return f"{base_url}/{self.tenant_schema}"
 
 
 # -------------------- Tenant DB Models --------------------
