@@ -891,10 +891,10 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     user_states[chat_id] = {"action": "login", "step": 1, "data": {}}
 
                 # Ensure tenant schema exists for owner
-                if user.role == "owner" and not user.tenant_db_url:
+                if user.role == "owner" and not user.tenant_schema:
                     try:
                         tenant_db_url = create_tenant_db(chat_id)  # creates schema + tables
-                        user.tenant_db_url = tenant_db_url
+                        user.tenant_schema = tenant_db_url
                         db.commit()
                     except Exception as e:
                         logger.error(f"❌ Failed to create tenant schema for owner {user.username}: {e}")
@@ -972,10 +972,10 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                 # -------------------- Ensure tenant schema --------------------
                 if user.role == "owner":
-                    if not user.tenant_db_url:
+                    if not user.tenant_schema:
                         try:
                             tenant_db_url = create_tenant_db(chat_id)
-                            user.tenant_db_url = tenant_db_url
+                            user.tenant_schema = tenant_db_url
                             db.commit()
                         except Exception as e:
                             logger.error(f"❌ Failed to create tenant schema for owner {user.username}: {e}")
@@ -1097,7 +1097,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             )
 
                         # Link owner to tenant DB
-                        user.tenant_db_url = tenant_db_url
+                        user.tenant_schema = tenant_db_url
                         db.commit()
 
                         # -------------------- Show Owner Main Menu --------------------
@@ -1143,7 +1143,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         chat_id=None,  # shopkeeper will connect Telegram later
                         role="shopkeeper",
                         owner_id=user.user_id,
-                        tenant_db_url=user.tenant_db_url
+                        tenant_db_url=user.tenant_schema
                     )
                     db.add(new_sk)
                     db.commit()
@@ -1169,7 +1169,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             # -------------------- Add Product --------------------
             elif action == "awaiting_product":
                 # -------------------- Ensure tenant DB --------------------
-                tenant_db = get_tenant_session(user.tenant_db_url)
+                tenant_db = get_tenant_session(user.tenant_schema)
                 if tenant_db is None:
                     send_message(chat_id, "❌ Unable to access tenant database.")
                     return {"ok": True}
@@ -1259,7 +1259,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             # -------------------- Update Product (step-by-step, search by name) --------------------
             elif action == "awaiting_update":
                 # ensure tenant DB
-                tenant_db = get_tenant_session(user.tenant_db_url)
+                tenant_db = get_tenant_session(user.tenant_schema)
                 if tenant_db is None:
                     send_message(chat_id, "❌ Unable to access tenant database.")
                     return {"ok": True}
@@ -1410,7 +1410,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Record Sale (step-by-step, search by name) --------------------
             elif action == "awaiting_sale":
-                tenant_db = get_tenant_session(user.tenant_db_url)
+                tenant_db = get_tenant_session(user.tenant_schema)
                 if tenant_db is None:
                     send_message(chat_id, "❌ Unable to access tenant database.")
                     return {"ok": True}
@@ -1570,8 +1570,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # Ensure tenant DB exists for owner/shopkeeper
             tenant_db = None
-            if user.tenant_db_url:
-                tenant_db = get_tenant_session(user.tenant_db_url)
+            if user.tenant_schema:
+                tenant_db = get_tenant_session(user.tenant_schema)
                 if tenant_db is None:
                     print("DEBUG: failed to connect tenant DB")
                     send_message(chat_id, "⚠️ Warning: Unable to access tenant database. Some actions may be limited.")
