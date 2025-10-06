@@ -39,3 +39,6 @@ FASTAPI_SECRET_KEY = os.getenv("FASTAPI_SECRET_KEY", "supersecret")
 
 # --- Redis ---
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
+# --- Tenant DB Base URL (used for schema-based tenants) ---
+BASE_TENANT_URL = DATABASE_URL.rsplit("/", 1)[0]
