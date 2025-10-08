@@ -24,6 +24,10 @@ import time
 from app.core import SessionLocal, get_db
 from sqlalchemy.exc import SQLAlchemyError
 import uuid
+import logging
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 router = APIRouter()
 
@@ -892,6 +896,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                 # Ensure tenant schema exists for owner
                 if user.role == "owner" and not user.tenant_schema:
+                    schema_name = None
                     try:
                         schema_name = create_tenant_db(chat_id)  # creates schema + tables
                         user.tenant_schema = schema_name
@@ -921,6 +926,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 db.refresh(new_user)
 
                 # ✅ Create tenant schema immediately
+                schema_name = None
                 try:
                     schema_name = create_tenant_db(chat_id)  # schema creation
                     new_user.tenant_schema = schema_name
@@ -975,6 +981,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 # -------------------- Ensure tenant schema --------------------
                 if user.role == "owner":
                     if not user.tenant_schema:
+                        schema_name = None
                         try:
                             schema_name = create_tenant_db(user.chat_id)
                             user.tenant_schema = schema_name
