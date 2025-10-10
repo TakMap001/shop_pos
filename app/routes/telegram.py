@@ -869,6 +869,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
         # -------------------- /start --------------------
         if text == "/start":
+            user = db.query(User).filter(User.chat_id == chat_id).first()
+    
             if user:
                 # Existing user
                 generated_password = None  # for safety if password is generated below
@@ -895,13 +897,22 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     user_states[chat_id] = {"action": "login", "step": 1, "data": {}}
 
                 # Ensure tenant schema exists for owner
-                if user.role == "owner" and not user.tenant_schema:
-                    schema_name = None
+                if user.role == "owner":
+                    tenant_db_url = None
                     try:
-                        schema_name = create_tenant_db(chat_id)  # creates schema + tables
-                        user.tenant_schema = schema_name
-                        db.commit()
-                        print(f"✅ Tenant schema created for owner {user.username}: {schema_name}")
+                        if not user.tenant_schema:
+                            tenant_db_url = create_tenant_db(user.chat_id)
+                            user.tenant_schema = tenant_db_url
+                            db.commit()
+                            logger.info(f"✅ Tenant schema created for owner {user.username}: {tenant_db_url}")
+                        else:
+                            tenant_db_url = user.tenant_schema
+
+                        # Initialize tenant tables
+                        base_url, schema_name = (tenant_db_url.split("#", 1) if "#" in tenant_db_url else (tenant_db_url, "public"))
+                        ensure_tenant_tables(base_url, schema_name)
+                        logger.info(f"✅ Tenant tables ensured for {user.username} in schema '{schema_name}'")
+
                     except Exception as e:
                         logger.error(f"❌ Failed to create tenant schema for owner {user.username}: {e}")
                         send_message(chat_id, "❌ Could not initialize tenant database.")
@@ -926,12 +937,16 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 db.refresh(new_user)
 
                 # ✅ Create tenant schema immediately
-                schema_name = None
                 try:
-                    schema_name = create_tenant_db(chat_id)  # schema creation
-                    new_user.tenant_schema = schema_name
+                    tenant_db_url = create_tenant_db(chat_id)
+                    new_user.tenant_schema = tenant_db_url
                     db.commit()
-                    print(f"✅ Tenant schema created for new owner {generated_username}: {schema_name}")
+
+                    # Initialize tenant tables
+                    base_url, schema_name = (tenant_db_url.split("#", 1) if "#" in tenant_db_url else (tenant_db_url, "public"))
+                    ensure_tenant_tables(base_url, schema_name)
+                    logger.info(f"✅ Tenant tables ensured for new owner {generated_username} in schema '{schema_name}'")
+
                 except Exception as e:
                     logger.error(f"❌ Failed to create tenant schema for new owner {generated_username}: {e}")
                     send_message(chat_id, "❌ Could not initialize tenant database.")
@@ -979,45 +994,51 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 user_states.pop(chat_id, None)
 
                 # -------------------- Ensure tenant schema --------------------
-                if user.role == "owner":
-                    if not user.tenant_schema:
-                        schema_name = None
-                        try:
-                            schema_name = create_tenant_db(user.chat_id)
-                            user.tenant_schema = schema_name
-                            db.commit()
-                            print(f"✅ Tenant schema created: {schema_name}")
-                        except Exception as e:
-                            logger.error(f"❌ Failed to create tenant schema for owner {user.username}: {e}")
-                            send_message(chat_id, "❌ Could not initialize tenant database.")
-                            return {"ok": True}
+                tenant_db_url = None
 
-                elif user.role == "shopkeeper":
-                    # Get owner’s tenant schema
-                    owner = db.query(User).filter(User.user_id == user.owner_id).first()
-                    if not owner or not owner.tenant_schema:
-                        send_message(chat_id, "❌ Unable to access tenant database. Contact support.")
-                        return {"ok": True}
-                    schema_name = owner.tenant_schema
-                else:
-                    schema_name = user.tenant_schema
-
-                # -------------------- Tenant DB Initialization --------------------
                 try:
-                    if not schema_name:
+                    if user.role == "owner":
+                        if not user.tenant_schema:
+                            tenant_db_url = create_tenant_db(user.chat_id)
+                            user.tenant_schema = tenant_db_url
+                            db.commit()
+                            logger.info(f"✅ Tenant schema created for owner {user.username}: {tenant_db_url}")
+                        else:
+                            tenant_db_url = user.tenant_schema
+
+                    elif user.role == "shopkeeper":
+                        owner = db.query(User).filter(User.user_id == user.owner_id).first()
+                        if not owner or not owner.tenant_schema:
+                            send_message(chat_id, "❌ Unable to access tenant database. Contact support.")
+                            return {"ok": True}
+                        tenant_db_url = owner.tenant_schema
+
+                    else:  # fallback
+                        tenant_db_url = user.tenant_schema
+
+                    # -------------------- Tenant DB Initialization --------------------
+                    if not tenant_db_url:
                         send_message(chat_id, "⚠️ Tenant database missing. Please contact support.")
                         return {"ok": True}
 
-                    tenant_db = get_tenant_session(schema_name)
+                    tenant_db = get_tenant_session(tenant_db_url)
                     if tenant_db is None:
-                        print("⚠️ Tenant DB connection failed.")
+                        logger.warning(f"⚠️ Tenant DB connection failed for {user.username}: {tenant_db_url}")
                         send_message(chat_id, "⚠️ Unable to access tenant database. Please contact support.")
                         return {"ok": True}
 
-                    ensure_tenant_tables(schema_name, "public")
+                    # Extract base_url and schema_name for table creation
+                    if "#" in tenant_db_url:
+                        base_url, schema_name = tenant_db_url.split("#", 1)
+                    else:
+                        base_url = tenant_db_url
+                        schema_name = "public"
+
+                    ensure_tenant_tables(base_url, schema_name)
+                    logger.info(f"✅ Tenant tables ensured for {user.username} in schema '{schema_name}'")
 
                 except Exception as e:
-                    logger.error(f"❌ Tenant DB session init failed: {e}")
+                    logger.error(f"❌ Tenant DB session init failed for {user.username}: {e}")
                     send_message(chat_id, "❌ Unable to access tenant database. Contact support.")
                     return {"ok": True}
 
@@ -1048,69 +1069,80 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                 elif step == 3:  # Shop Contact
                     contact = text.strip()
-                    if contact:
-                        data["contact"] = contact
+                    if not contact:
+                        send_message(chat_id, "❌ Contact cannot be empty. Enter shop contact number:")
+                        return {"ok": False}
 
-                        # -------------------- Check if tenant already exists --------------------
-                        existing_tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
+                    data["contact"] = contact
 
-                        if existing_tenant:
-                            # Update existing tenant info
-                            existing_tenant.store_name = data["name"]
-                            existing_tenant.location = data["location"]
-                            existing_tenant.contact = contact
-                            tenant_schema = existing_tenant.database_url  # Keep compatibility with old records
+                    # -------------------- Check if tenant already exists --------------------
+                    existing_tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
 
-                            send_message(
-                                chat_id,
-                                f"✅ Your existing shop info has been updated!\n\n"
-                                f"🏪 {data['name']}\n📍 {data['location']}\n📞 {contact}"
-                            )
+                    schema_url = None
+                    tenant_schema = None
 
-                        else:
-                            # No existing tenant — create a new one
-                            tenant_schema = f"tenant_{chat_id}"
+                    if existing_tenant:
+                        # Update existing tenant info
+                        existing_tenant.store_name = data["name"]
+                        existing_tenant.location = data["location"]
+                        existing_tenant.contact = contact
+                        tenant_schema = existing_tenant.database_url  # keep compatibility
 
-                            # Ensure tenant schema exists (will not recreate if already present)
-                            try:
-                                schema_url = create_tenant_db(chat_id)
-                            except Exception as e:
-                                logger.error(f"❌ Failed to create tenant schema for owner {user.username}: {e}")
-                                send_message(chat_id, "❌ Could not initialize tenant database.")
-                                return {"ok": True}
+                        send_message(
+                            chat_id,
+                            f"✅ Your existing shop info has been updated!\n\n"
+                            f"🏪 {data['name']}\n📍 {data['location']}\n📞 {contact}"
+                        )
+                    else:
+                        # No existing tenant — create a new one
+                        try:
+                            schema_url = create_tenant_db(chat_id)
+                            tenant_schema = schema_url
+                        except Exception as e:
+                            logger.error(f"❌ Failed to create tenant schema for owner {user.username}: {e}")
+                            send_message(chat_id, "❌ Could not initialize tenant database.")
+                            return {"ok": True}
 
-                            # Save tenant info in main DB
-                            new_tenant = Tenant(
-                                tenant_id=str(uuid.uuid4()),
-                                telegram_owner_id=chat_id,
-                                store_name=data["name"],
-                                database_url=schema_url,  # saves the full URL + schema tag
-                                location=data["location"],
-                                contact=contact,
-                            )
-                            db.add(new_tenant)
-                            db.commit()
-
-                            send_message(
-                                chat_id,
-                                f"✅ Shop info saved!\n\n"
-                                f"🏪 {data['name']}\n📍 {data['location']}\n📞 {contact}"
-                            )
-
-                        # -------------------- Link owner to tenant schema --------------------
-                        user.tenant_schema = schema_url if not existing_tenant else tenant_schema
+                        # Save tenant info in main DB
+                        new_tenant = Tenant(
+                            tenant_id=str(uuid.uuid4()),
+                            telegram_owner_id=chat_id,
+                            store_name=data["name"],
+                            database_url=schema_url,  # full URL + schema tag
+                            location=data["location"],
+                            contact=contact,
+                        )
+                        db.add(new_tenant)
                         db.commit()
 
-                        # -------------------- Show Owner Main Menu --------------------
-                        kb_dict = main_menu(user.role)
-                        send_message(chat_id, "🏠 Main Menu:", kb_dict)
+                        send_message(
+                            chat_id,
+                            f"✅ Shop info saved!\n\n"
+                            f"🏪 {data['name']}\n📍 {data['location']}\n📞 {contact}"
+                        )
 
-                        # Clear user state
-                        user_states.pop(chat_id, None)
+                    # -------------------- Link owner to tenant schema --------------------
+                    user.tenant_schema = tenant_schema
+                    db.commit()
 
-                    else:
-                        send_message(chat_id, "❌ Contact cannot be empty. Enter shop contact number:")
+                    # -------------------- Ensure tenant tables exist --------------------
+                    try:
+                        base_url, schema_name = (
+                            tenant_schema.split("#", 1) if "#" in tenant_schema else (tenant_schema, "public")
+                        )
+                        ensure_tenant_tables(base_url, schema_name)
+                        logger.info(f"✅ Tenant tables ensured for owner {user.username} in schema '{schema_name}'")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to initialize tenant tables for owner {user.username}: {e}")
+                        send_message(chat_id, "⚠️ Shop created but tenant tables could not be initialized.")
+                        return {"ok": True}
 
+                    # -------------------- Show Owner Main Menu --------------------
+                    kb_dict = main_menu(user.role)
+                    send_message(chat_id, "🏠 Main Menu:", kb_dict)
+
+                    # Clear user state
+                    user_states.pop(chat_id, None)
 
             # -------------------- Shopkeeper Creation / Management --------------------
             elif action == "manage_shopkeepers" and user.role == "owner":
@@ -1136,16 +1168,21 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     password = generate_password()
                     password_hash = hash_password(password)
 
+                    # -------------------- Validate tenant schema --------------------
+                    if not user.tenant_schema:
+                        send_message(chat_id, "⚠️ Owner tenant database missing. Please contact support.")
+                        return {"ok": True}
+
                     # -------------------- Save Shopkeeper --------------------
                     new_sk = User(
                         name=data["name"],
                         username=username,
                         password_hash=password_hash,
                         email=contact if "@" in contact else None,
-                        chat_id=None,  # shopkeeper will connect Telegram later
+                        chat_id=None,  # will link on Telegram login
                         role="shopkeeper",
                         owner_id=user.user_id,
-                        tenant_schema=user.tenant_schema  # ✅ corrected field name
+                        tenant_schema=user.tenant_schema  # ✅ unified tenant linkage
                     )
                     db.add(new_sk)
                     db.commit()
