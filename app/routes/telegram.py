@@ -1011,6 +1011,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                 try:
                     if user.role == "owner":
+                        logger.debug(f"LOGIN DEBUG: Owner {user.username} tenant_schema = {user.tenant_schema}")
                         if not user.tenant_schema:
                             tenant_db_url = create_tenant_db(user.chat_id)
                             user.tenant_schema = tenant_db_url
