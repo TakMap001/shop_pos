@@ -1030,6 +1030,21 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     else:  # fallback
                         tenant_db_url = user.tenant_schema
 
+                    # -------------------- Auto-create tenant record if missing --------------------
+                    if not tenant_db_url or tenant_db_url.endswith("#public"):
+                        tenant = db.query(Tenant).filter(Tenant.owner_id == user.user_id).first()
+                        if not tenant:
+                            logger.warning(f"⚠️ No tenant record found for {user.username} ({chat_id}). Creating new one...")
+                            tenant_db_url = create_tenant_db(user.chat_id)
+                            user.tenant_schema = tenant_db_url
+                            db.commit()
+                            logger.info(f"✅ Tenant schema created for {user.username}: {tenant_db_url}")
+                        else:
+                            tenant_db_url = tenant.database_url
+                            user.tenant_schema = tenant_db_url
+                            db.commit()
+                            logger.info(f"✅ Tenant schema restored for {user.username}: {tenant_db_url}")
+
                     # -------------------- Tenant DB Initialization --------------------
                     if not tenant_db_url:
                         send_message(chat_id, "⚠️ Tenant database missing. Please contact support.")
