@@ -993,6 +993,19 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 send_message(chat_id, f"✅ Login successful! Welcome, {user.name}.")
                 user_states.pop(chat_id, None)
 
+                # -------------------- Link tenant schema from Tenant table --------------------
+                try:
+                    tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
+                    if tenant:
+                        # Prefer explicit tenant_schema field, fallback to database_url for backward compatibility
+                        user.tenant_schema = tenant.tenant_schema or tenant.database_url
+                        db.commit()
+                        logger.info(f"✅ Tenant schema linked for {user.username}: {user.tenant_schema}")
+                    else:
+                        logger.warning(f"⚠️ No tenant record found for {user.username} ({chat_id})")
+                except Exception as e:
+                    logger.error(f"⚠️ Tenant schema lookup failed for {user.username}: {e}")
+
                 # -------------------- Ensure tenant schema --------------------
                 tenant_db_url = None
 
@@ -1046,6 +1059,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 kb = main_menu(user.role)
                 send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                 return {"ok": True}
+
 
             # -------------------- Shop Setup (Owner only) --------------------
             elif action == "setup_shop" and user.role == "owner":
