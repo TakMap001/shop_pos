@@ -2,6 +2,7 @@ import os
 import logging
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
+from datetime import datetime
 from app.models.tenant_base import TenantBase  # tenant DB Base
 
 logger = logging.getLogger("tenant_db")
@@ -11,6 +12,7 @@ logger = logging.getLogger("tenant_db")
 def create_tenant_db(chat_id: int) -> str:
     """
     Create a dedicated SCHEMA for the tenant if it doesn't exist.
+    Also ensures a tenant record exists in the central tenants table.
     Returns the schema-specific database URL for SQLAlchemy session creation.
     """
     if not chat_id:
@@ -21,6 +23,7 @@ def create_tenant_db(chat_id: int) -> str:
         raise RuntimeError("❌ DATABASE_URL environment variable is missing")
 
     schema_name = f"tenant_{chat_id}"
+    tenant_db_url = f"{base_url}#{schema_name}"
 
     logger.info(f"📌 Preparing tenant schema: {schema_name}")
 
@@ -38,22 +41,49 @@ def create_tenant_db(chat_id: int) -> str:
             logger.error(f"❌ Failed to check schema existence: {e}")
             raise
 
+        # Create schema if missing
         if not result:
             try:
                 conn.execute(text(f'CREATE SCHEMA "{schema_name}"'))
                 logger.info(f"✅ Tenant schema '{schema_name}' created successfully.")
             except Exception as e:
-                logger.warning(
-                    f"⚠️ Could not create tenant schema '{schema_name}': {e}"
-                )
+                logger.warning(f"⚠️ Could not create tenant schema '{schema_name}': {e}")
         else:
             logger.info(f"ℹ️ Tenant schema '{schema_name}' already exists.")
 
-    # Ensure tables exist in this schema
+        # -------------------- Ensure tenant record in central DB --------------------
+        try:
+            existing = conn.execute(
+                text("SELECT tenant_id FROM tenants WHERE telegram_owner_id = :oid"),
+                {"oid": chat_id}
+            ).fetchone()
+
+            if not existing:
+                conn.execute(
+                    text("""
+                        INSERT INTO tenants (tenant_id, store_name, telegram_owner_id, database_url, created_at)
+                        VALUES (gen_random_uuid(), :store, :oid, :url, :created)
+                    """),
+                    {
+                        "store": f"Store_{chat_id}",
+                        "oid": chat_id,
+                        "url": tenant_db_url,
+                        "created": datetime.utcnow(),
+                    },
+                )
+                logger.info(f"✅ Tenant record created for owner {chat_id}")
+            else:
+                conn.execute(
+                    text("UPDATE tenants SET database_url = :url WHERE telegram_owner_id = :oid"),
+                    {"url": tenant_db_url, "oid": chat_id},
+                )
+                logger.info(f"ℹ️ Tenant record updated for owner {chat_id}")
+        except Exception as e:
+            logger.error(f"❌ Failed to ensure tenant record: {e}")
+
+    # Ensure tenant tables exist
     ensure_tenant_tables(base_url, schema_name)
 
-    # Return URL with schema hint
-    tenant_db_url = f"{base_url}#{schema_name}"
     return tenant_db_url
 
 
