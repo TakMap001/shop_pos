@@ -1019,7 +1019,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
                     if tenant:
                         # Prefer explicit tenant_schema field, fallback to database_url for backward compatibility
-                        user.tenant_schema = tenant.tenant_schema or tenant.database_url
+                        user.tenant_schema = tenant.database_url
                         db.commit()
                         logger.info(f"✅ Tenant schema linked for {user.username}: {user.tenant_schema}")
                     else:
