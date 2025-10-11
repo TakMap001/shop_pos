@@ -870,12 +870,10 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
         # -------------------- /start --------------------
         if text == "/start":
             user = db.query(User).filter(User.chat_id == chat_id).first()
-    
-            if user:
-                # Existing user
-                generated_password = None  # for safety if password is generated below
 
-                # Missing credentials → generate them
+            if user:
+                generated_password = None
+
                 if not user.username or not user.password_hash:
                     if not user.username:
                         user.username = create_username(f"{user.role.capitalize()}{chat_id}")
@@ -884,7 +882,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         user.password_hash = hash_password(generated_password)
                     db.commit()
 
-                    # Send credentials only if password was generated
                     if generated_password:
                         send_owner_credentials(chat_id, user.username, generated_password)
 
@@ -892,7 +889,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     user_states[chat_id] = {"action": "setup_shop", "step": 1, "data": {}}
 
                 else:
-                    # All credentials exist → prompt password login
                     send_message(chat_id, "👋 Welcome back! Please enter your password to continue:")
                     user_states[chat_id] = {"action": "login", "step": 1, "data": {}}
 
@@ -907,6 +903,20 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             logger.info(f"✅ Tenant schema created for owner {user.username}: {tenant_db_url}")
                         else:
                             tenant_db_url = user.tenant_schema
+
+                        # ✅ Ensure tenant record exists in central table
+                        existing_tenant = db.query(Tenant).filter(Tenant.tenant_id == str(chat_id)).first()
+                        if not existing_tenant:
+                            new_tenant = Tenant(
+                                tenant_id=str(chat_id),
+                                username=user.username,
+                                chat_id=str(chat_id),
+                                role=user.role,
+                                tenant_schema=tenant_db_url
+                            )
+                            db.add(new_tenant)
+                            db.commit()
+                            logger.info(f"✅ Tenant record added for owner {user.username}")
 
                         # Initialize tenant tables
                         base_url, schema_name = (tenant_db_url.split("#", 1) if "#" in tenant_db_url else (tenant_db_url, "public"))
@@ -941,6 +951,18 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     tenant_db_url = create_tenant_db(chat_id)
                     new_user.tenant_schema = tenant_db_url
                     db.commit()
+
+                    # ✅ Add tenant record to central table
+                    new_tenant = Tenant(
+                        tenant_id=str(chat_id),
+                        username=generated_username,
+                        chat_id=str(chat_id),
+                        role="owner",
+                        tenant_schema=tenant_db_url
+                    )
+                    db.add(new_tenant)
+                    db.commit()
+                    logger.info(f"✅ Tenant record created for {generated_username}")
 
                     # Initialize tenant tables
                     base_url, schema_name = (tenant_db_url.split("#", 1) if "#" in tenant_db_url else (tenant_db_url, "public"))
