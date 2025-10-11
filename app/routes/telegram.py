@@ -909,10 +909,9 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         if not existing_tenant:
                             new_tenant = Tenant(
                                 tenant_id=str(chat_id),
-                                username=user.username,
-                                chat_id=str(chat_id),
-                                role=user.role,
-                                tenant_schema=tenant_db_url
+                                store_name=f"Owner{chat_id}",       # or the shop name if you have it
+                                telegram_owner_id=chat_id,
+                                database_url=tenant_db_url
                             )
                             db.add(new_tenant)
                             db.commit()
