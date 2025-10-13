@@ -1350,13 +1350,24 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             # -------------------- Update Product (step-by-step, search by name) --------------------
             elif action in ["awaiting_update", "update_product"]:
                 # -------------------- Ensure tenant DB URL --------------------
-                if not user.tenant_schema:
+                # Fetch fresh user object from central DB
+                user = db.query(User).filter(User.chat_id == chat_id).first()
+                if not user:
+                    send_message(chat_id, "❌ User not found. Please restart with /start.")
+                    return {"ok": True}
+
+                tenant_db_url = user.tenant_schema
+                if not tenant_db_url:
                     tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
                     if tenant:
-                        user.tenant_schema = tenant.database_url
+                        tenant_db_url = tenant.database_url
+                        user.tenant_schema = tenant_db_url
                         db.commit()
+                    else:
+                        send_message(chat_id, "❌ Tenant record not found. Please restart with /start.")
+                        return {"ok": True}
 
-                tenant_db = get_tenant_session(user.tenant_schema)
+                tenant_db = get_tenant_session(tenant_db_url)
                 if tenant_db is None:
                     send_message(chat_id, "❌ Unable to access tenant database.")
                     return {"ok": True}
@@ -1395,7 +1406,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     kb_rows.append([{"text": "⬅️ Cancel", "callback_data": "back_to_menu"}])
                     send_message(chat_id, "🔹 Multiple products found. Please select:", {"inline_keyboard": kb_rows})
                     return {"ok": True}
-  
+
                 # -------------------- STEP 2+ --------------------
                 if step >= 2:
                     if not text:
@@ -1510,6 +1521,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             })
                             user_states.pop(chat_id, None)
                             return {"ok": True}
+
 
             # -------------------- Record Sale (step-by-step, search by name) --------------------
             elif action == "awaiting_sale":
