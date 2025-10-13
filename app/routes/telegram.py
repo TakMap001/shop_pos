@@ -1349,6 +1349,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Update Product (step-by-step, search by name) --------------------
             elif action in ["awaiting_update", "update_product"]:
+                # -------------------- Ensure tenant DB URL --------------------
+                if not user.tenant_schema:
+                    tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
+                    if tenant:
+                        user.tenant_schema = tenant.database_url
+                        db.commit()
+
                 tenant_db = get_tenant_session(user.tenant_schema)
                 if tenant_db is None:
                     send_message(chat_id, "❌ Unable to access tenant database.")
