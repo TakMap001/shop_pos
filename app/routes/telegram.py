@@ -1743,24 +1743,69 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Update Product --------------------
             elif action == "update_product":
+                # ✅ Always reload tenant DB properly
+                user = db.query(User).filter(User.chat_id == chat_id).first()
+                db.refresh(user)  # ensures the latest state from DB
+
+                tenant_db_url = getattr(user, "tenant_schema", None)
+                if not tenant_db_url:
+                    # 🔁 Recover from Tenant table if missing
+                    tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
+                    if tenant:
+                        tenant_db_url = tenant.database_url
+                        user.tenant_schema = tenant_db_url
+                        db.commit()
+                        logger.info(f"✅ Reloaded tenant schema from Tenant table for {user.username}: {tenant_db_url}")
+                    else:
+                        logger.warning(f"⚠️ No tenant schema found for {user.username}")
+                        send_message(chat_id, "⚠️ Tenant database not linked. Please restart with /start.")
+                        return {"ok": True}
+
+                tenant_db = get_tenant_session(tenant_db_url)
+                logger.debug(f"🧩 In update_product flow, tenant_db_url: {tenant_db_url}")
+
                 if tenant_db:
                     send_message(chat_id, "✏️ Enter the product name to update:")
                     user_states[chat_id] = {"action": "awaiting_product", "step": 1, "data": {}}
                 else:
                     send_message(chat_id, "⚠️ Cannot fetch products: tenant DB unavailable.")
 
+
+            # -------------------- Paginated Product List --------------------
             elif action.startswith("products_page:"):
                 try:
                     page = int(action.split(":")[1])
                 except (IndexError, ValueError):
                     page = 1
+
+                # 🔁 Ensure tenant DB session again
+                user = db.query(User).filter(User.chat_id == chat_id).first()
+                tenant_db_url = getattr(user, "tenant_schema", None)
+                if not tenant_db_url:
+                    tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
+                    tenant_db_url = tenant.database_url if tenant else None
+
+                tenant_db = get_tenant_session(tenant_db_url)
+
                 if tenant_db:
                     text, kb = products_page_view(tenant_db, page=page)
                     send_message(chat_id, text, kb)
                 else:
                     send_message(chat_id, "⚠️ Cannot fetch products: tenant DB unavailable.")
 
+
+            # -------------------- Product Selection --------------------
             elif action.startswith("select_product:"):
+                # 🔁 Ensure tenant DB again (same fix)
+                user = db.query(User).filter(User.chat_id == chat_id).first()
+                tenant_db_url = getattr(user, "tenant_schema", None)
+                if not tenant_db_url:
+                    tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
+                    tenant_db_url = tenant.database_url if tenant else None
+
+                tenant_db = get_tenant_session(tenant_db_url)
+                logger.debug(f"🧩 Tenant DB in select_product: {tenant_db_url}")
+
                 if tenant_db:
                     try:
                         product_id = int(action.split(":")[1])
