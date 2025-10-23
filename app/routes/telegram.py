@@ -874,6 +874,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             if user:
                 generated_password = None
 
+                # 🧩 Ensure username and password exist
                 if not user.username or not user.password_hash:
                     if not user.username:
                         user.username = create_username(f"{user.role.capitalize()}{chat_id}")
@@ -892,24 +893,26 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "👋 Welcome back! Please enter your password to continue:")
                     user_states[chat_id] = {"action": "login", "step": 1, "data": {}}
 
-                # Ensure tenant schema exists for owner
+                # -------------------- Ensure tenant schema for owners --------------------
                 if user.role == "owner":
                     tenant_db_url = None
                     try:
                         if not user.tenant_schema:
+                            # Create a new tenant database if not linked
                             tenant_db_url = create_tenant_db(user.chat_id)
                             user.tenant_schema = tenant_db_url
                             db.commit()
                             logger.info(f"✅ Tenant schema created for owner {user.username}: {tenant_db_url}")
                         else:
                             tenant_db_url = user.tenant_schema
+                            logger.info(f"ℹ️ Existing tenant schema found for {user.username}: {tenant_db_url}")
 
                         # ✅ Ensure tenant record exists in central table
                         existing_tenant = db.query(Tenant).filter(Tenant.tenant_id == str(chat_id)).first()
                         if not existing_tenant:
                             new_tenant = Tenant(
                                 tenant_id=str(chat_id),
-                                store_name=f"Owner{chat_id}",       # or the shop name if you have it
+                                store_name=f"Owner{chat_id}",
                                 telegram_owner_id=chat_id,
                                 database_url=tenant_db_url
                             )
@@ -917,10 +920,20 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             db.commit()
                             logger.info(f"✅ Tenant record added for owner {user.username}")
 
-                        # Initialize tenant tables
-                        base_url, schema_name = (tenant_db_url.split("#", 1) if "#" in tenant_db_url else (tenant_db_url, "public"))
+                        # ✅ Initialize tenant tables
+                        base_url, schema_name = (
+                            tenant_db_url.split("#", 1)
+                            if "#" in tenant_db_url
+                            else (tenant_db_url, "public")
+                        )
                         ensure_tenant_tables(base_url, schema_name)
                         logger.info(f"✅ Tenant tables ensured for {user.username} in schema '{schema_name}'")
+
+                        # ✅ Always re-link tenant_schema to user in case it was missing
+                        if not user.tenant_schema or user.tenant_schema != tenant_db_url:
+                            user.tenant_schema = tenant_db_url
+                            db.commit()
+                            logger.info(f"✅ Linked tenant schema for {user.username}: {tenant_db_url}")
 
                     except Exception as e:
                         logger.error(f"❌ Failed to create tenant schema for owner {user.username}: {e}")
@@ -928,7 +941,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         return {"ok": True}
 
             else:
-                # New user → create owner by default
+                # -------------------- New user: create owner by default --------------------
                 generated_username = create_username(f"Owner{chat_id}")
                 generated_password = generate_password()
                 generated_email = f"{chat_id}_{int(time.time())}@example.com"
@@ -954,17 +967,20 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     # ✅ Add tenant record to central table
                     new_tenant = Tenant(
                         tenant_id=str(chat_id),
-                        username=generated_username,
-                        chat_id=str(chat_id),
-                        role="owner",
-                        tenant_schema=tenant_db_url
+                        store_name=f"Owner{chat_id}",
+                        telegram_owner_id=chat_id,
+                        database_url=tenant_db_url
                     )
                     db.add(new_tenant)
                     db.commit()
                     logger.info(f"✅ Tenant record created for {generated_username}")
 
                     # Initialize tenant tables
-                    base_url, schema_name = (tenant_db_url.split("#", 1) if "#" in tenant_db_url else (tenant_db_url, "public"))
+                    base_url, schema_name = (
+                        tenant_db_url.split("#", 1)
+                        if "#" in tenant_db_url
+                        else (tenant_db_url, "public")
+                    )
                     ensure_tenant_tables(base_url, schema_name)
                     logger.info(f"✅ Tenant tables ensured for new owner {generated_username} in schema '{schema_name}'")
 
@@ -978,6 +994,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 user_states[chat_id] = {"action": "setup_shop", "step": 1, "data": {}}
 
             return {"ok": True}
+
 
         # -------------------- Login flow --------------------
         if chat_id in user_states:
