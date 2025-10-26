@@ -1364,73 +1364,51 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         kb = main_menu(user.role)
                         send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
 
-            # -------------------- Update Product (step-by-step, search by name) --------------------
-            elif action in ["awaiting_update", "update_product"]:
-                # -------------------- Ensure tenant DB URL --------------------
-                user = db.query(User).filter(User.chat_id == chat_id).first()
-                if not user:
-                    send_message(chat_id, "❌ User not found. Please restart with /start.")
-                    return {"ok": True}
-
-                # Always locate tenant record for this owner
-                tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
-                if not tenant:
-                    send_message(chat_id, "❌ Tenant record not found. Please restart with /start.")
-                    return {"ok": True}
-
-                tenant_db_url = tenant.database_url
-
-                # Store schema in user profile for quick reuse
-                if user.tenant_schema != tenant_db_url:
-                    user.tenant_schema = tenant_db_url
-                    db.commit()
-
+            # -------------------- Update Product (owner only, step-by-step) --------------------
+            elif action == "awaiting_update" and user.role == "owner":
+                # Ensure tenant session
+                tenant_db_url = user.tenant_schema
                 tenant_db = get_tenant_session(tenant_db_url)
                 if tenant_db is None:
                     send_message(chat_id, "❌ Unable to access tenant database.")
                     return {"ok": True}
 
                 data = state.get("data", {})
+                step = state.get("step", 1)
 
                 # -------------------- STEP 1: Search by product name --------------------
                 if step == 1:
                     if not text or not text.strip():
-                        send_message(chat_id, "⚠️ Please enter a product name (or part of it) to search:")
+                        send_message(chat_id, "⚠️ Please enter a product name to search:")
                         return {"ok": True}
 
                     query_text = text.strip()
                     matches = tenant_db.query(ProductORM).filter(ProductORM.name.ilike(f"%{query_text}%")).all()
 
                     if not matches:
-                        send_message(chat_id, f"⚠️ No products found matching '{query_text}'. Try again:")
+                        send_message(chat_id, f"⚠️ No products found matching '{query_text}'.\n"
+                                              "Click ➕ Add Product to add it, or go back to the main menu.")
+                        user_states[chat_id] = {}  # reset state
                         return {"ok": True}
 
                     if len(matches) == 1:
                         selected = matches[0]
                         data["product_id"] = selected.product_id
                         user_states[chat_id] = {"action": "awaiting_update", "step": 2, "data": data}
-
-                        if user.role == "owner":
-                            send_message(chat_id, f"✏️ Updating *{selected.name}*.\nEnter NEW name (or send `-` to keep current):")
-                        else:
-                            send_message(chat_id, f"✏️ Updating *{selected.name}*.\nEnter quantity (or send `-` to keep current):")
+                        send_message(chat_id, f"✏️ Updating *{selected.name}*.\nEnter NEW name (or send `-` to keep current):")
                         return {"ok": True}
 
-                    # Multiple matches → ask user to pick via inline keyboard
+                    # Multiple matches → inline keyboard
                     kb_rows = [
-                        [{"text": f"{p.name} — Stock: {p.stock} ({p.unit_type})", "callback_data": f"select_update:{p.product_id}"}]
-                        for p in matches
+                        [{"text": f"{p.name} — Stock: {p.stock} ({p.unit_type})",
+                          "callback_data": f"select_update:{p.product_id}"}] for p in matches
                     ]
                     kb_rows.append([{"text": "⬅️ Cancel", "callback_data": "back_to_menu"}])
                     send_message(chat_id, "🔹 Multiple products found. Please select:", {"inline_keyboard": kb_rows})
                     return {"ok": True}
 
-                # -------------------- STEP 2+ --------------------
+                # -------------------- STEP 2+: update fields --------------------
                 if step >= 2:
-                    if not text:
-                        send_message(chat_id, "⚠️ Please enter a valid input or send '-' to skip:")
-                        return {"ok": True}
-
                     product_id = data.get("product_id")
                     if not product_id:
                         send_message(chat_id, "⚠️ No product selected. Please start again from Update Product.")
@@ -1439,106 +1417,78 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                     product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
                     if not product:
-                        send_message(chat_id, "⚠️ Product not found. Please try again.")
+                        send_message(chat_id, "⚠️ Product not found. Please start again.")
                         user_states.pop(chat_id, None)
                         return {"ok": True}
 
-                    # -------------------- OWNER flow --------------------
-                    if user.role == "owner":
-                        if step == 2:  # new name
-                            val = text.strip()
-                            if val and val != "-":
-                                data["new_name"] = val
-                            user_states[chat_id] = {"action": "awaiting_update", "step": 3, "data": data}
-                            send_message(chat_id, "💲 Enter new price (or send `-` to keep current):")
-                            return {"ok": True}
+                    # --- Proceed step-by-step: name → price → quantity → unit → min → low threshold ---
+                    if step == 2:  # new name
+                        val = text.strip()
+                        if val and val != "-":
+                            data["new_name"] = val
+                        user_states[chat_id] = {"action": "awaiting_update", "step": 3, "data": data}
+                        send_message(chat_id, "💲 Enter new price (or send `-` to keep current):")
+                        return {"ok": True}
 
-                        if step == 3:  # new price
-                            val = text.strip()
-                            if val and val != "-":
-                                try:
-                                    data["new_price"] = float(val)
-                                except ValueError:
-                                    send_message(chat_id, "❌ Invalid price. Enter a number or `-` to skip:")
-                                    return {"ok": True}
-                            user_states[chat_id] = {"action": "awaiting_update", "step": 4, "data": data}
-                            send_message(chat_id, "🔢 Enter new quantity (or send `-` to keep current):")
-                            return {"ok": True}
+                    if step == 3:  # price
+                        val = text.strip()
+                        if val and val != "-":
+                            try:
+                                data["new_price"] = float(val)
+                            except ValueError:
+                                send_message(chat_id, "❌ Invalid price. Enter a number or `-` to skip:")
+                                return {"ok": True}
+                        user_states[chat_id] = {"action": "awaiting_update", "step": 4, "data": data}
+                        send_message(chat_id, "🔢 Enter new quantity (or send `-` to keep current):")
+                        return {"ok": True}
 
-                        if step == 4:  # quantity
-                            val = text.strip()
-                            if val and val != "-":
-                                try:
-                                    data["new_quantity"] = int(val)
-                                except ValueError:
-                                    send_message(chat_id, "❌ Invalid quantity. Enter a number or `-` to skip:")
-                                    return {"ok": True}
-                            user_states[chat_id] = {"action": "awaiting_update", "step": 5, "data": data}
-                            send_message(chat_id, "📦 Enter new unit type (or send `-` to keep current):")
-                            return {"ok": True}
+                    if step == 4:  # quantity
+                        val = text.strip()
+                        if val and val != "-":
+                            try:
+                                data["new_quantity"] = int(val)
+                            except ValueError:
+                                send_message(chat_id, "❌ Invalid quantity. Enter a number or `-` to skip:")
+                                return {"ok": True}
+                        user_states[chat_id] = {"action": "awaiting_update", "step": 5, "data": data}
+                        send_message(chat_id, "📦 Enter new unit type (or send `-` to keep current):")
+                        return {"ok": True}
 
-                        if step == 5:  # unit
-                            val = text.strip()
-                            if val and val != "-":
-                                data["new_unit"] = val
-                            user_states[chat_id] = {"action": "awaiting_update", "step": 6, "data": data}
-                            send_message(chat_id, "📊 Enter new minimum stock level (or send `-` to keep current):")
-                            return {"ok": True}
+                    if step == 5:  # unit
+                        val = text.strip()
+                        if val and val != "-":
+                            data["new_unit"] = val
+                        user_states[chat_id] = {"action": "awaiting_update", "step": 6, "data": data}
+                        send_message(chat_id, "📊 Enter new minimum stock level (or send `-` to keep current):")
+                        return {"ok": True}
 
-                        if step == 6:  # min stock
-                            val = text.strip()
-                            if val and val != "-":
-                                try:
-                                    data["new_min_stock"] = int(val)
-                                except ValueError:
-                                    send_message(chat_id, "❌ Invalid number. Enter an integer or `-` to skip:")
-                                    return {"ok": True}
-                            user_states[chat_id] = {"action": "awaiting_update", "step": 7, "data": data}
-                            send_message(chat_id, "⚠️ Enter new low stock threshold (or send `-` to keep current):")
-                            return {"ok": True}
+                    if step == 6:  # min stock
+                        val = text.strip()
+                        if val and val != "-":
+                            try:
+                                data["new_min_stock"] = int(val)
+                            except ValueError:
+                                send_message(chat_id, "❌ Invalid number. Enter an integer or `-` to skip:")
+                                return {"ok": True}
+                        user_states[chat_id] = {"action": "awaiting_update", "step": 7, "data": data}
+                        send_message(chat_id, "⚠️ Enter new low stock threshold (or send `-` to keep current):")
+                        return {"ok": True}
 
-                        if step == 7:
-                            val = text.strip()
-                            if val and val != "-":
-                                try:
-                                    data["new_low_threshold"] = int(val)
-                                except ValueError:
-                                    send_message(chat_id, "❌ Invalid number. Enter an integer or `-` to skip:")
-                                    return {"ok": True}
+                    if step == 7:  # low threshold
+                        val = text.strip()
+                        if val and val != "-":
+                            try:
+                                data["new_low_threshold"] = int(val)
+                            except ValueError:
+                                send_message(chat_id, "❌ Invalid number. Enter an integer or `-` to skip:")
+                                return {"ok": True}
 
-                            update_product(tenant_db, chat_id, product, data)
-                            tenant_db.commit()
-                            send_message(chat_id, f"✅ Product *{product.name}* updated successfully.")
-                            user_states.pop(chat_id, None)
-                            return {"ok": True}
-
-                    # -------------------- SHOPKEEPER flow --------------------
-                    else:
-                        if step == 2:
-                            val = text.strip()
-                            if val and val != "-":
-                                try:
-                                    data["new_quantity"] = int(val)
-                                except ValueError:
-                                    send_message(chat_id, "❌ Invalid quantity. Enter a number or `-` to skip:")
-                                    return {"ok": True}
-                            user_states[chat_id] = {"action": "awaiting_update", "step": 3, "data": data}
-                            send_message(chat_id, "📦 Enter new unit type (or send `-` to keep current):")
-                            return {"ok": True}
-
-                        if step == 3:
-                            val = text.strip()
-                            if val and val != "-":
-                                data["new_unit"] = val
-                            update_product(tenant_db, chat_id, product, data)
-                            tenant_db.commit()
-                            send_message(chat_id, f"✅ Product *{product.name}* updated successfully.")
-                            notify_owner_of_product_update(chat_id, product, {
-                                "quantity": data.get("new_quantity"),
-                                "unit_type": data.get("new_unit")
-                            })
-                            user_states.pop(chat_id, None)
-                            return {"ok": True}
+                        # ✅ Update product in DB
+                        update_product(tenant_db, chat_id, product, data)
+                        tenant_db.commit()
+                        send_message(chat_id, f"✅ Product *{product.name}* updated successfully.")
+                        user_states.pop(chat_id, None)
+                        return {"ok": True}
 
 
             # -------------------- Record Sale (step-by-step, search by name) --------------------
