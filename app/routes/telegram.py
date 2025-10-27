@@ -1716,8 +1716,9 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 logger.debug(f"🧩 In update_product flow, tenant_db_url: {tenant_db_url}")
 
                 if tenant_db:
+                    # ✅ Correct action set to awaiting_update (not awaiting_product)
+                    user_states[chat_id] = {"action": "awaiting_update", "step": 1, "data": {}}
                     send_message(chat_id, "✏️ Enter the product name to update:")
-                    user_states[chat_id] = {"action": "awaiting_product", "step": 1, "data": {}}
                 else:
                     send_message(chat_id, "⚠️ Cannot fetch products: tenant DB unavailable.")
 
