@@ -25,7 +25,7 @@ from app.core import SessionLocal, get_db
 from sqlalchemy.exc import SQLAlchemyError
 import uuid
 import logging
-from telegram.utils.helpers import escape_markdown
+import re
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -41,6 +41,13 @@ if not TELEGRAM_BOT_TOKEN:
 
 
 # -------------------- Helpers --------------------
+
+def escape_markdown(text: str) -> str:
+    """
+    Escapes Telegram markdown special characters for pyTelegramBotAPI.
+    """
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
 
 def create_username(full_name: str) -> str:
     """Generate a simple username from full name."""
