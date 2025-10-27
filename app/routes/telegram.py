@@ -1782,25 +1782,27 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         send_message(chat_id, "⚠️ Product not found.")
                         return {"ok": True}
 
-                    # Ask what to update
+                    from telegram.helpers import escape_markdown
+
+                    # Escape product name for MarkdownV2
                     safe_name = escape_markdown(product.name, version=2)
 
+                    # Build safe message
                     if role == "owner":
-                        send_message(
-                            chat_id,
+                        text = (
                             f"✏️ Updating *{safe_name}*\n"
                             "Enter details as: `NewName\\, NewPrice\\, NewQuantity\\, UnitType\\, MinStock\\, LowStockThreshold`\n"
-                            "Leave blank to keep current values.",
-                            parse_mode="MarkdownV2"
+                            "Leave blank to keep current values\\."
                         )
                     else:  # Shopkeeper
-                        send_message(
-                            chat_id,
+                        text = (
                             f"✏️ Updating *{safe_name}*\n"
                             "Enter details as: `Quantity\\, UnitType`\n"
-                            "Leave blank to keep current values.",
-                            parse_mode="MarkdownV2"
+                            "Leave blank to keep current values\\."
                         )
+
+                    # Send safely with MarkdownV2
+                    send_message(chat_id, text, parse_mode="MarkdownV2")
 
                     user_states[chat_id] = {"action": "awaiting_update", "step": 1, "data": {"product_id": product_id}}
                 else:
