@@ -25,6 +25,7 @@ from app.core import SessionLocal, get_db
 from sqlalchemy.exc import SQLAlchemyError
 import uuid
 import logging
+from telegram.utils.helpers import escape_markdown
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -1771,19 +1772,23 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         return {"ok": True}
 
                     # Ask what to update
+                    safe_name = escape_markdown(product.name, version=2)
+
                     if role == "owner":
                         send_message(
                             chat_id,
-                            f"✏️ Updating *{product.name}*\n"
+                            f"✏️ Updating *{safe_name}*\n"
                             "Enter details as: `NewName, NewPrice, NewQuantity, UnitType, MinStock, LowStockThreshold`\n"
-                            "Leave blank to keep current values."
+                            "Leave blank to keep current values.",
+                            parse_mode="MarkdownV2"
                         )
                     else:  # Shopkeeper
                         send_message(
                             chat_id,
-                            f"✏️ Updating *{product.name}*\n"
+                            f"✏️ Updating *{safe_name}*\n"
                             "Enter details as: `Quantity, UnitType`\n"
-                            "Leave blank to keep current values."
+                            "Leave blank to keep current values.",
+                            parse_mode="MarkdownV2"
                         )
 
                     user_states[chat_id] = {"action": "awaiting_update", "step": 1, "data": {"product_id": product_id}}
