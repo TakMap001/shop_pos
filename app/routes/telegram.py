@@ -42,12 +42,16 @@ if not TELEGRAM_BOT_TOKEN:
 
 # -------------------- Helpers --------------------
 
-def escape_markdown(text: str) -> str:
+def escape_markdown(text: str, version: int = 2) -> str:
     """
-    Escapes Telegram markdown special characters for pyTelegramBotAPI.
+    Escapes Telegram Markdown or MarkdownV2 special characters.
     """
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    if version == 2:
+        escape_chars = r'_*[]()~`>#+-=|{}.!'
+    else:
+        escape_chars = r'_*>`['
     return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
+
 
 def create_username(full_name: str) -> str:
     """Generate a simple username from full name."""
@@ -1785,7 +1789,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         send_message(
                             chat_id,
                             f"✏️ Updating *{safe_name}*\n"
-                            "Enter details as: `NewName, NewPrice, NewQuantity, UnitType, MinStock, LowStockThreshold`\n"
+                            "Enter details as: `NewName\\, NewPrice\\, NewQuantity\\, UnitType\\, MinStock\\, LowStockThreshold`\n"
                             "Leave blank to keep current values.",
                             parse_mode="MarkdownV2"
                         )
@@ -1793,7 +1797,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         send_message(
                             chat_id,
                             f"✏️ Updating *{safe_name}*\n"
-                            "Enter details as: `Quantity, UnitType`\n"
+                            "Enter details as: `Quantity\\, UnitType`\n"
                             "Leave blank to keep current values.",
                             parse_mode="MarkdownV2"
                         )
