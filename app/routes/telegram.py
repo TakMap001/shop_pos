@@ -1789,16 +1789,20 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                     # Build safe message
                     if role == "owner":
-                        text = (
-                            f"✏️ Updating *{safe_name}*\n"
-                            "Enter details as: `NewName\\, NewPrice\\, NewQuantity\\, UnitType\\, MinStock\\, LowStockThreshold`\n"
-                            "Leave blank to keep current values\\."
+                        send_message(
+                            chat_id,
+                            f"✏️ Updating {product.name}\n"
+                            "Enter details as: NewName, NewPrice, NewQuantity, UnitType, MinStock, LowStockThreshold\n"
+                            "Leave blank to keep current values.",
+                            parse_mode=None  # 🚫 No Markdown parsing
                         )
-                    else:  # Shopkeeper
-                        text = (
-                            f"✏️ Updating *{safe_name}*\n"
-                            "Enter details as: `Quantity\\, UnitType`\n"
-                            "Leave blank to keep current values\\."
+                    else:
+                        send_message(
+                            chat_id,
+                            f"✏️ Updating {product.name}\n"
+                            "Enter details as: Quantity, UnitType\n"
+                            "Leave blank to keep current values.",
+                            parse_mode=None  # 🚫 No Markdown parsing
                         )
 
                     # Send safely with MarkdownV2
