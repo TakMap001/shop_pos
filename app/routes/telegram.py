@@ -25,6 +25,7 @@ from app.core import SessionLocal, get_db
 from sqlalchemy.exc import SQLAlchemyError
 import uuid
 import logging
+from telegram.helpers import escape_markdown
 import re
 
 logger = logging.getLogger(__name__)
@@ -1782,7 +1783,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         send_message(chat_id, "⚠️ Product not found.")
                         return {"ok": True}
 
-        from telegram.helpers import escape_markdown
 
                     # ✅ Escape product name for MarkdownV2
                     safe_name = escape_markdown(product.name, version=2)
