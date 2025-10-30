@@ -1760,7 +1760,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Product Selection --------------------
             elif action.startswith("select_product:"):
-                # 🔁 Ensure tenant DB again (same fix)
+                # 🔁 Ensure tenant DB again
                 user = db.query(User).filter(User.chat_id == chat_id).first()
                 tenant_db_url = getattr(user, "tenant_schema", None)
                 if not tenant_db_url:
@@ -1782,32 +1782,29 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         send_message(chat_id, "⚠️ Product not found.")
                         return {"ok": True}
 
-                    from telegram.helpers import escape_markdown
+        from telegram.helpers import escape_markdown
 
-                    # Escape product name for MarkdownV2
+                    # ✅ Escape product name for MarkdownV2
                     safe_name = escape_markdown(product.name, version=2)
 
-                    # Build safe message
+                    # Build safe message text
                     if role == "owner":
-                        send_message(
-                            chat_id,
-                            f"✏️ Updating {product.name}\n"
-                            "Enter details as: NewName, NewPrice, NewQuantity, UnitType, MinStock, LowStockThreshold\n"
-                            "Leave blank to keep current values.",
-                            parse_mode=None  # 🚫 No Markdown parsing
+                        message_text = (
+                            f"✏️ Updating *{safe_name}*\n"
+                            "Enter details as: `NewName, NewPrice, NewQuantity, UnitType, MinStock, LowStockThreshold`\n"
+                            "Leave blank to keep current values."
                         )
                     else:
-                        send_message(
-                            chat_id,
-                            f"✏️ Updating {product.name}\n"
-                            "Enter details as: Quantity, UnitType\n"
-                            "Leave blank to keep current values.",
-                            parse_mode=None  # 🚫 No Markdown parsing
+                        message_text = (
+                            f"✏️ Updating *{safe_name}*\n"
+                            "Enter details as: `Quantity, UnitType`\n"
+                            "Leave blank to keep current values."
                         )
 
-                    # Send safely with MarkdownV2
-                    send_message(chat_id, text, parse_mode="MarkdownV2")
+                    # ✅ Send the message with MarkdownV2 safely
+                    send_message(chat_id, message_text, parse_mode="MarkdownV2")
 
+                    # Update user state
                     user_states[chat_id] = {"action": "awaiting_update", "step": 1, "data": {"product_id": product_id}}
                 else:
                     send_message(chat_id, "⚠️ Cannot fetch product: tenant DB unavailable.")
