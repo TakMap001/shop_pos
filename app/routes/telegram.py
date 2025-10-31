@@ -1776,7 +1776,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         return {"ok": True}
 
                 if product_id:
-                    product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
+                    product = tenant_db.query(ProductORM).filter(ProductORM.id == product_id).first()
                     if not product:
                         send_message(chat_id, "⚠️ Product not found.")
                         return {"ok": True}
@@ -1807,6 +1807,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 else:
                     # If multiple products match, show selection buttons
                     products = tenant_db.query(ProductORM).order_by(ProductORM.product_id).all()  # Or your paginated list
+                    
                     if not products:
                         send_message(chat_id, "⚠️ No products found.")
                         return {"ok": True}
