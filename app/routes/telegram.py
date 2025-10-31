@@ -1705,7 +1705,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Update Product --------------------
             elif action == "update_product":
-                # ✅ Reload tenant DB properly
                 user = db.query(User).filter(User.chat_id == chat_id).first()
                 db.refresh(user)
 
@@ -1726,7 +1725,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 logger.debug(f"🧩 In update_product flow, tenant_db_url: {tenant_db_url}")
 
                 if tenant_db:
-                    # ✅ Correct action set
                     user_states[chat_id] = {"action": "awaiting_update", "step": 1, "data": {}}
                     send_message(chat_id, "✏️ Enter the product name to update:")
                 else:
@@ -1755,8 +1753,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "⚠️ Cannot fetch products: tenant DB unavailable.")
 
 
-            # -------------------- Multiple Product Selection --------------------
-            elif action.startswith("select_update:") or action.startswith("products_page:"):
+            # -------------------- Product Selection / Multiple Buttons --------------------
+            elif action.startswith("select_product:") or action.startswith("select_update:"):
                 user = db.query(User).filter(User.chat_id == chat_id).first()
                 tenant_db_url = getattr(user, "tenant_schema", None)
                 if not tenant_db_url:
@@ -1764,31 +1762,67 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     tenant_db_url = tenant.database_url if tenant else None
 
                 tenant_db = get_tenant_session(tenant_db_url)
-
                 if not tenant_db:
-                    send_message(chat_id, "⚠️ Cannot fetch products: tenant DB unavailable.")
+                    send_message(chat_id, "⚠️ Cannot fetch product: tenant DB unavailable.")
                     return {"ok": True}
 
-                # Example: fetch products for the page
-                products = tenant_db.query(ProductORM).order_by(ProductORM.product_id).all()  # or use pagination logic
+                # Try to extract product ID if it's a direct selection
+                product_id = None
+                if action.startswith("select_update:") or action.startswith("select_product:"):
+                    try:
+                        product_id = int(action.split(":")[1])
+                    except (IndexError, ValueError):
+                        send_message(chat_id, "⚠️ Invalid product selection.")
+                        return {"ok": True}
 
-                if not products:
-                    send_message(chat_id, "⚠️ No products found.")
-                    return {"ok": True}
+                if product_id:
+                    product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
+                    if not product:
+                        send_message(chat_id, "⚠️ Product not found.")
+                        return {"ok": True}
 
-                buttons = []
-                for product in products:
-                    # ✅ Safely escape product name for button text
-                    safe_text = html.escape(f"{product.name} — Stock: {product.quantity} ({product.unit_type})")
-                    buttons.append([InlineKeyboardButton(text=safe_text, callback_data=f"select_update:{product.product_id}")])
+                    safe_name_html = html.escape(product.name)
 
-                # Optional: add cancel button
-                buttons.append([InlineKeyboardButton(text="⬅️ Cancel", callback_data="back_to_menu")])
+                    if role == "owner":
+                        text_msg = (
+                            f"✏️ Updating <b>{safe_name_html}</b>\n"
+                            "Enter details as: <code>NewName, NewPrice, NewQuantity, UnitType, MinStock, LowStockThreshold</code>\n"
+                            "Leave blank to keep current values."
+                        )
+                    else:
+                        text_msg = (
+                            f"✏️ Updating <b>{safe_name_html}</b>\n"
+                            "Enter details as: <code>Quantity, UnitType</code>\n"
+                            "Leave blank to keep current values."
+                        )
 
-                kb_markup = InlineKeyboardMarkup(buttons)
+                    send_message(chat_id, text_msg, parse_mode="HTML")
 
-                # ✅ Send main message in plain text or HTML (no risky formatting in button text)
-                send_message(chat_id, "🔹 Multiple products found. Please select:", reply_markup=kb_markup, parse_mode=None)
+                    user_states[chat_id] = {
+                        "action": "awaiting_update",
+                        "step": 1,
+                        "data": {"product_id": product_id}
+                    }
+
+                else:
+                    # If multiple products match, show selection buttons
+                    products = tenant_db.query(ProductORM).order_by(ProductORM.product_id).all()  # Or your paginated list
+                    if not products:
+                        send_message(chat_id, "⚠️ No products found.")
+                        return {"ok": True}
+
+                    buttons = []
+                    for prod in products:
+                        # ✅ BUTTON TEXT MUST BE PLAIN (no HTML/Markdown)
+                        button_text = f"{prod.name} — Stock: {prod.quantity} ({prod.unit_type})"
+                        buttons.append([InlineKeyboardButton(text=button_text, callback_data=f"select_update:{prod.product_id}")])
+
+                    # Add cancel button
+                    buttons.append([InlineKeyboardButton(text="⬅️ Cancel", callback_data="back_to_menu")])
+                    kb_markup = InlineKeyboardMarkup(buttons)
+
+                    # Main message can be HTML-safe if needed, buttons are plain
+                    send_message(chat_id, "🔹 Multiple products found. Please select:", reply_markup=kb_markup, parse_mode=None)
 
 
             # -------------------- Record Sale --------------------
