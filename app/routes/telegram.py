@@ -1754,7 +1754,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
 
             # -------------------- Product Selection / Multiple Buttons --------------------
-            elif action.startswith("select_product:") or action.startswith("select_update:"):
+            elif any(action.startswith(prefix) for prefix in ["select_product:", "select_update:", "select_update\\:", "select_update%3A"]):
                 user = db.query(User).filter(User.chat_id == chat_id).first()
                 tenant_db_url = getattr(user, "tenant_schema", None)
                 if not tenant_db_url:
@@ -1766,19 +1766,25 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "⚠️ Cannot fetch product: tenant DB unavailable.")
                     return {"ok": True}
 
-                # Try to extract product ID if it's a direct selection
+                # Try to extract product ID safely
                 product_id = None
-                if action.startswith("select_update:") or action.startswith("select_product:"):
-                    try:
-                        product_id = int(action.split(":")[1])
-                    except (IndexError, ValueError):
-                        send_message(chat_id, "⚠️ Invalid product selection.")
-                        return {"ok": True}
+                match = re.search(r"select_(?:update|product)[:\\%3A]+(\d+)", action)
+                if match:
+                    product_id = int(match.group(1))
 
                 if product_id:
-                    product = tenant_db.query(ProductORM).filter(ProductORM.id == product_id).first()
+                    # ✅ Fetch product by correct column
+                    product = (
+                        tenant_db.query(ProductORM)
+                        .filter((getattr(ProductORM, "id", None) == product_id) | (getattr(ProductORM, "product_id", None) == product_id))
+                        .first()
+                    )
+
                     if not product:
-                        send_message(chat_id, "⚠️ Product not found.")
+                        # Add back button to recover easily
+                        kb = types.InlineKeyboardMarkup()
+                        kb.add(types.InlineKeyboardButton("🏠 Back to Main Menu", callback_data="back_to_menu"))
+                        send_message(chat_id, f"⚠️ No product found matching ID {product_id}.", kb)
                         return {"ok": True}
 
                     safe_name_html = html.escape(product.name)
@@ -1786,17 +1792,19 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     if role == "owner":
                         text_msg = (
                             f"✏️ Updating <b>{safe_name_html}</b>\n"
-                            "Enter details as: <code>NewName, NewPrice, NewQuantity, UnitType, MinStock, LowStockThreshold</code>\n"
+                            "Enter details as:\n"
+                            "<code>NewName, NewPrice, NewQuantity, UnitType, MinStock, LowStockThreshold</code>\n"
                             "Leave blank to keep current values."
                         )
                     else:
                         text_msg = (
                             f"✏️ Updating <b>{safe_name_html}</b>\n"
-                            "Enter details as: <code>Quantity, UnitType</code>\n"
+                            "Enter details as:\n"
+                            "<code>Quantity, UnitType</code>\n"
                             "Leave blank to keep current values."
                         )
 
-                    send_message(chat_id, text_msg, parse_mode="HTML")
+                    send_message(chat_id, text_msg, keyboard=None, parse_mode="HTML")
 
                     user_states[chat_id] = {
                         "action": "awaiting_update",
@@ -1805,25 +1813,11 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     }
 
                 else:
-                    # If multiple products match, show selection buttons
-                    products = tenant_db.query(ProductORM).order_by(ProductORM.product_id).all()  # Or your paginated list
-                    
-                    if not products:
-                        send_message(chat_id, "⚠️ No products found.")
-                        return {"ok": True}
-
-                    buttons = []
-                    for prod in products:
-                        # ✅ BUTTON TEXT MUST BE PLAIN (no HTML/Markdown)
-                        button_text = f"{prod.name} — Stock: {prod.quantity} ({prod.unit_type})"
-                        buttons.append([InlineKeyboardButton(text=button_text, callback_data=f"select_update:{prod.product_id}")])
-
-                    # Add cancel button
-                    buttons.append([InlineKeyboardButton(text="⬅️ Cancel", callback_data="back_to_menu")])
-                    kb_markup = InlineKeyboardMarkup(buttons)
-
-                    # Main message can be HTML-safe if needed, buttons are plain
-                    send_message(chat_id, "🔹 Multiple products found. Please select:", reply_markup=kb_markup, parse_mode=None)
+                    # If no product_id found or malformed callback
+                    kb = types.InlineKeyboardMarkup()
+                    kb.add(types.InlineKeyboardButton("🏠 Back to Main Menu", callback_data="back_to_menu"))
+                    send_message(chat_id, "⚠️ Invalid product selection. Returning to menu.", kb)
+                    return {"ok": True}
 
 
             # -------------------- Record Sale --------------------
