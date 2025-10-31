@@ -27,6 +27,7 @@ import uuid
 import logging
 from telegram.helpers import escape_markdown
 import re
+import html
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -1703,13 +1704,12 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Update Product --------------------
             elif action == "update_product":
-                # ✅ Always reload tenant DB properly
+                # ✅ Reload tenant DB properly
                 user = db.query(User).filter(User.chat_id == chat_id).first()
-                db.refresh(user)  # ensures the latest state from DB
+                db.refresh(user)
 
                 tenant_db_url = getattr(user, "tenant_schema", None)
                 if not tenant_db_url:
-                    # 🔁 Recover from Tenant table if missing
                     tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
                     if tenant:
                         tenant_db_url = tenant.database_url
@@ -1725,7 +1725,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 logger.debug(f"🧩 In update_product flow, tenant_db_url: {tenant_db_url}")
 
                 if tenant_db:
-                    # ✅ Correct action set to awaiting_update (not awaiting_product)
+                    # ✅ Correct action set
                     user_states[chat_id] = {"action": "awaiting_update", "step": 1, "data": {}}
                     send_message(chat_id, "✏️ Enter the product name to update:")
                 else:
@@ -1739,7 +1739,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 except (IndexError, ValueError):
                     page = 1
 
-                # 🔁 Ensure tenant DB session again
                 user = db.query(User).filter(User.chat_id == chat_id).first()
                 tenant_db_url = getattr(user, "tenant_schema", None)
                 if not tenant_db_url:
@@ -1765,41 +1764,46 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                 tenant_db = get_tenant_session(tenant_db_url)
 
-                if tenant_db:
-                    try:
-                        product_id = int(action.split(":")[1])
-                    except (IndexError, ValueError):
-                        send_message(chat_id, "⚠️ Invalid product selection.")
-                        return {"ok": True}
+                if not tenant_db:
+                    send_message(chat_id, "⚠️ Cannot fetch product: tenant DB unavailable.")
+                    return {"ok": True}
 
-                    product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
-                    if not product:
-                        send_message(chat_id, "⚠️ Product not found.")
-                        return {"ok": True}
+                try:
+                    product_id = int(action.split(":")[1])
+                except (IndexError, ValueError):
+                    send_message(chat_id, "⚠️ Invalid product selection.")
+                    return {"ok": True}
 
-                    # Escape the product name before sending
-                    safe_name_escaped = escape_markdown_v2(safe_name)
+                product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
+                if not product:
+                    send_message(chat_id, "⚠️ Product not found.")
+                    return {"ok": True}
 
-                    if role == "owner":
-                        text_msg = (
-                            f"✏️ Updating *{safe_name_escaped}*\n"
-                            "Enter details as: `NewName, NewPrice, NewQuantity, UnitType, MinStock, LowStockThreshold`\n"
-                            "Leave blank to keep current values."
-                        )
-                    else:
-                        text_msg = (
-                            f"✏️ Updating *{safe_name_escaped}*\n"
-                            "Enter details as: `Quantity, UnitType`\n"
-                            "Leave blank to keep current values."
-                        )
+                # ----------------- Safe HTML formatting -----------------
+   
+                safe_name_html = html.escape(product.name)
 
-                    # Double escape everything before sending
-                    send_message(chat_id, text_msg, parse_mode="MarkdownV2")
-
-                    user_states[chat_id] = {"action": "awaiting_update", "step": 1, "data": {"product_id": product_id}}
+                if role == "owner":
+                    text_msg = (
+                        f"✏️ Updating <b>{safe_name_html}</b>\n"
+                        "Enter details as: <code>NewName, NewPrice, NewQuantity, UnitType, MinStock, LowStockThreshold</code>\n"
+                        "Leave blank to keep current values."
+                    )
                 else:
-                     send_message(chat_id, "⚠️ Cannot fetch product: tenant DB unavailable.")
+                    text_msg = (
+                        f"✏️ Updating <b>{safe_name_html}</b>\n"
+                        "Enter details as: <code>Quantity, UnitType</code>\n"
+                        "Leave blank to keep current values."
+                    )
 
+                # ✅ Send a single safe message
+                send_message(chat_id, text_msg, parse_mode="HTML")
+
+                user_states[chat_id] = {
+                    "action": "awaiting_update",
+                    "step": 1,
+                    "data": {"product_id": product_id}
+                }
 
 
             # -------------------- Record Sale --------------------
