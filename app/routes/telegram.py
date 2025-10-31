@@ -26,6 +26,7 @@ from sqlalchemy.exc import SQLAlchemyError
 import uuid
 import logging
 from telegram.helpers import escape_markdown
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import re
 import html
 
@@ -1754,8 +1755,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "⚠️ Cannot fetch products: tenant DB unavailable.")
 
 
-            # -------------------- Product Selection --------------------
-            elif action.startswith("select_product:"):
+            # -------------------- Multiple Product Selection --------------------
+            elif action.startswith("select_update:") or action.startswith("products_page:"):
                 user = db.query(User).filter(User.chat_id == chat_id).first()
                 tenant_db_url = getattr(user, "tenant_schema", None)
                 if not tenant_db_url:
@@ -1765,45 +1766,29 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 tenant_db = get_tenant_session(tenant_db_url)
 
                 if not tenant_db:
-                    send_message(chat_id, "⚠️ Cannot fetch product: tenant DB unavailable.")
+                    send_message(chat_id, "⚠️ Cannot fetch products: tenant DB unavailable.")
                     return {"ok": True}
 
-                try:
-                    product_id = int(action.split(":")[1])
-                except (IndexError, ValueError):
-                    send_message(chat_id, "⚠️ Invalid product selection.")
+                # Example: fetch products for the page
+                products = tenant_db.query(ProductORM).order_by(ProductORM.product_id).all()  # or use pagination logic
+
+                if not products:
+                    send_message(chat_id, "⚠️ No products found.")
                     return {"ok": True}
 
-                product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
-                if not product:
-                    send_message(chat_id, "⚠️ Product not found.")
-                    return {"ok": True}
+                buttons = []
+                for product in products:
+                    # ✅ Safely escape product name for button text
+                    safe_text = html.escape(f"{product.name} — Stock: {product.quantity} ({product.unit_type})")
+                    buttons.append([InlineKeyboardButton(text=safe_text, callback_data=f"select_update:{product.product_id}")])
 
-                # ----------------- Safe HTML formatting -----------------
-   
-                safe_name_html = html.escape(product.name)
+                # Optional: add cancel button
+                buttons.append([InlineKeyboardButton(text="⬅️ Cancel", callback_data="back_to_menu")])
 
-                if role == "owner":
-                    text_msg = (
-                        f"✏️ Updating <b>{safe_name_html}</b>\n"
-                        "Enter details as: <code>NewName, NewPrice, NewQuantity, UnitType, MinStock, LowStockThreshold</code>\n"
-                        "Leave blank to keep current values."
-                    )
-                else:
-                    text_msg = (
-                        f"✏️ Updating <b>{safe_name_html}</b>\n"
-                        "Enter details as: <code>Quantity, UnitType</code>\n"
-                        "Leave blank to keep current values."
-                    )
+                kb_markup = InlineKeyboardMarkup(buttons)
 
-                # ✅ Send a single safe message
-                send_message(chat_id, text_msg, parse_mode="HTML")
-
-                user_states[chat_id] = {
-                    "action": "awaiting_update",
-                    "step": 1,
-                    "data": {"product_id": product_id}
-                }
+                # ✅ Send main message in plain text or HTML (no risky formatting in button text)
+                send_message(chat_id, "🔹 Multiple products found. Please select:", reply_markup=kb_markup, parse_mode=None)
 
 
             # -------------------- Record Sale --------------------
