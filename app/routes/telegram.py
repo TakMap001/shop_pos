@@ -117,7 +117,7 @@ def role_menu(chat_id):
     )
     send_message(chat_id, "👋 Welcome! Please choose your role:", keyboard)
 
-def ensure_tenant_session(chat_id):
+def ensure_tenant_session(chat_id, db):
     """
     Always return a valid tenant session for this Telegram user.
     If tenant_schema is missing on the User, recover it from the Tenant table and persist it.
@@ -126,11 +126,9 @@ def ensure_tenant_session(chat_id):
     tenant_db_url = getattr(user, "tenant_schema", None)
 
     if not tenant_db_url:
-        # Try to recover from the Tenant table
         tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
         if tenant and tenant.database_url:
             tenant_db_url = tenant.database_url
-            # Persist it on the User model for future requests
             user.tenant_schema = tenant_db_url
             db.commit()
             logger.info(f"✅ Persisted tenant_db_url for {user.username}: {tenant_db_url}")
@@ -138,7 +136,6 @@ def ensure_tenant_session(chat_id):
             logger.warning(f"⚠️ No tenant DB found for chat_id={chat_id}")
             return None
 
-    # Return a live tenant session
     return get_tenant_session(tenant_db_url)
 
 def main_menu(role: str):
@@ -1401,7 +1398,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             # -------------------- Update Product (owner only, step-by-step) --------------------
             elif action == "awaiting_update" and user.role == "owner":
                 # ✅ Always use safe helper (ensures tenant is linked and session is valid)
-                tenant_db = ensure_tenant_session(chat_id)
+                tenant_db = ensure_tenant_session(chat_id, db)
                 if not tenant_db:
                     send_message(chat_id, "❌ Unable to access tenant database.")
                     return {"ok": True}
@@ -1727,7 +1724,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Update Product --------------------
             elif action == "update_product":
-                tenant_db = ensure_tenant_session(chat_id)
+                tenant_db = ensure_tenant_session(chat_id, db)
                 if not tenant_db:
                     send_message(chat_id, "⚠️ Tenant database not linked. Please restart with /start.")
                     return {"ok": True}
@@ -1745,7 +1742,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 except (IndexError, ValueError):
                     page = 1
 
-                tenant_db = ensure_tenant_session(chat_id)
+                tenant_db = ensure_tenant_session(chat_id, db)
                 if not tenant_db:
                     send_message(chat_id, "⚠️ Tenant database not linked. Please restart with /start.")
                     return {"ok": True}
@@ -1759,7 +1756,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Product Selection / Multiple Buttons --------------------
             elif any(action.startswith(prefix) for prefix in ["select_product:", "select_update:", "select_update\\:", "select_update%3A"]):
-                tenant_db = ensure_tenant_session(chat_id)
+                tenant_db = ensure_tenant_session(chat_id, db)
                 if not tenant_db:
                     send_message(chat_id, "⚠️ Tenant database not linked. Please restart with /start.")
                     send_message(chat_id, "⚠️ Cannot fetch product: tenant DB unavailable.")
