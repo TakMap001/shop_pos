@@ -13,13 +13,16 @@ HIGH_VALUE_SALE_THRESHOLD = 100
 bot = TeleBot(TELEGRAM_BOT_TOKEN)
 
 # -------------------- Generic Message Sender --------------------
-def send_message(user_id, text, keyboard=None, parse_mode="Markdown"):
+def send_message(user_id, text, keyboard=None):
     """
     Send Telegram message with optional inline keyboard (dict or InlineKeyboardMarkup).
-    Automatically disables parse_mode if keyboard is present (buttons must be plain text).
+    Escapes text safely for MarkdownV2.
     """
     try:
         markup = None
+
+        # Escape the text for MarkdownV2
+        safe_text = escape_markdown_v2(text)
 
         # Case 1: Already a valid InlineKeyboardMarkup
         if isinstance(keyboard, types.InlineKeyboardMarkup):
@@ -34,23 +37,21 @@ def send_message(user_id, text, keyboard=None, parse_mode="Markdown"):
                     text_val = btn.get("text")
                     cb_val = btn.get("callback_data")
                     if not text_val or not cb_val:
-                        continue
-                    buttons.append(types.InlineKeyboardButton(text=text_val, callback_data=cb_val))
+                        continue  # skip invalid buttons
+                    # Escape button text as well
+                    safe_btn_text = escape_markdown_v2(str(text_val))
+                    buttons.append(
+                        types.InlineKeyboardButton(text=safe_btn_text, callback_data=cb_val)
+                    )
                 if buttons:
                     markup.add(*buttons)
 
-        # 🔹 IMPORTANT: Disable parse_mode if sending buttons
-        if markup:
-            effective_parse_mode = None
-        else:
-            effective_parse_mode = parse_mode
-
-        bot.send_message(user_id, text, reply_markup=markup, parse_mode=effective_parse_mode)
+        # Send safely using MarkdownV2
+        bot.send_message(user_id, safe_text, reply_markup=markup, parse_mode="MarkdownV2")
 
     except Exception as e:
         print("❌ Failed to send Telegram message:", e)
-        print("➡️ Keyboard passed in:", keyboard)  # DEBUG what you are sending
-
+        print("➡️ Keyboard passed in:", keyboard)
 # -------------------- Stock / Sales Notifications --------------------
 def notify_low_stock(tenant_db: Session, product: ProductORM):
     """
