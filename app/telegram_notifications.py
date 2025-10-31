@@ -5,12 +5,20 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.models.models import User, ProductORM, SaleORM
 from config import TELEGRAM_BOT_TOKEN
+import re
 
 LOW_STOCK_THRESHOLD = 10
 TOP_PRODUCT_THRESHOLD = 50
 HIGH_VALUE_SALE_THRESHOLD = 100
 
 bot = TeleBot(TELEGRAM_BOT_TOKEN)
+
+def escape_markdown_v2(text: str) -> str:
+    """
+    Safely escape text for Telegram MarkdownV2.
+    """
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text or '')
 
 # -------------------- Generic Message Sender --------------------
 def send_message(user_id, text, keyboard=None):
