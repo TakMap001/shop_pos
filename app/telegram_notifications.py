@@ -13,9 +13,10 @@ HIGH_VALUE_SALE_THRESHOLD = 100
 bot = TeleBot(TELEGRAM_BOT_TOKEN)
 
 # -------------------- Generic Message Sender --------------------
-def send_message(user_id, text, keyboard=None):
+def send_message(user_id, text, keyboard=None, parse_mode="Markdown"):
     """
     Send Telegram message with optional inline keyboard (dict or InlineKeyboardMarkup).
+    Automatically disables parse_mode if keyboard is present (buttons must be plain text).
     """
     try:
         markup = None
@@ -30,17 +31,21 @@ def send_message(user_id, text, keyboard=None):
             for row in keyboard["inline_keyboard"]:
                 buttons = []
                 for btn in row:
-                    # Make sure both text and callback_data exist
                     text_val = btn.get("text")
                     cb_val = btn.get("callback_data")
                     if not text_val or not cb_val:
-                        continue  # skip invalid buttons
+                        continue
                     buttons.append(types.InlineKeyboardButton(text=text_val, callback_data=cb_val))
                 if buttons:
-                    markup.add(*buttons)  # add row
+                    markup.add(*buttons)
 
-        # Send with markup (if any)
-        bot.send_message(user_id, text, reply_markup=markup, parse_mode="Markdown")
+        # 🔹 IMPORTANT: Disable parse_mode if sending buttons
+        if markup:
+            effective_parse_mode = None
+        else:
+            effective_parse_mode = parse_mode
+
+        bot.send_message(user_id, text, reply_markup=markup, parse_mode=effective_parse_mode)
 
     except Exception as e:
         print("❌ Failed to send Telegram message:", e)
