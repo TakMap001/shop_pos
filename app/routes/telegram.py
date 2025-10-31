@@ -1400,10 +1400,9 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Update Product (owner only, step-by-step) --------------------
             elif action == "awaiting_update" and user.role == "owner":
-                # Ensure tenant session
-                tenant_db_url = user.tenant_schema
-                tenant_db = get_tenant_session(tenant_db_url)
-                if tenant_db is None:
+                # ✅ Always use safe helper (ensures tenant is linked and session is valid)
+                tenant_db = ensure_tenant_session(chat_id)
+                if not tenant_db:
                     send_message(chat_id, "❌ Unable to access tenant database.")
                     return {"ok": True}
 
@@ -1728,30 +1727,15 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Update Product --------------------
             elif action == "update_product":
-                user = db.query(User).filter(User.chat_id == chat_id).first()
-                db.refresh(user)
+                tenant_db = ensure_tenant_session(chat_id)
+                if not tenant_db:
+                    send_message(chat_id, "⚠️ Tenant database not linked. Please restart with /start.")
+                    return {"ok": True}
 
-                tenant_db_url = getattr(user, "tenant_schema", None)
-                if not tenant_db_url:
-                    tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
-                    if tenant:
-                        tenant_db_url = tenant.database_url
-                        user.tenant_schema = tenant_db_url
-                        db.commit()
-                        logger.info(f"✅ Reloaded tenant schema from Tenant table for {user.username}: {tenant_db_url}")
-                    else:
-                        logger.warning(f"⚠️ No tenant schema found for {user.username}")
-                        send_message(chat_id, "⚠️ Tenant database not linked. Please restart with /start.")
-                        return {"ok": True}
+                logger.debug(f"🧩 In update_product flow, tenant_db: {tenant_db}")
 
-                tenant_db = get_tenant_session(tenant_db_url)
-                logger.debug(f"🧩 In update_product flow, tenant_db_url: {tenant_db_url}")
-
-                if tenant_db:
-                    user_states[chat_id] = {"action": "awaiting_update", "step": 1, "data": {}}
-                    send_message(chat_id, "✏️ Enter the product name to update:")
-                else:
-                    send_message(chat_id, "⚠️ Cannot fetch products: tenant DB unavailable.")
+                user_states[chat_id] = {"action": "awaiting_update", "step": 1, "data": {}}
+                send_message(chat_id, "✏️ Enter the product name to update:")
 
 
             # -------------------- Paginated Product List --------------------
