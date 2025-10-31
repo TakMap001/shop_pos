@@ -43,16 +43,12 @@ if not TELEGRAM_BOT_TOKEN:
 
 # -------------------- Helpers --------------------
 
-def escape_markdown(text: str, version: int = 2) -> str:
+def escape_markdown_v2(text: str) -> str:
     """
-    Escapes Telegram Markdown or MarkdownV2 special characters.
+    Safely escape text for Telegram MarkdownV2.
     """
-    if version == 2:
-        escape_chars = r'_*[]()~`>#+-=|{}.!'
-    else:
-        escape_chars = r'_*>`['
-    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text)
-
+    escape_chars = r'_*[]()~`>#+-=|{}.!'
+    return re.sub(f'([{re.escape(escape_chars)}])', r'\\\1', text or '')
 
 def create_username(full_name: str) -> str:
     """Generate a simple username from full name."""
@@ -1782,27 +1778,23 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         return {"ok": True}
 
                     # Escape the product name before sending
-                    safe_name_escaped = escape_markdown(safe_name, version=2)
+                    safe_name_escaped = escape_markdown_v2(safe_name)
 
                     if role == "owner":
-                        send_message(
-                            chat_id,
+                        text_msg = (
                             f"✏️ Updating *{safe_name_escaped}*\n"
                             "Enter details as: `NewName, NewPrice, NewQuantity, UnitType, MinStock, LowStockThreshold`\n"
-                            "Leave blank to keep current values.",
-                            parse_mode="MarkdownV2"
+                            "Leave blank to keep current values."
                         )
-                    else:  # Shopkeeper
-                        send_message(
-                            chat_id,
+                    else:
+                        text_msg = (
                             f"✏️ Updating *{safe_name_escaped}*\n"
                             "Enter details as: `Quantity, UnitType`\n"
-                            "Leave blank to keep current values.",
-                            parse_mode="MarkdownV2"
+                            "Leave blank to keep current values."
                         )
 
-                    # ✅ Send with parse_mode=MarkdownV2 safely
-                    send_message(chat_id, raw_text, parse_mode="MarkdownV2")
+                    # Double escape everything before sending
+                    send_message(chat_id, text_msg, parse_mode="MarkdownV2")
 
                     user_states[chat_id] = {"action": "awaiting_update", "step": 1, "data": {"product_id": product_id}}
                 else:
