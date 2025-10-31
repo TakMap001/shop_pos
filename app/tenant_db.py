@@ -130,7 +130,24 @@ def get_tenant_session(db_url: str):
     if not db_url:
         return None
     try:
-        return get_session_for_tenant(db_url)
+        if "#" in db_url:
+            base_url, schema_name = db_url.split("#", 1)
+            engine = create_engine(
+                base_url,
+                future=True,
+                pool_pre_ping=True,
+                connect_args={"options": f"-csearch_path={schema_name},public"}
+            )
+        else:
+            engine = create_engine(
+                db_url,
+                future=True,
+                pool_pre_ping=True,
+                connect_args={"options": "-csearch_path=public"}
+            )
+
+        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
+        return SessionLocal()
     except Exception as e:
         logger.error(f"❌ Failed to create tenant session: {e}")
         return None
