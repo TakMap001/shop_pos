@@ -5,6 +5,7 @@ from sqlalchemy.orm import sessionmaker
 from datetime import datetime
 from app.models.models import User
 from app.models.central_models import Tenant
+from app.models.tenant_base import TenantBase
 
 # -----------------------------------------------------
 # Basic logger setup (since you don't have core.logger)
