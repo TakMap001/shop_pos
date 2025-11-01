@@ -5,7 +5,7 @@ import requests, os
 from sqlalchemy.orm import Session
 from decimal import Decimal
 from datetime import datetime
-from sqlalchemy import func, extract
+from sqlalchemy import func, text, extract
 from app.models.central_models import Tenant  # Central DB
 from app.models.models import Base as TenantBase
 from app.models.models import User, ProductORM, SaleORM  # Tenant DB
@@ -1761,8 +1761,21 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                 # -------------------- Fetch product --------------------
                 try:
+                    # 🧭 Check the active schema search path
+                    active_schema = tenant_db.execute(text("SHOW search_path")).scalar()
+                    logger.info(f"🧭 Active search_path during product lookup: {active_schema}")
+
+                    # 🔍 Check what tenant_db actually is
+                    logger.info(f"🔍 tenant_db type: {type(tenant_db)}")
+
+                    # 📦 Check direct SQL visibility of products
+                    count = tenant_db.execute(text("SELECT COUNT(*) FROM products")).scalar()
+                    logger.info(f"📦 Direct SQL product count in current schema: {count}")
+
+                    # 🚀 Perform the ORM query
                     product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
-                    logger.info(f"📦 Fetched product result for ID {product_id}: {product}")
+                    logger.info(f"📦 ORM product result for ID {product_id}: {product}")
+
                 except Exception as e:
                     logger.error(f"❌ DB fetch failed for product_id={product_id}: {e}")
                     send_message(chat_id, "⚠️ Database error while fetching product.")
