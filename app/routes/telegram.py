@@ -1755,92 +1755,52 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
 
             # -------------------- Product Selection / Multiple Buttons --------------------
-            elif any(action.startswith(prefix) for prefix in ["select_product:", "select_update:", "select_update\\:", "select_update%3A"]):
+            elif action.startswith("select_update:") or action.startswith("select_product:"):
+                logger.debug(f"🧩 Callback triggered: {action} from chat_id {chat_id}")
+
                 tenant_db = ensure_tenant_session(chat_id, db)
                 if not tenant_db:
-                    send_message(chat_id, "⚠️ Tenant database not linked. Please restart with /start.")
+                    send_message(chat_id, "⚠️ Tenant database unavailable. Please restart with /start.")
                     return {"ok": True}
 
-                # Debug log for action received
-                logger.debug(f"🔍 Callback received: action={action}")
-
-                # Try to extract product ID safely
-                product_id = None
-                match = re.search(r"select_(?:update|product)[:\\%3A]+(\d+)", action)
-                if match:
-                    product_id = int(match.group(1))
-                logger.debug(f"🆔 Parsed product_id={product_id}")
-
-                # Log tenant DB URL and schema for debugging
-                user = db.query(User).filter(User.chat_id == chat_id).first()
-                logger.debug(f"🏷️ User {user.username if user else 'UNKNOWN'} tenant_schema={getattr(user, 'tenant_schema', None)}")
-
+                # Extract product ID safely
                 try:
-                    schema_check = tenant_db.execute(text("SELECT current_schema()")).fetchone()
-                    logger.debug(f"📂 Current schema for this tenant_db session: {schema_check}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Could not verify schema context: {e}")
-
-                # -------------------- Product lookup (safe + verbose) --------------------
-                try:
-                    logger.info(f"🔍 Looking for product_id={product_id} in tenant DB for chat_id={chat_id}")
-                    # List all products in current tenant for debugging visibility
-                    all_products = tenant_db.query(ProductORM).all()
-                    logger.info(f"📦 Tenant {chat_id} has {len(all_products)} products: {[p.product_id for p in all_products]}")
-
-                    # Use isolated transaction for clarity
-                    with tenant_db.begin():
-                        product = (
-                            tenant_db.query(ProductORM)
-                            .filter(ProductORM.product_id == product_id)
-                            .first()
-                        )
-
-                    if not product:
-                        logger.warning(f"⚠️ Product with ID={product_id} not found in tenant_{chat_id}")
-                        kb = types.InlineKeyboardMarkup()
-                        kb.add(types.InlineKeyboardButton("🏠 Back to Main Menu", callback_data="back_to_menu"))
-                        send_message(chat_id, f"⚠️ No product found matching ID {product_id}.", kb)
-                        return {"ok": True}
-
-                    logger.info(f"✅ Found product: {product.name} (ID={product.product_id}) in tenant_{chat_id}")
-
-                except Exception as e:
-                    logger.error(f"❌ Product lookup failed for ID {product_id}: {e}")
-                    send_message(chat_id, "❌ Error accessing product data. Please try again.")
+                    product_id = int(action.split(":")[1])
+                except (IndexError, ValueError):
+                    send_message(chat_id, "⚠️ Invalid product selection.")
                     return {"ok": True}
+
+                # Fetch product cleanly
+                product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
+                logger.debug(f"📦 Product fetch result for ID {product_id}: {product}")
 
                 if not product:
-                    # Add back button to recover easily
+                    # Add a return button for convenience
                     kb = types.InlineKeyboardMarkup()
                     kb.add(types.InlineKeyboardButton("🏠 Back to Main Menu", callback_data="back_to_menu"))
                     send_message(chat_id, f"⚠️ No product found matching ID {product_id}.", kb)
                     return {"ok": True}
 
+                # Clear any stale state before continuing
+                user_states.pop(chat_id, None)
+
                 safe_name_html = html.escape(product.name)
 
-                if role == "owner":
-                    text_msg = (
-                        f"✏️ Updating <b>{safe_name_html}</b>\n"
-                        "Enter details as:\n"
-                        "<code>NewName, NewPrice, NewQuantity, UnitType, MinStock, LowStockThreshold</code>\n"
-                        "Leave blank to keep current values."
-                    )
-                else:
-                    text_msg = (
-                        f"✏️ Updating <b>{safe_name_html}</b>\n"
-                        "Enter details as:\n"
-                        "<code>Quantity, UnitType</code>\n"
-                        "Leave blank to keep current values."
-                    )
-
+                # Start interactive update process (step 2)
+                text_msg = (
+                    f"✏️ Updating <b>{safe_name_html}</b>\n"
+                    "Please enter the new name or send '-' to keep the current name:"
+                )
                 send_message(chat_id, text_msg, keyboard=None, parse_mode="HTML")
 
+                # Save user state for next step
                 user_states[chat_id] = {
                     "action": "awaiting_update",
-                    "step": 1,
-                    "data": {"product_id": product_id}
+                    "step": 2,  # move directly into step 2 (update flow)
+                    "data": {"product_id": product_id},
                 }
+
+                return {"ok": True}
 
 
             # -------------------- Record Sale --------------------
