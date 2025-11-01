@@ -120,52 +120,33 @@ def role_menu(chat_id):
 
 def ensure_tenant_session(chat_id, db):
     """
-    Return a valid tenant session, reconstructing the full tenant_db_url consistently.
+    Always return a valid tenant session for this Telegram user.
+    If tenant_schema is missing or not a full DB URL, reconstruct it.
     """
     user = db.query(User).filter(User.chat_id == chat_id).first()
-    base_url = os.getenv("DATABASE_URL")
+    tenant_db_url = getattr(user, "tenant_schema", None)
 
-    if not user:
-        logger.warning(f"⚠️ No user found for chat_id={chat_id}")
-        return None
-
-    tenant_schema = None
-
-    # Step 1: Resolve tenant schema name
-    if user.tenant_schema:
-        # Extract just the schema name even if it's a URL
-        if "#" in user.tenant_schema:
-            tenant_schema = user.tenant_schema.split("#")[-1]
-        elif user.tenant_schema.startswith("tenant_"):
-            tenant_schema = user.tenant_schema
-        else:
-            tenant_schema = f"tenant_{chat_id}"
-    else:
+    # Try to recover from Tenant table if missing
+    if not tenant_db_url:
         tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
         if tenant and tenant.database_url:
-            tenant_schema = tenant.database_url.split("#")[-1]
-            user.tenant_schema = tenant_schema
+            tenant_db_url = tenant.database_url
+            user.tenant_schema = tenant_db_url
             db.commit()
-            logger.info(f"✅ Recovered tenant schema for {user.username}: {tenant_schema}")
+            logger.info(f"✅ Persisted tenant_db_url for {user.username}: {tenant_db_url}")
         else:
-            tenant_schema = f"tenant_{chat_id}"
-            user.tenant_schema = tenant_schema
-            db.commit()
-            logger.warning(f"⚠️ Defaulted tenant_schema for chat_id={chat_id}")
+            logger.warning(f"⚠️ No tenant DB found for chat_id={chat_id}")
+            return None
 
-    # Step 2: Reconstruct canonical full tenant_db_url
-    tenant_db_url = f"{base_url}#{tenant_schema}"
+    # 🔧 Reconstruct full tenant DB URL if only schema name is stored
+    if "#" not in tenant_db_url:
+        base_url = os.getenv("DATABASE_URL")
+        schema_name = tenant_db_url if tenant_db_url.startswith("tenant_") else f"tenant_{chat_id}"
+        tenant_db_url = f"{base_url}#{schema_name}"
+        logger.info(f"🔗 Reconstructed tenant_db_url for {user.username}: {tenant_db_url}")
 
-    logger.info(f"🔗 Constructed tenant DB URL: {tenant_db_url}")
-
-    # Step 3: Get tenant session safely
-    try:
-        session = get_tenant_session(tenant_db_url, chat_id)
-        logger.info(f"✅ Tenant session created successfully for chat_id={chat_id}")
-        return session
-    except Exception as e:
-        logger.error(f"❌ Failed to create tenant session for chat_id={chat_id}: {e}")
-        return None
+    # ✅ Return a proper session
+    return get_tenant_session(tenant_db_url, chat_id)
 
 def main_menu(role: str):
     if role == "owner":
