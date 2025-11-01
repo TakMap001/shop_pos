@@ -3,199 +3,169 @@ import logging
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
-from app.models.tenant_base import TenantBase  # tenant DB Base
+from app.models.models import User, Tenant
+from app.models.tenant_base import TenantBase
 
+# -----------------------------------------------------
+# Basic logger setup (since you don't have core.logger)
+# -----------------------------------------------------
 logger = logging.getLogger("tenant_db")
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+logger.setLevel(logging.INFO)
 
 
-# -------------------- Create Tenant Schema --------------------
+# ======================================================
+# 🔹 CREATE TENANT SCHEMA
+# ======================================================
 def create_tenant_db(chat_id: int) -> str:
     """
-    Create a dedicated SCHEMA for the tenant if it doesn't exist.
-    Also ensures a tenant record exists in the central tenants table,
-    and links the user (from users table) to the tenant schema.
-    Returns the schema-specific database URL for SQLAlchemy session creation.
+    Create or verify tenant schema and link it to user + tenant records.
+    Returns full tenant DB URL: postgresql://.../railway#tenant_{chat_id}
     """
     if not chat_id:
-        raise ValueError("❌ Cannot create tenant schema: chat_id is None or invalid")
+        raise ValueError("❌ Invalid chat_id for tenant schema creation")
 
     base_url = os.getenv("DATABASE_URL")
     if not base_url:
-        raise RuntimeError("❌ DATABASE_URL environment variable is missing")
+        raise RuntimeError("❌ DATABASE_URL is missing")
 
     schema_name = f"tenant_{chat_id}"
     tenant_db_url = f"{base_url}#{schema_name}"
 
     logger.info(f"📌 Preparing tenant schema: {schema_name}")
 
-    # Connect to main database
     engine = create_engine(base_url, execution_options={"isolation_level": "AUTOCOMMIT"})
 
     with engine.connect() as conn:
-        # -------------------- Ensure tenant schema exists --------------------
-        try:
-            result = conn.execute(
-                text("SELECT schema_name FROM information_schema.schemata WHERE schema_name=:s"),
-                {"s": schema_name}
-            ).fetchone()
-        except Exception as e:
-            logger.error(f"❌ Failed to check schema existence: {e}")
-            raise
-
+        # Create schema if needed
+        result = conn.execute(
+            text("SELECT schema_name FROM information_schema.schemata WHERE schema_name=:s"),
+            {"s": schema_name},
+        ).fetchone()
         if not result:
-            try:
-                conn.execute(text(f'CREATE SCHEMA "{schema_name}"'))
-                logger.info(f"✅ Tenant schema '{schema_name}' created successfully.")
-            except Exception as e:
-                logger.warning(f"⚠️ Could not create tenant schema '{schema_name}': {e}")
+            conn.execute(text(f'CREATE SCHEMA "{schema_name}"'))
+            logger.info(f"✅ Tenant schema '{schema_name}' created.")
         else:
             logger.info(f"ℹ️ Tenant schema '{schema_name}' already exists.")
 
-        # -------------------- Ensure tenant record in central DB --------------------
-        try:
-            existing = conn.execute(
-                text("SELECT tenant_id FROM tenants WHERE telegram_owner_id = :oid"),
-                {"oid": chat_id}
-            ).fetchone()
+        # Ensure tenant record exists
+        existing = conn.execute(
+            text("SELECT tenant_id FROM tenants WHERE telegram_owner_id = :oid"),
+            {"oid": chat_id},
+        ).fetchone()
 
-            if not existing:
-                conn.execute(
-                    text("""
-                        INSERT INTO tenants (tenant_id, store_name, telegram_owner_id, database_url, created_at)
-                        VALUES (gen_random_uuid(), :store, :oid, :url, :created)
-                    """),
-                    {
-                        "store": f"Store_{chat_id}",
-                        "oid": chat_id,
-                        "url": tenant_db_url,
-                        "created": datetime.utcnow(),
-                    },
-                )
-                logger.info(f"✅ Tenant record created for owner {chat_id}")
-            else:
-                conn.execute(
-                    text("UPDATE tenants SET database_url = :url WHERE telegram_owner_id = :oid"),
-                    {"url": tenant_db_url, "oid": chat_id},
-                )
-                logger.info(f"ℹ️ Tenant record updated for owner {chat_id}")
-        except Exception as e:
-            logger.error(f"❌ Failed to ensure tenant record: {e}")
-
-        # -------------------- Link user to tenant schema --------------------
-        try:
-            # Update users table to reflect schema link
+        if not existing:
             conn.execute(
                 text("""
-                    UPDATE users
-                    SET tenant_schema = :schema
-                    WHERE chat_id = :cid
+                    INSERT INTO tenants (tenant_id, store_name, telegram_owner_id, database_url, created_at)
+                    VALUES (gen_random_uuid(), :store, :oid, :url, :created)
                 """),
-                {"schema": schema_name, "cid": chat_id},
+                {
+                    "store": f"Store_{chat_id}",
+                    "oid": chat_id,
+                    "url": tenant_db_url,
+                    "created": datetime.utcnow(),
+                },
             )
-            logger.info(f"✅ Linked user {chat_id} to tenant schema '{schema_name}' in users table.")
-
-            # Also ensure tenant table stores correct URL
+            logger.info(f"✅ Tenant record created for {chat_id}")
+        else:
             conn.execute(
-                text("""
-                    UPDATE tenants
-                    SET database_url = :url
-                    WHERE telegram_owner_id = :cid
-                """),
-                {"url": tenant_db_url, "cid": chat_id},
+                text("UPDATE tenants SET database_url = :url WHERE telegram_owner_id = :oid"),
+                {"url": tenant_db_url, "oid": chat_id},
             )
-            logger.info(f"✅ Updated tenants record with URL for chat_id={chat_id}")
+            logger.info(f"ℹ️ Tenant record updated for {chat_id}")
 
-        except Exception as e:
-            logger.warning(f"⚠️ Could not link user {chat_id} to tenant schema: {e}")
+        # Link user to tenant schema
+        conn.execute(
+            text("UPDATE users SET tenant_schema = :schema WHERE chat_id = :cid"),
+            {"schema": schema_name, "cid": chat_id},
+        )
+        logger.info(f"✅ Linked user {chat_id} → {schema_name}")
 
-    # -------------------- Ensure tenant tables exist --------------------
     ensure_tenant_tables(base_url, schema_name)
-
-    logger.info(f"✅ Tenant setup complete for chat_id={chat_id} ({schema_name})")
+    logger.info(f"✅ Tenant setup complete for chat_id={chat_id}")
     return tenant_db_url
 
-# -------------------- Ensure tenant tables exist --------------------
+
+# ======================================================
+# 🔹 ENSURE TENANT TABLES
+# ======================================================
 def ensure_tenant_tables(base_url: str, schema_name: str):
-    """Ensure all tenant tables exist in the given schema."""
+    """Ensure all tenant tables exist."""
     if not base_url or not schema_name:
-        raise ValueError("Base URL or schema name is missing")
+        raise ValueError("Base URL or schema name missing")
 
-    try:
-        engine = create_engine(
-            base_url,
-            future=True,
-            pool_pre_ping=True,
-            connect_args={"options": f"-csearch_path={schema_name}"}
-        )
-        TenantBase.metadata.create_all(bind=engine)
-        logger.info(f"✅ Tenant tables created/verified in schema '{schema_name}'.")
-    except Exception as e:
-        logger.error(f"❌ Failed to create tenant tables in schema '{schema_name}': {e}")
-        raise RuntimeError(f"Cannot initialize tenant tables for schema '{schema_name}'") from e
+    engine = create_engine(
+        base_url,
+        future=True,
+        pool_pre_ping=True,
+        connect_args={"options": f"-csearch_path={schema_name}"}
+    )
+    TenantBase.metadata.create_all(bind=engine)
+    logger.info(f"✅ Tenant tables verified in '{schema_name}'.")
 
 
-# -------------------- Tenant Session (simple) --------------------
-def get_session_for_tenant(tenant_db_url: str):
+# ======================================================
+# 🔹 CREATE TENANT SESSION
+# ======================================================
+def get_tenant_session(tenant_db_url: str, chat_id: int):
     """
-    Return a SQLAlchemy session for a given tenant schema DB URL.
-    URL format: postgresql://.../railway#schema_name
-    """
-    if "#" in tenant_db_url:
-        base_url, schema_name = tenant_db_url.split("#", 1)
-        engine = create_engine(
-            base_url,
-            future=True,
-            pool_pre_ping=True,
-            connect_args={"options": f"-csearch_path={schema_name}"}
-        )
-    else:
-        engine = create_engine(tenant_db_url, future=True, pool_pre_ping=True)
-
-    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
-    return SessionLocal()
-
-
-# -------------------- Get tenant session safely --------------------
-def get_tenant_session(tenant_db_url: str, chat_id: int = None):
-    """
-    Return a SQLAlchemy session for a given tenant schema DB URL.
-    Ensures the correct search_path is set to the tenant schema.
-    URL format: postgresql://.../railway#schema_name
+    Create a tenant-scoped SQLAlchemy session using the '#tenant_xxx' schema tag.
     """
     if not tenant_db_url:
         raise ValueError("❌ Missing tenant_db_url")
 
-    # Split base URL and schema name
     if "#" in tenant_db_url:
         base_url, schema_name = tenant_db_url.split("#", 1)
     else:
         base_url = tenant_db_url
-        if chat_id:
-            schema_name = f"tenant_{chat_id}"
-            logger.warning(f"⚠️ Schema missing in db_url. Derived schema_name={schema_name} from chat_id={chat_id}")
+        schema_name = f"tenant_{chat_id}"
+
+    logger.info(f"🔗 Creating tenant session → {schema_name}")
+
+    engine = create_engine(
+        base_url,
+        pool_pre_ping=True,
+        connect_args={"options": f"-csearch_path={schema_name},public"},
+    )
+
+    TenantBase.metadata.schema = schema_name
+    TenantBase.metadata.create_all(bind=engine)
+
+    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    logger.info(f"✅ Tenant session ready for {schema_name}")
+    return SessionLocal()
+
+
+# ======================================================
+# 🔹 ENSURE TENANT SESSION (Main entry point)
+# ======================================================
+def ensure_tenant_session(chat_id, db):
+    """
+    Return a tenant-specific session, ensuring proper schema and persistence.
+    """
+    user = db.query(User).filter(User.chat_id == chat_id).first()
+    tenant_schema = getattr(user, "tenant_schema", None)
+
+    # Derive or rebuild URL
+    if tenant_schema and "#" in tenant_schema:
+        tenant_db_url = tenant_schema
+    else:
+        tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
+        if tenant and tenant.database_url:
+            tenant_db_url = tenant.database_url
         else:
-            schema_name = "public"
+            base_url = os.getenv("DATABASE_URL")
+            schema_name = tenant_schema if tenant_schema else f"tenant_{chat_id}"
+            tenant_db_url = f"{base_url}#{schema_name}"
+            logger.warning(f"⚠️ Reconstructed tenant_db_url: {tenant_db_url}")
 
-    # ✅ Create engine with tenant-specific search_path
-    try:
-        engine = create_engine(
-            base_url,
-            future=True,
-            pool_pre_ping=True,
-            connect_args={"options": f"-csearch_path={schema_name},public"}
-        )
+        # Persist to user record
+        user.tenant_schema = tenant_db_url
+        db.commit()
 
-        # ✅ Bind ORM Base *before* creating session
-        from app.models.models import TenantBase
-        TenantBase.metadata.bind = engine
-        TenantBase.metadata.schema = schema_name
-
-        logger.info(f"✅ Tenant search_path set to: {schema_name}, public")
-
-        SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
-        return SessionLocal()
-
-    except Exception as e:
-        logger.error(f"❌ Failed to create tenant engine for schema '{schema_name}': {e}")
-        raise
-
+    return get_tenant_session(tenant_db_url, chat_id)

@@ -16,7 +16,7 @@ from config import DATABASE_URL
 from telebot import types
 from app.telegram_notifications import notify_owner_of_new_shopkeeper
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_API_URL
-from app.tenant_db import get_tenant_session, create_tenant_db, ensure_tenant_tables
+from app.tenant_db import get_tenant_session, create_tenant_db, ensure_tenant_tables, ensure_tenant_session
 import random
 import string
 import bcrypt
@@ -117,36 +117,6 @@ def role_menu(chat_id):
         types.InlineKeyboardButton("🛍 Shopkeeper", callback_data="role_keeper")
     )
     send_message(chat_id, "👋 Welcome! Please choose your role:", keyboard)
-
-def ensure_tenant_session(chat_id, db):
-    """
-    Always return a valid tenant session for this Telegram user.
-    If tenant_schema is missing or not a full DB URL, reconstruct it.
-    """
-    user = db.query(User).filter(User.chat_id == chat_id).first()
-    tenant_db_url = getattr(user, "tenant_schema", None)
-
-    # Try to recover from Tenant table if missing
-    if not tenant_db_url:
-        tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
-        if tenant and tenant.database_url:
-            tenant_db_url = tenant.database_url
-            user.tenant_schema = tenant_db_url
-            db.commit()
-            logger.info(f"✅ Persisted tenant_db_url for {user.username}: {tenant_db_url}")
-        else:
-            logger.warning(f"⚠️ No tenant DB found for chat_id={chat_id}")
-            return None
-
-    # 🔧 Reconstruct full tenant DB URL if only schema name is stored
-    if "#" not in tenant_db_url:
-        base_url = os.getenv("DATABASE_URL")
-        schema_name = tenant_db_url if tenant_db_url.startswith("tenant_") else f"tenant_{chat_id}"
-        tenant_db_url = f"{base_url}#{schema_name}"
-        logger.info(f"🔗 Reconstructed tenant_db_url for {user.username}: {tenant_db_url}")
-
-    # ✅ Return a proper session
-    return get_tenant_session(tenant_db_url, chat_id)
 
 def main_menu(role: str):
     if role == "owner":
