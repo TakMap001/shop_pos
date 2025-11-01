@@ -125,45 +125,41 @@ def get_session_for_tenant(tenant_db_url: str):
 
 
 # -------------------- Get tenant session safely --------------------
-def get_tenant_session(db_url: str, chat_id: int = None):
+def get_session_for_tenant(tenant_db_url: str, chat_id: int = None):
     """
-    Return an active SQLAlchemy session for the tenant's schema.
-    Automatically derives schema name from chat_id if not present in db_url.
+    Return a SQLAlchemy session for a given tenant schema DB URL.
+    Ensures the correct search_path is set to the tenant schema.
+    URL format: postgresql://.../railway#schema_name
     """
-    if not db_url:
-        logger.error("❌ No tenant database URL provided to get_tenant_session()")
-        return None
+    if not tenant_db_url:
+        raise ValueError("❌ Missing tenant_db_url")
 
-    try:
-        # ✅ Determine schema_name
-        if "#" in db_url:
-            base_url, schema_name = db_url.split("#", 1)
-        elif chat_id:
+    # Split base URL and schema name
+    if "#" in tenant_db_url:
+        base_url, schema_name = tenant_db_url.split("#", 1)
+    else:
+        base_url = tenant_db_url
+        if chat_id:
             schema_name = f"tenant_{chat_id}"
-            base_url = db_url
             logger.warning(f"⚠️ Schema missing in db_url. Derived schema_name={schema_name} from chat_id={chat_id}")
         else:
-            base_url, schema_name = db_url, "public"
+            schema_name = "public"
 
-        logger.debug(f"🔧 Creating tenant DB engine for schema: {schema_name}")
-
+    # ✅ Create engine with tenant-specific search_path
+    try:
         engine = create_engine(
             base_url,
             future=True,
             pool_pre_ping=True,
-            connect_args={"options": f"-csearch_path={schema_name},public"},
-            echo=False,
+            connect_args={"options": f"-csearch_path={schema_name},public"}
         )
 
-        # ✅ Explicitly set the search path to tenant schema
-        with engine.connect() as conn:
-            conn.execute(text(f'SET search_path TO "{schema_name}", public'))
-            current = conn.execute(text("SHOW search_path")).scalar()
-            logger.info(f"✅ Tenant search_path set to: {current}")
+        # Log confirmation of correct schema
+        logger.info(f"✅ Tenant search_path set to: {schema_name}, public")
 
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
         return SessionLocal()
 
     except Exception as e:
-        logger.error(f"❌ Failed to create tenant session for {db_url}: {e}")
-        return None
+        logger.error(f"❌ Failed to create tenant engine for schema '{schema_name}': {e}")
+        raise
