@@ -126,28 +126,39 @@ def get_session_for_tenant(tenant_db_url: str):
 
 # -------------------- Get tenant session safely --------------------
 def get_tenant_session(db_url: str):
-    """Return an active tenant Session. Returns None if db_url is missing."""
+    """
+    Return an active SQLAlchemy session for the tenant's schema.
+    Ensures that the search_path is set to the tenant schema before returning.
+    """
     if not db_url:
+        logger.error("❌ No tenant database URL provided to get_tenant_session()")
         return None
+
     try:
         if "#" in db_url:
             base_url, schema_name = db_url.split("#", 1)
-            engine = create_engine(
-                base_url,
-                future=True,
-                pool_pre_ping=True,
-                connect_args={"options": f"-csearch_path={schema_name},public"}
-            )
         else:
-            engine = create_engine(
-                db_url,
-                future=True,
-                pool_pre_ping=True,
-                connect_args={"options": "-csearch_path=public"}
-            )
+            base_url, schema_name = db_url, "public"
+
+        logger.debug(f"🔧 Creating tenant DB engine for schema: {schema_name}")
+
+        engine = create_engine(
+            base_url,
+            future=True,
+            pool_pre_ping=True,
+            connect_args={"options": f"-csearch_path={schema_name},public"},
+            echo=False,  # set to True for raw SQL debug
+        )
+
+        # ✅ Explicitly set the search path once per connection
+        with engine.connect() as conn:
+            conn.execute(text(f'SET search_path TO "{schema_name}", public'))
+            current = conn.execute(text("SHOW search_path")).scalar()
+            logger.info(f"✅ Tenant search_path set to: {current}")
 
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
         return SessionLocal()
+
     except Exception as e:
-        logger.error(f"❌ Failed to create tenant session: {e}")
+        logger.error(f"❌ Failed to create tenant session for {db_url}: {e}")
         return None
