@@ -125,7 +125,7 @@ def get_session_for_tenant(tenant_db_url: str):
 
 
 # -------------------- Get tenant session safely --------------------
-def get_session_for_tenant(tenant_db_url: str, chat_id: int = None):
+def get_tenant_session(tenant_db_url: str, chat_id: int = None):
     """
     Return a SQLAlchemy session for a given tenant schema DB URL.
     Ensures the correct search_path is set to the tenant schema.
