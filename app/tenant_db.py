@@ -116,7 +116,7 @@ def ensure_tenant_tables(base_url: str, schema_name: str):
 def get_tenant_session(tenant_db_url: str, chat_id: int):
     """
     Create a tenant-scoped SQLAlchemy session using the '#tenant_xxx' schema tag.
-    Ensures all ORM queries stay within the tenant schema only.
+    Ensures the ORM session itself executes within the tenant schema.
     """
     if not tenant_db_url:
         raise ValueError("❌ Missing tenant_db_url")
@@ -135,7 +135,7 @@ def get_tenant_session(tenant_db_url: str, chat_id: int):
         connect_args={"options": f"-csearch_path={schema_name},public"}
     )
 
-    # Explicitly set and verify search_path
+    # Explicitly set and verify search_path at engine level
     with engine.connect() as conn:
         conn.execute(text(f"SET search_path TO {schema_name},public"))
         active_path = conn.execute(text("SHOW search_path")).scalar()
@@ -145,8 +145,13 @@ def get_tenant_session(tenant_db_url: str, chat_id: int):
     TenantBase.metadata.create_all(bind=engine)
 
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-    logger.info(f"✅ Tenant session ready for schema: {schema_name}")
-    return SessionLocal()
+
+    # ✅ Explicitly enforce schema in ORM session itself
+    session = SessionLocal()
+    session.execute(text(f"SET search_path TO {schema_name},public"))
+    logger.info(f"✅ ORM session search_path locked to: {schema_name},public")
+
+    return session
 
 # ======================================================
 # 🔹 ENSURE TENANT SESSION (Main entry point)
