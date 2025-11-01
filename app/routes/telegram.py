@@ -136,7 +136,7 @@ def ensure_tenant_session(chat_id, db):
             logger.warning(f"⚠️ No tenant DB found for chat_id={chat_id}")
             return None
 
-    return get_tenant_session(tenant_db_url)
+    return get_tenant_session(tenant_db_url, chat_id)
 
 def main_menu(role: str):
     if role == "owner":
@@ -1119,7 +1119,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         send_message(chat_id, "⚠️ Tenant database missing. Please contact support.")
                         return {"ok": True}
 
-                    tenant_db = get_tenant_session(tenant_db_url)
+                    tenant_db = get_tenant_session(tenant_db_url, chat_id)
                     if tenant_db is None:
                         logger.warning(f"⚠️ Tenant DB connection failed for {user.username}: {tenant_db_url}")
                         send_message(chat_id, "⚠️ Unable to access tenant database. Please contact support.")
