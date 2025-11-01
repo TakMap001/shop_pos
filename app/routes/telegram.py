@@ -138,7 +138,8 @@ def main_menu(role: str):
                 [{"text": "➕ Add Product", "callback_data": "add_product"}],
                 [{"text": "✏️ Update Product", "callback_data": "update_product"}],
                 [{"text": "📦 View Stock", "callback_data": "view_stock"}],
-                [{"text": "💰 Record Sale", "callback_data": "record_sale"}],  # NEW BUTTON
+                [{"text": "💰 Record Sale", "callback_data": "record_sale"}],
+                [{"text": "📊 Reports", "callback_data": "report_menu"}],  # ✅ ADD THIS LINE
                 [{"text": "❓ Help", "callback_data": "help"}]
             ]
         }
@@ -507,6 +508,76 @@ def update_product(db: Session, chat_id: int, product: ProductORM, data: dict):
         send_message(chat_id, f"❌ Failed to update product: {str(e)}")
 
 
+def get_cart_summary(cart):
+    """Generate a formatted cart summary"""
+    if not cart:
+        return "🛒 Cart is empty"
+    
+    summary = "🛒 *Current Cart:*\n"
+    total = 0
+    for i, item in enumerate(cart, 1):
+        summary += f"{i}. {item['name']} - {item['quantity']} {item['unit_type']} × ${item['price']:.2f} = ${item['subtotal']:.2f}\n"
+        total += item['subtotal']
+    
+    summary += f"\n💰 *Total: ${total:.2f}*\n"
+    return summary
+
+def record_cart_sale(tenant_db, chat_id, data):
+    """Record a sale from cart data"""
+    try:
+        # ✅ Ensure user exists in tenant DB
+        tenant_user = tenant_db.query(User).filter(User.user_id == chat_id).first()
+        if not tenant_user:
+            # Create user in tenant DB if not exists
+            from app.models.models import User as TenantUser
+            tenant_user = TenantUser(
+                user_id=chat_id,
+                name="Owner",  # You might want to get this from central DB
+                email=f"{chat_id}@example.com",
+                password_hash="",
+                role="owner"
+            )
+            tenant_db.add(tenant_user)
+            tenant_db.commit()
+        
+        # Record each item in cart as separate sale
+        for item in data["cart"]:
+            sale_data = {
+                "product_id": item["product_id"],
+                "quantity": item["quantity"],
+                "unit_type": item["unit_type"],
+                "payment_type": data["payment_type"],
+                "amount_paid": data.get("amount_paid", 0),
+                "pending_amount": data.get("pending_amount", 0),
+                "change_left": data.get("change_left", 0),
+                "customer_name": data.get("customer_name"),
+                "customer_contact": data.get("customer_contact")
+            }
+            record_sale(tenant_db, chat_id, sale_data)
+        
+        # Show final receipt
+        receipt = f"✅ *Sale Completed Successfully!*\n\n"
+        receipt += get_cart_summary(data["cart"])
+        receipt += f"\n💳 Payment: {data['payment_type'].title()}\n"
+        receipt += f"💵 Amount Paid: ${data.get('amount_paid', 0):.2f}\n"
+        
+        if data.get("change_left", 0) > 0:
+            receipt += f"🪙 Change: ${data['change_left']:.2f}\n"
+        if data.get("pending_amount", 0) > 0:
+            receipt += f"📋 Pending: ${data['pending_amount']:.2f}\n"
+        if data.get("customer_name"):
+            receipt += f"👤 Customer: {data['customer_name']}\n"
+        if data.get("customer_contact"):
+            receipt += f"📞 Contact: {data['customer_contact']}\n"
+            
+        send_message(chat_id, receipt)
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Cart sale recording failed: {e}")
+        return False
+        
+        
 def record_sale(db: Session, chat_id: int, data: dict):
     """
     Record a sale in tenant DB step-by-step.
@@ -1038,6 +1109,77 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 send_message(chat_id, f"📦 Selected {product.name} ({product.unit_type}). Enter quantity sold:")
                 return {"ok": True}
 
+            # -------------------- Cart Management Callbacks --------------------
+            elif text == "add_another_item":
+                user_states[chat_id] = {"action": "awaiting_sale", "step": 1, "data": data}
+                send_message(chat_id, "➕ Add another item. Enter product name:")
+                return {"ok": True}
+                
+            elif text == "view_cart":
+                cart_summary = get_cart_summary(data.get("cart", []))
+                kb_rows = [
+                    [{"text": "➕ Add Item", "callback_data": "add_another_item"}],
+                    [{"text": "🗑 Remove Item", "callback_data": "remove_item"}],
+                    [{"text": "✅ Checkout", "callback_data": "checkout_cart"}],
+                    [{"text": "❌ Cancel Sale", "callback_data": "cancel_sale"}]
+                ]
+                send_message(chat_id, cart_summary, {"inline_keyboard": kb_rows})
+                return {"ok": True}
+                
+            elif text == "remove_item":
+                cart = data.get("cart", [])
+                if not cart:
+                    send_message(chat_id, "🛒 Cart is empty. Add items first.")
+                    return {"ok": True}
+                
+                kb_rows = []
+                for i, item in enumerate(cart, 1):
+                    kb_rows.append([{"text": f"Remove: {item['name']} ({item['quantity']})", "callback_data": f"remove_cart_item:{i-1}"}])
+                kb_rows.append([{"text": "⬅️ Back to Cart", "callback_data": "view_cart"}])
+                
+                send_message(chat_id, "🗑 Select item to remove:", {"inline_keyboard": kb_rows})
+                return {"ok": True}
+                
+            elif text.startswith("remove_cart_item:"):
+                try:
+                    item_index = int(text.split(":")[1])
+                    cart = data.get("cart", [])
+                    if 0 <= item_index < len(cart):
+                        removed_item = cart.pop(item_index)
+                        send_message(chat_id, f"🗑 Removed: {removed_item['name']}")
+                        
+                        # Show updated cart
+                        cart_summary = get_cart_summary(cart)
+                        kb_rows = [
+                            [{"text": "➕ Add Item", "callback_data": "add_another_item"}],
+                            [{"text": "🗑 Remove Item", "callback_data": "remove_item"}],
+                            [{"text": "✅ Checkout", "callback_data": "checkout_cart"}],
+                            [{"text": "❌ Cancel Sale", "callback_data": "cancel_sale"}]
+                        ]
+                        send_message(chat_id, cart_summary, {"inline_keyboard": kb_rows})
+                    else:
+                        send_message(chat_id, "❌ Invalid item selection.")
+                except (ValueError, IndexError):
+                    send_message(chat_id, "❌ Error removing item.")
+                return {"ok": True}
+                
+            elif text == "checkout_cart":
+                cart = data.get("cart", [])
+                if not cart:
+                    send_message(chat_id, "🛒 Cart is empty. Add items first.")
+                    return {"ok": True}
+                
+                user_states[chat_id] = {"action": "awaiting_sale", "step": 3, "data": data}
+                send_message(chat_id, "💰 Enter payment type (full, partial, credit):")
+                return {"ok": True}
+                
+            elif text == "cancel_sale":
+                user_states.pop(chat_id, None)
+                send_message(chat_id, "❌ Sale cancelled.")
+                kb = main_menu(user.role)
+                send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+                return {"ok": True}
+                
             # -------------------- View Stock --------------------
             elif text == "view_stock":
                 tenant_db = get_tenant_session(user.tenant_schema, chat_id)
@@ -1788,7 +1930,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             return {"ok": True}
                             
 
-                # -------------------- Record Sale (step-by-step, search by name) --------------------
+                # -------------------- Record Sale (Cart-based system) --------------------
                 elif action == "awaiting_sale":
                     # Ensure tenant session is available
                     tenant_db = get_tenant_session(user.tenant_schema, chat_id)
@@ -1797,11 +1939,15 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         return {"ok": True}
 
                     data = state.get("data", {})
+                    
+                    # Initialize cart if not exists
+                    if "cart" not in data:
+                        data["cart"] = []  # List of items: {product_id, name, price, quantity, unit_type}
 
-                    # STEP 1: search by product name
+                    # STEP 1: search by product name (Add to cart)
                     if step == 1:
                         if not text or not text.strip():
-                            send_message(chat_id, "⚠️ Please enter a product name to sell:")
+                            send_message(chat_id, "⚠️ Please enter a product name to add to cart:")
                             return {"ok": True}
 
                         matches = tenant_db.query(ProductORM).filter(ProductORM.name.ilike(f"%{text}%")).all()
@@ -1811,10 +1957,15 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                         if len(matches) == 1:
                             selected = matches[0]
-                            data["product_id"] = selected.product_id
-                            data["unit_type"] = selected.unit_type
+                            data["current_product"] = {
+                                "product_id": selected.product_id,
+                                "name": selected.name,
+                                "price": float(selected.price),
+                                "unit_type": selected.unit_type,
+                                "available_stock": selected.stock
+                            }
                             user_states[chat_id] = {"action": "awaiting_sale", "step": 2, "data": data}
-                            send_message(chat_id, f"📦 Selected {selected.name} ({selected.unit_type}). Enter quantity sold:")
+                            send_message(chat_id, f"📦 Selected {selected.name} ({selected.unit_type}). Enter quantity to add:")
                             return {"ok": True}
 
                         # multiple matches -> show inline keyboard for user to pick
@@ -1822,11 +1973,11 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             [{"text": f"{p.name} — Stock: {p.stock} ({p.unit_type})", "callback_data": f"select_sale:{p.product_id}"}]
                             for p in matches
                         ]
-                        kb_rows.append([{"text": "⬅️ Cancel", "callback_data": "back_to_menu"}])
+                        kb_rows.append([{"text": "⬅️ Back to Cart", "callback_data": "view_cart"}])
                         send_message(chat_id, "🔹 Multiple products found. Please select:", {"inline_keyboard": kb_rows})
                         return {"ok": True}
 
-                    # STEP 2: quantity
+                    # STEP 2: quantity for current product
                     elif step == 2:
                         qty_text = text.strip()
                         if not qty_text:
@@ -1837,14 +1988,48 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             if qty <= 0:
                                 send_message(chat_id, "❌ Quantity must be greater than 0. Please enter a positive number:")
                                 return {"ok": True}
-                            data["quantity"] = qty
-                            user_states[chat_id] = {"action": "awaiting_sale", "step": 3, "data": data}
-                            send_message(chat_id, "💰 Enter payment type (full, partial, credit):")
+                            
+                            current_product = data.get("current_product")
+                            if not current_product:
+                                send_message(chat_id, "❌ No product selected. Please start over.")
+                                user_states.pop(chat_id, None)
+                                return {"ok": True}
+                            
+                            # Check stock availability
+                            if qty > current_product["available_stock"]:
+                                send_message(chat_id, f"❌ Insufficient stock. Available: {current_product['available_stock']}")
+                                return {"ok": True}
+                            
+                            # Add to cart
+                            cart_item = {
+                                "product_id": current_product["product_id"],
+                                "name": current_product["name"],
+                                "price": current_product["price"],
+                                "quantity": qty,
+                                "unit_type": current_product["unit_type"],
+                                "subtotal": current_product["price"] * qty
+                            }
+                            data["cart"].append(cart_item)
+                            
+                            # Show cart and ask for next action
+                            cart_summary = get_cart_summary(data["cart"])
+                            kb_rows = [
+                                [{"text": "➕ Add Another Item", "callback_data": "add_another_item"}],
+                                [{"text": "🗑 Remove Item", "callback_data": "remove_item"}],
+                                [{"text": "✅ Checkout", "callback_data": "checkout_cart"}],
+                                [{"text": "❌ Cancel Sale", "callback_data": "cancel_sale"}]
+                            ]
+                            send_message(chat_id, f"🛒 Item added to cart!\n\n{cart_summary}", {"inline_keyboard": kb_rows})
+                            
+                            # Clear current product and stay at step 1 for next action
+                            data.pop("current_product", None)
+                            user_states[chat_id] = {"action": "awaiting_sale", "step": 1, "data": data}
+                            
                         except ValueError:
                             send_message(chat_id, "❌ Invalid quantity. Enter a positive integer:")
                         return {"ok": True}
 
-                    # STEP 3: payment type
+                    # STEP 3: checkout - payment type
                     elif step == 3:
                         payment_type = text.strip().lower()
                         if not payment_type:
@@ -1855,90 +2040,122 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             return {"ok": True}
 
                         data["payment_type"] = payment_type
-                        if payment_type == "full":
-                            data["amount_paid"] = None
-                            data["pending_amount"] = 0
-                            data["change_left"] = 0
-                            user_states[chat_id] = {"action": "awaiting_sale", "step": 6, "data": data}
-                            send_message(chat_id, "✅ Full payment selected. Confirm sale? (yes/no)")
-                        else:
-                            user_states[chat_id] = {"action": "awaiting_sale", "step": 4, "data": data}
-                            send_message(chat_id, "💵 Enter amount paid by customer:")
+                        user_states[chat_id] = {"action": "awaiting_sale", "step": 4, "data": data}
+                        
+                        # Calculate cart total
+                        cart_total = sum(item["subtotal"] for item in data["cart"])
+                        data["cart_total"] = cart_total
+                        
+                        send_message(chat_id, f"💰 Cart Total: ${cart_total:.2f}\n💵 Enter amount tendered by customer:")
                         return {"ok": True}
 
-                    # STEP 4: amount paid (partial / credit)
+                    # STEP 4: amount tendered
                     elif step == 4:
                         amount_text = text.strip()
                         if not amount_text:
-                            send_message(chat_id, "❌ Amount paid cannot be empty. Please enter a valid amount:")
+                            send_message(chat_id, "❌ Amount tendered cannot be empty. Please enter a valid amount:")
                             return {"ok": True}
                         try:
                             amount_paid = float(amount_text)
                             if amount_paid < 0:
-                                send_message(chat_id, "❌ Amount paid cannot be negative. Please enter a valid amount:")
+                                send_message(chat_id, "❌ Amount tendered cannot be negative. Please enter a valid amount:")
                                 return {"ok": True}
+                            
                             data["amount_paid"] = amount_paid
-                            product = tenant_db.query(ProductORM).filter(ProductORM.product_id == data["product_id"]).first()
-                            total_price = float(product.price) * data["quantity"]
-                            data["pending_amount"] = max(total_price - amount_paid, 0)
-                            data["change_left"] = max(amount_paid - total_price, 0)
-
-                            user_states[chat_id] = {"action": "awaiting_sale", "step": 5, "data": data}
-                            send_message(chat_id, "👤 Enter customer name:")
+                            
+                            # Calculate change or pending amount based on payment type
+                            if data["payment_type"] == "full":
+                                data["pending_amount"] = 0
+                                data["change_left"] = max(amount_paid - data["cart_total"], 0)
+                            elif data["payment_type"] == "partial":
+                                data["pending_amount"] = max(data["cart_total"] - amount_paid, 0)
+                                data["change_left"] = max(amount_paid - data["cart_total"], 0)
+                            else:  # credit
+                                data["pending_amount"] = data["cart_total"]  # No payment made
+                                data["change_left"] = 0
+                            
+                            # Show payment summary
+                            summary_msg = f"💳 Payment Summary:\n"
+                            summary_msg += get_cart_summary(data["cart"])
+                            summary_msg += f"💰 Total: ${data['cart_total']:.2f}\n"
+                            summary_msg += f"💵 Tendered: ${amount_paid:.2f}\n"
+                            
+                            if data["payment_type"] == "full":
+                                if data["change_left"] > 0:
+                                    summary_msg += f"🪙 Change: ${data['change_left']:.2f}\n"
+                                summary_msg += f"\n✅ Full payment received.\n\n"
+                            elif data["payment_type"] == "partial":
+                                summary_msg += f"📋 Pending: ${data['pending_amount']:.2f}\n"
+                                if data["change_left"] > 0:
+                                    summary_msg += f"🪙 Change: ${data['change_left']:.2f}\n"
+                                summary_msg += f"\n⚠️ Partial payment - balance pending.\n\n"
+                            else:  # credit
+                                summary_msg += f"📋 Credit Amount: ${data['pending_amount']:.2f}\n"
+                                summary_msg += f"\n🔄 Sale on credit.\n\n"
+                            
+                            # ✅ ONLY ask for customer details if credit sale OR change due
+                            if data["payment_type"] == "credit" or data["change_left"] > 0:
+                                summary_msg += "👤 Enter customer name:"
+                                user_states[chat_id] = {"action": "awaiting_sale", "step": 5, "data": data}
+                            else:
+                                # No customer details needed - go straight to confirmation
+                                summary_msg += "✅ Confirm sale? (yes/no)"
+                                user_states[chat_id] = {"action": "awaiting_sale", "step": 6, "data": data}
+                            
+                            send_message(chat_id, summary_msg)
+                            
                         except ValueError:
                             send_message(chat_id, "❌ Invalid number. Enter a valid amount:")
                         return {"ok": True}
 
-                    # STEP 5: customer name
+                    # STEP 5: customer name (ONLY for credit sales or change due)
                     elif step == 5:
                         customer_name = text.strip()
                         if not customer_name:
-                            send_message(chat_id, "❌ Customer name cannot be empty. Please enter a valid name:")
+                            send_message(chat_id, "❌ Customer name cannot be empty. Please enter customer name:")
                             return {"ok": True}
                         data["customer_name"] = customer_name
-                        user_states[chat_id] = {"action": "awaiting_sale", "step": 7, "data": data}
+                        user_states[chat_id] = {"action": "awaiting_sale", "step": 6, "data": data}
                         send_message(chat_id, "📞 Enter customer contact number:")
                         return {"ok": True}
 
-                    # STEP 6: confirm sale for full payment
+                    # STEP 6: customer contact OR confirmation
                     elif step == 6:
-                        confirmation = text.strip().lower()
-                        if not confirmation:
-                            send_message(chat_id, "⚠️ Please confirm with 'yes' or 'no':")
-                            return {"ok": True}
-                        if confirmation != "yes":
-                            send_message(chat_id, "❌ Sale cancelled.")
-                            user_states.pop(chat_id, None)
-                            # ✅ Return to main menu even on cancel
-                            kb = main_menu(user.role)
-                            send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
-                            return {"ok": True}
-                        try:
-                            record_sale(tenant_db, chat_id, data)
-                            send_message(chat_id, f"✅ Sale recorded successfully: {data['quantity']} {data['unit_type']} sold.")
-                            user_states.pop(chat_id, None)
+                        # Check if we need customer contact (credit sales or change due)
+                        if data.get("customer_name"):  # We're collecting customer details
+                            customer_contact = text.strip()
+                            if not customer_contact:
+                                send_message(chat_id, "❌ Contact cannot be empty. Enter customer contact number:")
+                                return {"ok": True}
+                            data["customer_contact"] = customer_contact
+                            user_states[chat_id] = {"action": "awaiting_sale", "step": 7, "data": data}
+                            send_message(chat_id, f"✅ Customer info recorded. Confirm sale? (yes/no)")
+                        else:
+                            # No customer details needed - this is confirmation for cash sales with no change
+                            confirmation = text.strip().lower()
+                            if not confirmation:
+                                send_message(chat_id, "⚠️ Please confirm with 'yes' or 'no':")
+                                return {"ok": True}
+                            if confirmation != "yes":
+                                send_message(chat_id, "❌ Sale cancelled.")
+                                user_states.pop(chat_id, None)
+                                kb = main_menu(user.role)
+                                send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+                                return {"ok": True}
                             
-                            # ✅ Return to main menu
-                            kb = main_menu(user.role)
-                            send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
-                        except Exception as e:
-                            send_message(chat_id, f"⚠️ Failed to record sale: {str(e)}")
-                            user_states.pop(chat_id, None)
+                            # Record sale without customer details
+                            record_sale_result = record_cart_sale(tenant_db, chat_id, data)
+                            if record_sale_result:
+                                user_states.pop(chat_id, None)
+                                kb = main_menu(user.role)
+                                send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+                            else:
+                                send_message(chat_id, "❌ Failed to record sale. Please try again.")
+                                user_states.pop(chat_id, None)
                         return {"ok": True}
 
-                    # STEP 7: customer contact
+                    # STEP 7: final confirmation (ONLY when customer details were collected)
                     elif step == 7:
-                        customer_contact = text.strip()
-                        if not customer_contact:
-                            send_message(chat_id, "❌ Contact cannot be empty. Please enter customer contact number:")
-                            return {"ok": True}
-                        data["customer_contact"] = customer_contact
-                        user_states[chat_id] = {"action": "awaiting_sale", "step": 8, "data": data}
-                        send_message(chat_id, f"✅ Customer info recorded. Confirm sale? (yes/no)")
-                        return {"ok": True}
-
-                    # STEP 8: final confirmation
-                    elif step == 8:
                         confirmation = text.strip().lower()
                         if not confirmation:
                             send_message(chat_id, "⚠️ Please confirm with 'yes' or 'no':")
@@ -1946,23 +2163,21 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         if confirmation != "yes":
                             send_message(chat_id, "❌ Sale cancelled.")
                             user_states.pop(chat_id, None)
-                            # ✅ Return to main menu even on cancel
                             kb = main_menu(user.role)
                             send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                             return {"ok": True}
-                        try:
-                            record_sale(tenant_db, chat_id, data)
-                            send_message(chat_id, f"✅ Sale recorded successfully: {data['quantity']} {data['unit_type']} sold.")
+                        
+                        # Record sale with customer details
+                        record_sale_result = record_cart_sale(tenant_db, chat_id, data)
+                        if record_sale_result:
                             user_states.pop(chat_id, None)
-                            
-                            # ✅ Return to main menu
                             kb = main_menu(user.role)
                             send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
-                        except Exception as e:
-                            send_message(chat_id, f"⚠️ Failed to record sale: {str(e)}")
+                        else:
+                            send_message(chat_id, "❌ Failed to record sale. Please try again.")
                             user_states.pop(chat_id, None)
                         return {"ok": True}
-                                                
+                                                                        
         return {"ok": True}
 
     except Exception as e:
