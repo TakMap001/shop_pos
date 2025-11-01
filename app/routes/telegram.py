@@ -1636,7 +1636,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     return {"ok": True}
 
 
-        # -------------------- Handle callbacks --------------------
+        # -------------------- Handle callbacks (WITH EARLY RETURN) --------------------
         if "callback_query" in data:
             chat_id = data["callback_query"]["message"]["chat"]["id"]
             action = data["callback_query"]["data"]
@@ -1655,12 +1655,12 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             if not user:
                 logger.warning(f"⚠️ No user found for chat_id={chat_id}")
                 send_message(chat_id, "❌ User not found in system.")
-                return {"ok": True}
+                return {"ok": True}  # ✅ EARLY RETURN
 
             logger.debug(f"👤 User found: {user.username}, role={user.role}, tenant_schema={getattr(user, 'tenant_schema', None)}")
             role = user.role
 
-            # Initialize tenant_db as None — we’ll fetch it per action
+            # Initialize tenant_db as None — we'll fetch it per action
             tenant_db = None
 
             # -------------------- Cancel button --------------------
@@ -1668,38 +1668,41 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 user_states.pop(chat_id, None)
                 kb_dict = main_menu(role)
                 send_message(chat_id, "🏠 Main Menu:", kb_dict)
-                return {"ok": True}
+                return {"ok": True}  # ✅ EARLY RETURN
 
             # -------------------- Shop Setup (Owner only) --------------------
             elif action == "setup_shop" and role == "owner":
                 send_message(chat_id, "🏪 Please enter your shop name:")
                 user_states[chat_id] = {"action": "setup_shop", "step": 1, "data": {}}
+                return {"ok": True}  # ✅ EARLY RETURN
 
             # -------------------- Create Shopkeeper --------------------
             elif action == "create_shopkeeper":
                 if role != "owner":
                     send_message(chat_id, "❌ Only owners can create shopkeepers.")
-                    return {"ok": True}
+                    return {"ok": True}  # ✅ EARLY RETURN
 
                 user_states[chat_id] = {"action": "create_shopkeeper", "step": 1, "data": {}}
                 send_message(chat_id, "👤 Enter a username for the new shopkeeper:")
-                return {"ok": True}
+                return {"ok": True}  # ✅ EARLY RETURN
 
             # -------------------- Add Product --------------------
             elif action == "add_product":
                 send_message(chat_id, "➕ Add a new product! 🛒\n\nEnter product name:")
                 user_states[chat_id] = {"action": "awaiting_product", "step": 1, "data": {}}
+                return {"ok": True}  # ✅ EARLY RETURN
 
             # -------------------- Update Product --------------------
             elif action == "update_product":
                 tenant_db = ensure_tenant_session(chat_id, db)
                 if not tenant_db:
                     send_message(chat_id, "⚠️ Tenant database not linked. Please restart with /start.")
-                    return {"ok": True}
+                    return {"ok": True}  # ✅ EARLY RETURN
 
                 logger.debug(f"🧩 In update_product flow, tenant_db ready for chat_id={chat_id}")
                 user_states[chat_id] = {"action": "awaiting_update", "step": 1, "data": {}}
                 send_message(chat_id, "✏️ Enter the product name to update:")
+                return {"ok": True}  # ✅ EARLY RETURN
 
             # -------------------- Paginated Product List --------------------
             elif action.startswith("products_page:"):
@@ -1711,10 +1714,11 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 tenant_db = ensure_tenant_session(chat_id, db)
                 if not tenant_db:
                     send_message(chat_id, "⚠️ Tenant database not linked. Please restart with /start.")
-                    return {"ok": True}
+                    return {"ok": True}  # ✅ EARLY RETURN
 
                 text, kb = products_page_view(tenant_db, page=page)
                 send_message(chat_id, text, kb)
+                return {"ok": True}  # ✅ EARLY RETURN
 
             # -------------------- Product Selection for Update --------------------
             elif action.startswith("select_update:"):
@@ -1726,13 +1730,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     logger.info(f"🔹 Parsed product_id={product_id}")
                 except (IndexError, ValueError):
                     send_message(chat_id, "⚠️ Invalid product selection.")
-                    return {"ok": True}
+                    return {"ok": True}  # ✅ EARLY RETURN
 
                 # Ensure tenant DB session
                 tenant_db = ensure_tenant_session(chat_id, db)
                 if not tenant_db:
                     send_message(chat_id, "⚠️ Tenant database not available.")
-                    return {"ok": True}
+                    return {"ok": True}  # ✅ EARLY RETURN
 
                 # -------------------- Fetch product --------------------
                 logger.info("🚦 Fetching product with ID: %s", product_id)
@@ -1743,15 +1747,14 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                     if not product:
                         send_message(chat_id, "❌ Product not found in database.")
-                        return {"ok": True}
+                        return {"ok": True}  # ✅ EARLY RETURN
 
                 except Exception as e:
                     logger.error(f"❌ DB fetch failed for product_id={product_id}: {e}", exc_info=True)
                     send_message(chat_id, "⚠️ Database error while fetching product.")
-                    return {"ok": True}
+                    return {"ok": True}  # ✅ EARLY RETURN
 
                 # ✅ Product found - start update flow from STEP 2 (name update)
-                # This matches the message handler's step 2 expectation
                 logger.info(f"✅ Starting update flow for product: {product.name} (ID: {product_id}) at step 2")
     
                 user_states[chat_id] = {
@@ -1765,42 +1768,41 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     f"✏️ Updating *{escape_markdown_v2(product.name)}*\n\n"
                     f"Current details:\n"
                     f"💰 Price: ${product.price}\n"
-                    f"📦 Stock: {product.stock} {product.unit_type}\n"
-                    f"📊 Min Level: {product.min_stock_level}\n"
-                    f"⚠️ Low Stock: {product.low_stock_threshold}\n\n"
+                    f"📦 Stock: {product.stock} {product.unit_type}\n\n"
                     "Enter *NEW NAME* (or send `-` to keep current):"
                 )
 
                 send_message(chat_id, text_msg, parse_mode="MarkdownV2")
-                return {"ok": True}
+                return {"ok": True}  # ✅ EARLY RETURN
 
             # -------------------- Record Sale --------------------
             elif action == "record_sale":
                 tenant_db = ensure_tenant_session(chat_id, db)
                 if not tenant_db:
                     send_message(chat_id, "⚠️ Cannot record sale: tenant DB unavailable.")
-                    return {"ok": True}
+                    return {"ok": True}  # ✅ EARLY RETURN
 
                 send_message(chat_id, "💰 Record a new sale!\nEnter product name:")
                 user_states[chat_id] = {"action": "awaiting_sale", "step": 1, "data": {}}
+                return {"ok": True}  # ✅ EARLY RETURN
 
             # -------------------- Handle selected product from inline keyboard --------------------
             elif action.startswith("select_sale:"):
                 tenant_db = ensure_tenant_session(chat_id, db)
                 if not tenant_db:
                     send_message(chat_id, "⚠️ Cannot record sale: tenant DB unavailable.")
-                    return {"ok": True}
+                    return {"ok": True}  # ✅ EARLY RETURN
 
                 try:
                     product_id = int(action.split(":")[1])
                 except (IndexError, ValueError):
                     send_message(chat_id, "⚠️ Invalid product selection.")
-                    return {"ok": True}
+                    return {"ok": True}  # ✅ EARLY RETURN
 
                 product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
                 if not product:
                     send_message(chat_id, "⚠️ Product not found. Try again.")
-                    return {"ok": True}
+                    return {"ok": True}  # ✅ EARLY RETURN
 
                 user_states[chat_id] = {
                     "action": "awaiting_sale",
@@ -1809,23 +1811,25 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 }
 
                 send_message(chat_id, f"📦 Selected {product.name} ({product.unit_type}). Enter quantity sold:")
-                return {"ok": True}
+                return {"ok": True}  # ✅ EARLY RETURN
 
             # -------------------- View Stock --------------------
             elif action == "view_stock":
                 tenant_db = ensure_tenant_session(chat_id, db)
                 if not tenant_db:
                     send_message(chat_id, "⚠️ Cannot view stock: tenant DB unavailable.")
-                    return {"ok": True}
+                    return {"ok": True}  # ✅ EARLY RETURN
 
                 stock_list = get_stock_list(tenant_db)
                 kb_dict = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
                 send_message(chat_id, stock_list, kb_dict)
+                return {"ok": True}  # ✅ EARLY RETURN
 
             # -------------------- Reports Menu --------------------
             elif action == "report_menu":
                 kb_dict = report_menu_keyboard(role)
                 send_message(chat_id, "📊 Select a report:", kb_dict)
+                return {"ok": True}  # ✅ EARLY RETURN
 
             # -------------------- Help --------------------
             elif action == "help":
@@ -1850,12 +1854,15 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 )
                 kb_dict = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
                 send_message(chat_id, help_text, kb_dict)
+                return {"ok": True}  # ✅ EARLY RETURN
 
             else:
                 logger.warning(f"⚠️ Unknown callback action received: {action}")
                 send_message(chat_id, f"⚠️ Unknown action: {action}")
+                return {"ok": True}  # ✅ EARLY RETURN
 
-        return {"ok": True}
+            # If we get here, no callback was matched - this shouldn't happen
+            return {"ok": True}
 
     except Exception as e:
         import traceback
