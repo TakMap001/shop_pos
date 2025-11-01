@@ -1752,6 +1752,32 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     count = tenant_db.execute(text("SELECT COUNT(*) FROM products")).scalar()
                     logger.info(f"📦 Product count in schema: {count}")
 
+                    # -------------------- Debug Diagnostics --------------------
+                    try:
+                        logger.info("🔍 Running tenant ORM diagnostics...")
+
+                        # Check search_path
+                        current_schema = tenant_db.execute(text("SHOW search_path")).scalar()
+                        logger.info(f"🧭 Active search_path: {current_schema}")
+
+                        # Check which schema SQL sees
+                        schema_check = tenant_db.execute(text("""
+                            SELECT table_schema, COUNT(*) AS total_rows
+                            FROM information_schema.tables t
+                            JOIN pg_tables p ON p.tablename = t.table_name
+                            WHERE t.table_name = 'products'
+                            GROUP BY table_schema
+                            ORDER BY table_schema
+                        """)).fetchall()
+                        logger.info(f"🏗️ Table presence by schema: {schema_check}")
+
+                        # Check where ORM sees records
+                        sql_count = tenant_db.execute(text("SELECT COUNT(*) FROM products")).scalar()
+                        logger.info(f"📦 Direct SQL count (products): {sql_count}")
+
+                    except Exception as e:
+                        logger.error(f"❌ Debug diagnostics failed: {e}")
+
                     product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
                     logger.info(f"📦 ORM product result for ID {product_id}: {product}")
 
