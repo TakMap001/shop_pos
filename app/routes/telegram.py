@@ -1100,14 +1100,25 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "⚠️ Product not found. Try again.")
                     return {"ok": True}
 
+                # ✅ CRITICAL: Set current_product data for the quantity step
+                data["current_product"] = {
+                    "product_id": product.product_id,
+                    "name": product.name,
+                    "price": float(product.price),
+                    "unit_type": product.unit_type,
+                    "available_stock": product.stock
+                }
+                
+                # ✅ Update state with current_product data
                 user_states[chat_id] = {
                     "action": "awaiting_sale",
-                    "step": 2,
-                    "data": {"product_id": product.product_id, "unit_type": product.unit_type},
+                    "step": 2,  # Move to quantity step
+                    "data": data
                 }
 
-                send_message(chat_id, f"📦 Selected {product.name} ({product.unit_type}). Enter quantity sold:")
+                send_message(chat_id, f"📦 Selected {product.name} ({product.unit_type}). Enter quantity to add:")
                 return {"ok": True}
+                
 
             # -------------------- Cart Management Callbacks --------------------
             elif text == "add_another_item":
@@ -1986,6 +1997,9 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                     # STEP 2: quantity for current product
                     elif step == 2:
+                        logger.info(f"🔍 DEBUG: Current product data: {data.get('current_product')}")  # Debug
+                        logger.info(f"🔍 DEBUG: Full data: {data}")  # Debug
+                        
                         qty_text = text.strip()
                         if not qty_text:
                             send_message(chat_id, "❌ Quantity cannot be empty. Please enter a valid quantity:")
@@ -1998,10 +2012,11 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             
                             current_product = data.get("current_product")
                             if not current_product:
+                                logger.error(f"❌ No current_product found in data: {data}")  # More detailed error
                                 send_message(chat_id, "❌ No product selected. Please start over.")
                                 user_states.pop(chat_id, None)
                                 return {"ok": True}
-                            
+                                
                             # Check stock availability
                             if qty > current_product["available_stock"]:
                                 send_message(chat_id, f"❌ Insufficient stock. Available: {current_product['available_stock']}")
