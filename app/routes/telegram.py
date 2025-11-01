@@ -121,38 +121,45 @@ def role_menu(chat_id):
 def ensure_tenant_session(chat_id, db):
     """
     Always return a valid tenant session for this Telegram user.
-    If tenant_schema is missing, recover it from the Tenant table or infer from chat_id.
-    Ensures we always pass a correct tenant_db_url format to get_tenant_session().
+    Ensures we derive the correct tenant schema and build a valid tenant_db_url.
     """
     user = db.query(User).filter(User.chat_id == chat_id).first()
-    tenant_schema = getattr(user, "tenant_schema", None)
     base_url = os.getenv("DATABASE_URL")
 
-    if not base_url:
-        logger.error("❌ DATABASE_URL not set — cannot create tenant session.")
+    if not user:
+        logger.warning(f"⚠️ No user found for chat_id={chat_id}")
         return None
 
-    # Recover schema if missing
-    if not tenant_schema:
+    tenant_schema = None
+
+    # Prefer user.tenant_schema if it’s a schema name or URL
+    if user.tenant_schema:
+        if "#" in user.tenant_schema:
+            tenant_schema = user.tenant_schema.split("#")[-1]
+        elif user.tenant_schema.startswith("tenant_"):
+            tenant_schema = user.tenant_schema
+        else:
+            # Defensive fallback
+            tenant_schema = f"tenant_{chat_id}"
+    else:
+        # Try recovering from Tenant table
         tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
         if tenant and tenant.database_url:
-            tenant_schema = tenant.database_url.split("#")[-1] if "#" in tenant.database_url else f"tenant_{chat_id}"
+            tenant_schema = tenant.database_url.split("#")[-1]
             user.tenant_schema = tenant_schema
             db.commit()
-            logger.info(f"✅ Persisted tenant_schema '{tenant_schema}' for {user.username}")
+            logger.info(f"✅ Recovered tenant_schema '{tenant_schema}' for {user.username}")
         else:
             tenant_schema = f"tenant_{chat_id}"
             user.tenant_schema = tenant_schema
             db.commit()
             logger.warning(f"⚠️ Created fallback tenant_schema '{tenant_schema}' for chat_id={chat_id}")
 
-    # Construct valid URL for get_tenant_session
+    # ✅ Construct correct tenant_db_url
     tenant_db_url = f"{base_url}#{tenant_schema}"
 
-    # Log what we’re actually using
     logger.info(f"🔗 Creating tenant session using schema '{tenant_schema}' for chat_id={chat_id}")
 
-    # Create and return a tenant-bound session
     try:
         return get_tenant_session(tenant_db_url, chat_id)
     except Exception as e:
