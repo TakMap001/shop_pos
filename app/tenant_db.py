@@ -129,21 +129,20 @@ def get_tenant_session(tenant_db_url: str, chat_id: int):
 
     logger.info(f"🔗 Creating tenant session → {schema_name}")
 
-    # ✅ Use tenant schema ONLY (no fallback to public)
     engine = create_engine(
         base_url,
         pool_pre_ping=True,
-        connect_args={"options": f"-csearch_path={schema_name}"}
+        connect_args={"options": f"-csearch_path={schema_name},public"}
     )
 
-    # ✅ Bind ORM models to tenant schema
+    # Explicitly set and verify search_path
+    with engine.connect() as conn:
+        conn.execute(text(f"SET search_path TO {schema_name},public"))
+        active_path = conn.execute(text("SHOW search_path")).scalar()
+        logger.info(f"🧭 Active search_path (explicitly set): {active_path}")
+
     TenantBase.metadata.schema = schema_name
     TenantBase.metadata.create_all(bind=engine)
-
-    # ✅ Log active schema to confirm correct path
-    with engine.connect() as conn:
-        active_path = conn.execute(text("SHOW search_path")).scalar()
-        logger.info(f"🧭 Active search_path set to: {active_path}")
 
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     logger.info(f"✅ Tenant session ready for schema: {schema_name}")
