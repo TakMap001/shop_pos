@@ -1375,8 +1375,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Update Product (owner only, step-by-step) --------------------
             elif action == "awaiting_update" and user.role == "owner":
-                # ✅ Always use safe helper (ensures tenant is linked and session is valid)
-                tenant_db = ensure_tenant_session(chat_id, db)
+                # ✅ Use the SAME method as callback
+                tenant_db = get_tenant_session(user.tenant_schema, chat_id)
                 if not tenant_db:
                     send_message(chat_id, "❌ Unable to access tenant database.")
                     return {"ok": True}
@@ -1391,11 +1391,16 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         return {"ok": True}
 
                     query_text = text.strip()
+                    
+                    # DEBUG: Check what we're working with
+                    logger.info(f"🔍 SEARCH DEBUG: Using tenant_schema: {user.tenant_schema}")
+                    
                     matches = tenant_db.query(ProductORM).filter(ProductORM.name.ilike(f"%{query_text}%")).all()
+                    
+                    logger.info(f"🔍 SEARCH DEBUG: Found {len(matches)} products: {[f'ID:{m.product_id} {m.name}' for m in matches]}")
 
                     if not matches:
-                        send_message(chat_id, f"⚠️ No products found matching '{query_text}'.\n"
-                                              "Click ➕ Add Product to add it, or go back to the main menu.")
+                        send_message(chat_id, f"⚠️ No products found matching '{query_text}'.")
                         user_states[chat_id] = {}  # reset state
                         return {"ok": True}
 
@@ -1403,7 +1408,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         selected = matches[0]
                         data["product_id"] = selected.product_id
                         user_states[chat_id] = {"action": "awaiting_update", "step": 2, "data": data}
-                        send_message(chat_id, f"✏️ Updating *{selected.name}*.\nEnter NEW name (or send `-` to keep current):")
+                        send_message(chat_id, f"✏️ Updating {selected.name}.\nEnter NEW name (or '-' to keep current):")
                         return {"ok": True}
 
                     # Multiple matches → inline keyboard
@@ -1732,46 +1737,59 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "⚠️ Invalid product selection.")
                     return {"ok": True}
 
-                # ✅ Use the SAME session creation method as the search
-                # Instead of ensure_tenant_session, use the same method as in the message handler
+                # ✅ CRITICAL: Use the EXACT same method and parameters as the search
                 tenant_db = get_tenant_session(user.tenant_schema, chat_id)
                 if tenant_db is None:
                     send_message(chat_id, "❌ Unable to access tenant database.")
                     return {"ok": True}
 
-                # DEBUG: Check if this is the same session
-                current_schema = tenant_db.execute(text("SHOW search_path")).scalar()
-                logger.info(f"🔍 CALLBACK DEBUG: search_path in callback: {current_schema}")
+                # DEBUG: Verify we're in the right schema
+                try:
+                    current_schema = tenant_db.execute(text("SHOW search_path")).scalar()
+                    logger.info(f"🔍 CALLBACK DEBUG: search_path: {current_schema}")
+                    
+                    # Check what tenant_schema we're using
+                    logger.info(f"🔍 CALLBACK DEBUG: Using tenant_schema: {user.tenant_schema}")
+                    
+                    # Count total products
+                    product_count = tenant_db.query(ProductORM).count()
+                    logger.info(f"🔍 CALLBACK DEBUG: Total products found: {product_count}")
+                    
+                except Exception as debug_e:
+                    logger.error(f"🔍 CALLBACK DEBUG: Error checking database: {debug_e}")
 
-                # Fetch product
+                # Fetch the specific product
                 product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
                 
                 if not product:
-                    logger.error(f"❌ Product {product_id} not found. Search_path: {current_schema}")
-                    send_message(chat_id, f"❌ Product not found. This is a bug - please report.")
+                    logger.error(f"❌ Product {product_id} not found")
+                    # Additional debug: show what products ARE available
+                    available_products = tenant_db.query(ProductORM).all()
+                    available_ids = [p.product_id for p in available_products]
+                    logger.error(f"❌ Available product IDs: {available_ids}")
+                    
+                    send_message(chat_id, f"❌ Product ID {product_id} not found. Available IDs: {available_ids}")
                     return {"ok": True}
 
-                # ✅ Product found - start update flow from STEP 2 (name update)
-                logger.info(f"✅ Starting update flow for product: {product.name} (ID: {product_id}) at step 2")
-    
+                # ✅ Product found - start update flow
+                logger.info(f"✅ Product found: {product.name} (ID: {product_id}), starting update flow")
+                
                 user_states[chat_id] = {
                     "action": "awaiting_update",
-                    "step": 2,  # CRITICAL: Start from step 2 to match message handler flow
+                    "step": 2,
                     "data": {"product_id": product_id}
                 }
 
-                # Use markdown formatting
                 text_msg = (
-                    f"✏️ Updating *{escape_markdown_v2(product.name)}*\n\n"
-                    f"Current details:\n"
+                    f"✏️ Updating: {product.name}\n\n"
                     f"💰 Price: ${product.price}\n"
                     f"📦 Stock: {product.stock} {product.unit_type}\n\n"
-                    "Enter *NEW NAME* (or send `-` to keep current):"
+                    "Enter NEW NAME (or '-' to keep current):"
                 )
 
-                send_message(chat_id, text_msg, parse_mode="MarkdownV2")
-                return {"ok": True}  # ✅ EARLY RETURN
-
+                send_message(chat_id, text_msg)
+                return {"ok": True}
+            
             # -------------------- Record Sale --------------------
             elif action == "record_sale":
                 tenant_db = ensure_tenant_session(chat_id, db)
