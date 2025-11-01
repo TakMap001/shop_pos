@@ -120,8 +120,7 @@ def role_menu(chat_id):
 
 def ensure_tenant_session(chat_id, db):
     """
-    Always return a valid tenant session for this Telegram user.
-    Ensures we derive the correct tenant schema and build a valid tenant_db_url.
+    Return a valid tenant session, reconstructing the full tenant_db_url consistently.
     """
     user = db.query(User).filter(User.chat_id == chat_id).first()
     base_url = os.getenv("DATABASE_URL")
@@ -132,38 +131,40 @@ def ensure_tenant_session(chat_id, db):
 
     tenant_schema = None
 
-    # Prefer user.tenant_schema if it’s a schema name or URL
+    # Step 1: Resolve tenant schema name
     if user.tenant_schema:
+        # Extract just the schema name even if it's a URL
         if "#" in user.tenant_schema:
             tenant_schema = user.tenant_schema.split("#")[-1]
         elif user.tenant_schema.startswith("tenant_"):
             tenant_schema = user.tenant_schema
         else:
-            # Defensive fallback
             tenant_schema = f"tenant_{chat_id}"
     else:
-        # Try recovering from Tenant table
         tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
         if tenant and tenant.database_url:
             tenant_schema = tenant.database_url.split("#")[-1]
             user.tenant_schema = tenant_schema
             db.commit()
-            logger.info(f"✅ Recovered tenant_schema '{tenant_schema}' for {user.username}")
+            logger.info(f"✅ Recovered tenant schema for {user.username}: {tenant_schema}")
         else:
             tenant_schema = f"tenant_{chat_id}"
             user.tenant_schema = tenant_schema
             db.commit()
-            logger.warning(f"⚠️ Created fallback tenant_schema '{tenant_schema}' for chat_id={chat_id}")
+            logger.warning(f"⚠️ Defaulted tenant_schema for chat_id={chat_id}")
 
-    # ✅ Construct correct tenant_db_url
+    # Step 2: Reconstruct canonical full tenant_db_url
     tenant_db_url = f"{base_url}#{tenant_schema}"
 
-    logger.info(f"🔗 Creating tenant session using schema '{tenant_schema}' for chat_id={chat_id}")
+    logger.info(f"🔗 Constructed tenant DB URL: {tenant_db_url}")
 
+    # Step 3: Get tenant session safely
     try:
-        return get_tenant_session(tenant_db_url, chat_id)
+        session = get_tenant_session(tenant_db_url, chat_id)
+        logger.info(f"✅ Tenant session created successfully for chat_id={chat_id}")
+        return session
     except Exception as e:
-        logger.error(f"❌ Failed to get tenant session for chat_id={chat_id}: {e}")
+        logger.error(f"❌ Failed to create tenant session for chat_id={chat_id}: {e}")
         return None
 
 def main_menu(role: str):
