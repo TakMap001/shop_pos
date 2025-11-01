@@ -1759,61 +1759,67 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 tenant_db = ensure_tenant_session(chat_id, db)
                 if not tenant_db:
                     send_message(chat_id, "⚠️ Tenant database not linked. Please restart with /start.")
-                    send_message(chat_id, "⚠️ Cannot fetch product: tenant DB unavailable.")
                     return {"ok": True}
+
+                # Debug log for action received
+                logger.debug(f"🔍 Callback received: action={action}")
 
                 # Try to extract product ID safely
                 product_id = None
                 match = re.search(r"select_(?:update|product)[:\\%3A]+(\d+)", action)
                 if match:
                     product_id = int(match.group(1))
+                logger.debug(f"🆔 Parsed product_id={product_id}")
 
-                if product_id:
-                    # ✅ Fetch product by correct column
-                    product = (
-                        tenant_db.query(ProductORM)
-                        .filter((getattr(ProductORM, "id", None) == product_id) | (getattr(ProductORM, "product_id", None) == product_id))
-                        .first()
-                    )
+                # Log tenant DB URL and schema for debugging
+                user = db.query(User).filter(User.chat_id == chat_id).first()
+                logger.debug(f"🏷️ User {user.username if user else 'UNKNOWN'} tenant_schema={getattr(user, 'tenant_schema', None)}")
 
-                    if not product:
-                        # Add back button to recover easily
-                        kb = types.InlineKeyboardMarkup()
-                        kb.add(types.InlineKeyboardButton("🏠 Back to Main Menu", callback_data="back_to_menu"))
-                        send_message(chat_id, f"⚠️ No product found matching ID {product_id}.", kb)
-                        return {"ok": True}
+                try:
+                    schema_check = tenant_db.execute(text("SELECT current_schema()")).fetchone()
+                    logger.debug(f"📂 Current schema for this tenant_db session: {schema_check}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not verify schema context: {e}")
 
-                    safe_name_html = html.escape(product.name)
+                # Product lookup
+                product = (
+                    tenant_db.query(ProductORM)
+                    .filter((getattr(ProductORM, "id", None) == product_id) | (getattr(ProductORM, "product_id", None) == product_id))
+                    .first()
+                )
+                logger.debug(f"📦 Product lookup result: {product}")
 
-                    if role == "owner":
-                        text_msg = (
-                            f"✏️ Updating <b>{safe_name_html}</b>\n"
-                            "Enter details as:\n"
-                            "<code>NewName, NewPrice, NewQuantity, UnitType, MinStock, LowStockThreshold</code>\n"
-                            "Leave blank to keep current values."
-                        )
-                    else:
-                        text_msg = (
-                            f"✏️ Updating <b>{safe_name_html}</b>\n"
-                            "Enter details as:\n"
-                            "<code>Quantity, UnitType</code>\n"
-                            "Leave blank to keep current values."
-                        )
-
-                    send_message(chat_id, text_msg, keyboard=None, parse_mode="HTML")
-
-                    user_states[chat_id] = {
-                        "action": "awaiting_update",
-                        "step": 1,
-                        "data": {"product_id": product_id}
-                    }
-
-                else:
-                    # If no product_id found or malformed callback
+                if not product:
+                    # Add back button to recover easily
                     kb = types.InlineKeyboardMarkup()
                     kb.add(types.InlineKeyboardButton("🏠 Back to Main Menu", callback_data="back_to_menu"))
-                    send_message(chat_id, "⚠️ Invalid product selection. Returning to menu.", kb)
+                    send_message(chat_id, f"⚠️ No product found matching ID {product_id}.", kb)
                     return {"ok": True}
+
+                safe_name_html = html.escape(product.name)
+
+                if role == "owner":
+                    text_msg = (
+                        f"✏️ Updating <b>{safe_name_html}</b>\n"
+                        "Enter details as:\n"
+                        "<code>NewName, NewPrice, NewQuantity, UnitType, MinStock, LowStockThreshold</code>\n"
+                        "Leave blank to keep current values."
+                    )
+                else:
+                    text_msg = (
+                        f"✏️ Updating <b>{safe_name_html}</b>\n"
+                        "Enter details as:\n"
+                        "<code>Quantity, UnitType</code>\n"
+                        "Leave blank to keep current values."
+                    )
+
+                send_message(chat_id, text_msg, keyboard=None, parse_mode="HTML")
+
+                user_states[chat_id] = {
+                    "action": "awaiting_update",
+                    "step": 1,
+                    "data": {"product_id": product_id}
+                }
 
 
             # -------------------- Record Sale --------------------
