@@ -27,7 +27,7 @@ def create_tenant_db(chat_id: int) -> str:
 
     logger.info(f"📌 Preparing tenant schema: {schema_name}")
 
-    # Connect to main Railway database
+    # Connect to main database
     engine = create_engine(base_url, execution_options={"isolation_level": "AUTOCOMMIT"})
 
     with engine.connect() as conn:
@@ -95,7 +95,9 @@ def ensure_tenant_tables(base_url: str, schema_name: str):
 
     try:
         engine = create_engine(
-            base_url, future=True, pool_pre_ping=True,
+            base_url,
+            future=True,
+            pool_pre_ping=True,
             connect_args={"options": f"-csearch_path={schema_name}"}
         )
         TenantBase.metadata.create_all(bind=engine)
@@ -105,7 +107,7 @@ def ensure_tenant_tables(base_url: str, schema_name: str):
         raise RuntimeError(f"Cannot initialize tenant tables for schema '{schema_name}'") from e
 
 
-# -------------------- Tenant Session --------------------
+# -------------------- Tenant Session (simple) --------------------
 def get_session_for_tenant(tenant_db_url: str):
     """
     Return a SQLAlchemy session for a given tenant schema DB URL.
@@ -114,7 +116,9 @@ def get_session_for_tenant(tenant_db_url: str):
     if "#" in tenant_db_url:
         base_url, schema_name = tenant_db_url.split("#", 1)
         engine = create_engine(
-            base_url, future=True, pool_pre_ping=True,
+            base_url,
+            future=True,
+            pool_pre_ping=True,
             connect_args={"options": f"-csearch_path={schema_name}"}
         )
     else:
@@ -154,7 +158,11 @@ def get_tenant_session(tenant_db_url: str, chat_id: int = None):
             connect_args={"options": f"-csearch_path={schema_name},public"}
         )
 
-        # Log confirmation of correct schema
+        # ✅ Bind ORM Base *before* creating session
+        from app.models.models import TenantBase
+        TenantBase.metadata.bind = engine
+        TenantBase.metadata.schema = schema_name
+
         logger.info(f"✅ Tenant search_path set to: {schema_name}, public")
 
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, future=True)
