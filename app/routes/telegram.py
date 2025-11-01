@@ -1775,9 +1775,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     # 🚀 Perform the ORM query
                     product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
                     logger.info(f"📦 ORM product result for ID {product_id}: {product}")
+                    
+                    if not product:
+                        send_message(chat_id, "⚠️ No products found.")
+                        return {"ok": True}
 
                 except Exception as e:
-                    logger.error(f"❌ DB fetch failed for product_id={product_id}: {e}")
+                    logger.error(f"❌ DB fetch failed for product_id={product_id}: {e}", exc_info=True)
                     send_message(chat_id, "⚠️ Database error while fetching product.")
                     return {"ok": True}
 
