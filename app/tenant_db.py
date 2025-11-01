@@ -115,54 +115,39 @@ def ensure_tenant_tables(base_url: str, schema_name: str):
 # ======================================================
 def get_tenant_session(tenant_db_url: str, chat_id: int):
     """
-    Create a tenant-scoped SQLAlchemy session using '#tenant_xxx' schema tag.
-    Ensures search_path is properly set for all ORM queries.
+    Create a tenant-scoped SQLAlchemy session using the '#tenant_xxx' schema tag.
+    Ensures all ORM queries stay within the tenant schema only.
     """
-    try:
-        if not tenant_db_url:
-            raise ValueError("❌ Missing tenant_db_url")
+    if not tenant_db_url:
+        raise ValueError("❌ Missing tenant_db_url")
 
-        # Extract schema
-        if "#" in tenant_db_url:
-            base_url, schema_name = tenant_db_url.split("#", 1)
-        else:
-            base_url = tenant_db_url
-            schema_name = f"tenant_{chat_id}"
+    if "#" in tenant_db_url:
+        base_url, schema_name = tenant_db_url.split("#", 1)
+    else:
+        base_url = tenant_db_url
+        schema_name = f"tenant_{chat_id}"
 
-        logger.warning(f"🧩 DEBUG: USING UPDATED get_tenant_session() for chat_id={chat_id}")
-        logger.info(f"🔗 Creating tenant session → {schema_name}")
+    logger.info(f"🔗 Creating tenant session → {schema_name}")
 
-        # Create engine and force schema per connection
-        engine = create_engine(
-            base_url,
-            pool_pre_ping=True,
-            future=True
-        )
+    # ✅ Use tenant schema ONLY (no fallback to public)
+    engine = create_engine(
+        base_url,
+        pool_pre_ping=True,
+        connect_args={"options": f"-csearch_path={schema_name}"}
+    )
 
-        # Explicitly set search_path on new connections
-        with engine.connect() as conn:
-            conn.execute(text(f"SET search_path TO {schema_name}, public"))
-            conn.commit()
-            active_schema = conn.execute(text("SHOW search_path")).scalar()
-            logger.info(f"🧭 search_path set to: {active_schema}")
+    # ✅ Bind ORM models to tenant schema
+    TenantBase.metadata.schema = schema_name
+    TenantBase.metadata.create_all(bind=engine)
 
-        # Bind metadata to the tenant schema
-        TenantBase.metadata.schema = schema_name
-        TenantBase.metadata.create_all(bind=engine)
+    # ✅ Log active schema to confirm correct path
+    with engine.connect() as conn:
+        active_path = conn.execute(text("SHOW search_path")).scalar()
+        logger.info(f"🧭 Active search_path set to: {active_path}")
 
-        # Create session factory
-        SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-        session = SessionLocal()
-
-        # Double-check schema inside ORM
-        active_schema = session.execute(text("SHOW search_path")).scalar()
-        logger.info(f"✅ Tenant session ready for schema: {active_schema}")
-
-        return session
-
-    except Exception as e:
-        logger.error(f"❌ Failed to create tenant session for chat_id={chat_id}: {e}", exc_info=True)
-        return None
+    SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    logger.info(f"✅ Tenant session ready for schema: {schema_name}")
+    return SessionLocal()
 
 # ======================================================
 # 🔹 ENSURE TENANT SESSION (Main entry point)
