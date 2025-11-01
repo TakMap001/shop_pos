@@ -1781,13 +1781,34 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 except Exception as e:
                     logger.warning(f"⚠️ Could not verify schema context: {e}")
 
-                # Product lookup
-                product = (
-                    tenant_db.query(ProductORM)
-                    .filter((getattr(ProductORM, "id", None) == product_id) | (getattr(ProductORM, "product_id", None) == product_id))
-                    .first()
-                )
-                logger.debug(f"📦 Product lookup result: {product}")
+                # -------------------- Product lookup (safe + verbose) --------------------
+                try:
+                    logger.info(f"🔍 Looking for product_id={product_id} in tenant DB for chat_id={chat_id}")
+                    # List all products in current tenant for debugging visibility
+                    all_products = tenant_db.query(ProductORM).all()
+                    logger.info(f"📦 Tenant {chat_id} has {len(all_products)} products: {[p.product_id for p in all_products]}")
+
+                    # Use isolated transaction for clarity
+                    with tenant_db.begin():
+                        product = (
+                            tenant_db.query(ProductORM)
+                            .filter(ProductORM.product_id == product_id)
+                            .first()
+                        )
+
+                    if not product:
+                        logger.warning(f"⚠️ Product with ID={product_id} not found in tenant_{chat_id}")
+                        kb = types.InlineKeyboardMarkup()
+                        kb.add(types.InlineKeyboardButton("🏠 Back to Main Menu", callback_data="back_to_menu"))
+                        send_message(chat_id, f"⚠️ No product found matching ID {product_id}.", kb)
+                        return {"ok": True}
+
+                    logger.info(f"✅ Found product: {product.name} (ID={product.product_id}) in tenant_{chat_id}")
+
+                except Exception as e:
+                    logger.error(f"❌ Product lookup failed for ID {product_id}: {e}")
+                    send_message(chat_id, "❌ Error accessing product data. Please try again.")
+                    return {"ok": True}
 
                 if not product:
                     # Add back button to recover easily
