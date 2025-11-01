@@ -1730,24 +1730,26 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     logger.info(f"🔹 Parsed product_id={product_id}")
                 except (IndexError, ValueError):
                     send_message(chat_id, "⚠️ Invalid product selection.")
-                    return {"ok": True}  # ✅ EARLY RETURN
+                    return {"ok": True}
 
-                # Ensure tenant DB session
-                tenant_db = ensure_tenant_session(chat_id, db)
-                if not tenant_db:
-                    send_message(chat_id, "⚠️ Tenant database not available.")
-                    return {"ok": True}  # ✅ EARLY RETURN
+                # ✅ Use the SAME session creation method as the search
+                # Instead of ensure_tenant_session, use the same method as in the message handler
+                tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                if tenant_db is None:
+                    send_message(chat_id, "❌ Unable to access tenant database.")
+                    return {"ok": True}
 
-                # -------------------- Fetch product --------------------
-                logger.info("🚦 Fetching product with ID: %s", product_id)
-                try:
-                    # Fetch the specific product
-                    product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
-                    logger.info(f"📦 ORM product result for ID {product_id}: {product}")
+                # DEBUG: Check if this is the same session
+                current_schema = tenant_db.execute(text("SHOW search_path")).scalar()
+                logger.info(f"🔍 CALLBACK DEBUG: search_path in callback: {current_schema}")
 
-                    if not product:
-                        send_message(chat_id, "❌ Product not found in database.")
-                        return {"ok": True}  # ✅ EARLY RETURN
+                # Fetch product
+                product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
+                
+                if not product:
+                    logger.error(f"❌ Product {product_id} not found. Search_path: {current_schema}")
+                    send_message(chat_id, f"❌ Product not found. This is a bug - please report.")
+                    return {"ok": True}
 
                 except Exception as e:
                     logger.error(f"❌ DB fetch failed for product_id={product_id}: {e}", exc_info=True)
