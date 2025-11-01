@@ -1751,11 +1751,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, f"❌ Product not found. This is a bug - please report.")
                     return {"ok": True}
 
-                except Exception as e:
-                    logger.error(f"❌ DB fetch failed for product_id={product_id}: {e}", exc_info=True)
-                    send_message(chat_id, "⚠️ Database error while fetching product.")
-                    return {"ok": True}  # ✅ EARLY RETURN
-
                 # ✅ Product found - start update flow from STEP 2 (name update)
                 logger.info(f"✅ Starting update flow for product: {product.name} (ID: {product_id}) at step 2")
     
