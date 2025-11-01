@@ -1111,12 +1111,14 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Cart Management Callbacks --------------------
             elif text == "add_another_item":
+                # ✅ Preserve existing cart data
                 user_states[chat_id] = {"action": "awaiting_sale", "step": 1, "data": data}
                 send_message(chat_id, "➕ Add another item. Enter product name:")
                 return {"ok": True}
                 
             elif text == "view_cart":
-                cart_summary = get_cart_summary(data.get("cart", []))
+                cart = data.get("cart", [])
+                cart_summary = get_cart_summary(cart)
                 kb_rows = [
                     [{"text": "➕ Add Item", "callback_data": "add_another_item"}],
                     [{"text": "🗑 Remove Item", "callback_data": "remove_item"}],
@@ -1148,6 +1150,9 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         removed_item = cart.pop(item_index)
                         send_message(chat_id, f"🗑 Removed: {removed_item['name']}")
                         
+                        # ✅ Update state with modified cart
+                        user_states[chat_id] = {"action": "awaiting_sale", "step": 1, "data": data}
+                        
                         # Show updated cart
                         cart_summary = get_cart_summary(cart)
                         kb_rows = [
@@ -1169,6 +1174,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "🛒 Cart is empty. Add items first.")
                     return {"ok": True}
                 
+                # ✅ CRITICAL: Update state with cart data and move to checkout step
                 user_states[chat_id] = {"action": "awaiting_sale", "step": 3, "data": data}
                 send_message(chat_id, "💰 Enter payment type (full, partial, credit):")
                 return {"ok": True}
@@ -1179,6 +1185,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 kb = main_menu(user.role)
                 send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                 return {"ok": True}
+                
                 
             # -------------------- View Stock --------------------
             elif text == "view_stock":
@@ -1942,7 +1949,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     
                     # Initialize cart if not exists
                     if "cart" not in data:
-                        data["cart"] = []  # List of items: {product_id, name, price, quantity, unit_type}
+                        data["cart"] = []  # List of items: {product_id, name, price, quantity, unit_type, subtotal}
 
                     # STEP 1: search by product name (Add to cart)
                     if step == 1:
@@ -1973,7 +1980,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             [{"text": f"{p.name} — Stock: {p.stock} ({p.unit_type})", "callback_data": f"select_sale:{p.product_id}"}]
                             for p in matches
                         ]
-                        kb_rows.append([{"text": "⬅️ Back to Cart", "callback_data": "view_cart"}])
+                        kb_rows.append([{"text": "🛒 View Cart", "callback_data": "view_cart"}])
                         send_message(chat_id, "🔹 Multiple products found. Please select:", {"inline_keyboard": kb_rows})
                         return {"ok": True}
 
@@ -2011,7 +2018,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             }
                             data["cart"].append(cart_item)
                             
-                            # Show cart and ask for next action
+                            # Show FULL cart summary (all items)
                             cart_summary = get_cart_summary(data["cart"])
                             kb_rows = [
                                 [{"text": "➕ Add Another Item", "callback_data": "add_another_item"}],
@@ -2019,11 +2026,11 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                 [{"text": "✅ Checkout", "callback_data": "checkout_cart"}],
                                 [{"text": "❌ Cancel Sale", "callback_data": "cancel_sale"}]
                             ]
-                            send_message(chat_id, f"🛒 Item added to cart!\n\n{cart_summary}", {"inline_keyboard": kb_rows})
+                            send_message(chat_id, f"✅ Item added to cart!\n\n{cart_summary}", {"inline_keyboard": kb_rows})
                             
-                            # Clear current product and stay at step 1 for next action
-                            data.pop("current_product", None)
-                            user_states[chat_id] = {"action": "awaiting_sale", "step": 1, "data": data}
+                            # ✅ CRITICAL: Update state with cart data preserved
+                            data.pop("current_product", None)  # Clear current product
+                            user_states[chat_id] = {"action": "awaiting_sale", "step": 1, "data": data}  # Stay at step 1 but with updated cart
                             
                         except ValueError:
                             send_message(chat_id, "❌ Invalid quantity. Enter a positive integer:")
@@ -2040,12 +2047,12 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             return {"ok": True}
 
                         data["payment_type"] = payment_type
-                        user_states[chat_id] = {"action": "awaiting_sale", "step": 4, "data": data}
                         
                         # Calculate cart total
                         cart_total = sum(item["subtotal"] for item in data["cart"])
                         data["cart_total"] = cart_total
                         
+                        user_states[chat_id] = {"action": "awaiting_sale", "step": 4, "data": data}
                         send_message(chat_id, f"💰 Cart Total: ${cart_total:.2f}\n💵 Enter amount tendered by customer:")
                         return {"ok": True}
 
@@ -2074,7 +2081,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                 data["pending_amount"] = data["cart_total"]  # No payment made
                                 data["change_left"] = 0
                             
-                            # Show payment summary
+                            # Show payment summary with FULL cart details
                             summary_msg = f"💳 Payment Summary:\n"
                             summary_msg += get_cart_summary(data["cart"])
                             summary_msg += f"💰 Total: ${data['cart_total']:.2f}\n"
