@@ -1760,6 +1760,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 tenant_db = get_tenant_session(tenant_db_url, chat_id)
 
                 # -------------------- Fetch product --------------------
+                logger.info("🚦 Entering FETCH PRODUCT block with product_id=%s", product_id)
+
                 try:
                     # 🧭 Check the active schema search path
                     active_schema = tenant_db.execute(text("SHOW search_path")).scalar()
@@ -1773,6 +1775,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     logger.info(f"📦 Direct SQL product count in current schema: {count}")
 
                     # 🚀 Perform the ORM query
+                    logger.info("🚦 About to query ProductORM for product_id=%s", product_id)
+
                     product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
                     logger.info(f"📦 ORM product result for ID {product_id}: {product}")
                     
