@@ -2156,87 +2156,87 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         return {"ok": True}
 
                     # STEP 3: checkout - payment type
-					elif step == 3:
-						payment_type = text.strip().lower()
-						if not payment_type:
-							send_message(chat_id, "❌ Payment type cannot be empty. Choose: full, partial, credit:")
-							return {"ok": True}
-						if payment_type not in ["full", "partial", "credit"]:
-							send_message(chat_id, "❌ Invalid type. Choose: full, partial, credit:")
-							return {"ok": True}
+                    elif step == 3:
+                        payment_type = text.strip().lower()
+                        if not payment_type:
+                            send_message(chat_id, "❌ Payment type cannot be empty. Choose: full, partial, credit:")
+                            return {"ok": True}
+                        if payment_type not in ["full", "partial", "credit"]:
+                            send_message(chat_id, "❌ Invalid type. Choose: full, partial, credit:")
+                            return {"ok": True}
 
-						data["payment_type"] = payment_type
-	
-						# ✅ FIX: Calculate cart_total from cart
-						cart_total = sum(item["subtotal"] for item in data["cart"])
-						data["cart_total"] = cart_total
-	
-						user_states[chat_id] = {"action": "awaiting_sale", "step": 4, "data": data}
-						send_message(chat_id, f"💰 Cart Total: ${cart_total:.2f}\n💵 Enter amount tendered by customer:")
-						return {"ok": True}
+                        data["payment_type"] = payment_type
+    
+                        # ✅ FIX: Calculate cart_total from cart
+                        cart_total = sum(item["subtotal"] for item in data["cart"])
+                        data["cart_total"] = cart_total
+    
+                        user_states[chat_id] = {"action": "awaiting_sale", "step": 4, "data": data}
+                        send_message(chat_id, f"💰 Cart Total: ${cart_total:.2f}\n💵 Enter amount tendered by customer:")
+                        return {"ok": True}
     
                     # STEP 4: amount tendered
-					elif step == 4:
-						amount_text = text.strip()
-						if not amount_text:
-							send_message(chat_id, "❌ Amount tendered cannot be empty. Please enter a valid amount:")
-							return {"ok": True}
-						try:
-							amount_paid = float(amount_text)
-							if amount_paid < 0:
-								send_message(chat_id, "❌ Amount tendered cannot be negative. Please enter a valid amount:")
-								return {"ok": True}
-		
-							# ✅ FIX: Calculate cart_total from cart instead of relying on stored value
-							cart_total = sum(item["subtotal"] for item in data["cart"])
-		
-							data["amount_paid"] = amount_paid
-							data["cart_total"] = cart_total  # Store it for later use if needed
-		
-							# Calculate change or pending amount based on payment type
-							if data["payment_type"] == "full":
-								data["pending_amount"] = 0
-								data["change_left"] = max(amount_paid - cart_total, 0)
-							elif data["payment_type"] == "partial":
-								data["pending_amount"] = max(cart_total - amount_paid, 0)
-								data["change_left"] = max(amount_paid - cart_total, 0)
-							else:  # credit
-								data["pending_amount"] = cart_total  # No payment made
-								data["change_left"] = 0
-		
-							# Show payment summary with FULL cart details
-							summary_msg = f"💳 Payment Summary:\n"
-							summary_msg += get_cart_summary(data["cart"])
-							summary_msg += f"💰 Total: ${cart_total:.2f}\n"
-							summary_msg += f"💵 Tendered: ${amount_paid:.2f}\n"
-		
-							if data["payment_type"] == "full":
-								if data["change_left"] > 0:
-									summary_msg += f"🪙 Change: ${data['change_left']:.2f}\n"
-								summary_msg += f"\n✅ Full payment received.\n\n"
-							elif data["payment_type"] == "partial":
-								summary_msg += f"📋 Pending: ${data['pending_amount']:.2f}\n"
-								if data["change_left"] > 0:
-									summary_msg += f"🪙 Change: ${data['change_left']:.2f}\n"
-								summary_msg += f"\n⚠️ Partial payment - balance pending.\n\n"
-							else:  # credit
-								summary_msg += f"📋 Credit Amount: ${data['pending_amount']:.2f}\n"
-								summary_msg += f"\n🔄 Sale on credit.\n\n"
-		
-							# ✅ ONLY ask for customer details if credit sale OR change due
-							if data["payment_type"] == "credit" or data["change_left"] > 0:
-								summary_msg += "👤 Enter customer name:"
-								user_states[chat_id] = {"action": "awaiting_sale", "step": 5, "data": data}
-							else:
-								# No customer details needed - go straight to confirmation
-								summary_msg += "✅ Confirm sale? (yes/no)"
-								user_states[chat_id] = {"action": "awaiting_sale", "step": 6, "data": data}
-		
-							send_message(chat_id, summary_msg)
-		
-						except ValueError:
-							send_message(chat_id, "❌ Invalid number. Enter a valid amount:")
-						return {"ok": True}
+                    elif step == 4:
+                        amount_text = text.strip()
+                        if not amount_text:
+                            send_message(chat_id, "❌ Amount tendered cannot be empty. Please enter a valid amount:")
+                            return {"ok": True}
+                        try:
+                            amount_paid = float(amount_text)
+                            if amount_paid < 0:
+                                send_message(chat_id, "❌ Amount tendered cannot be negative. Please enter a valid amount:")
+                                return {"ok": True}
+        
+                            # ✅ FIX: Calculate cart_total from cart instead of relying on stored value
+                            cart_total = sum(item["subtotal"] for item in data["cart"])
+        
+                            data["amount_paid"] = amount_paid
+                            data["cart_total"] = cart_total  # Store it for later use if needed
+        
+                            # Calculate change or pending amount based on payment type
+                            if data["payment_type"] == "full":
+                                data["pending_amount"] = 0
+                                data["change_left"] = max(amount_paid - cart_total, 0)
+                            elif data["payment_type"] == "partial":
+                                data["pending_amount"] = max(cart_total - amount_paid, 0)
+                                data["change_left"] = max(amount_paid - cart_total, 0)
+                            else:  # credit
+                                data["pending_amount"] = cart_total  # No payment made
+                                data["change_left"] = 0
+        
+                            # Show payment summary with FULL cart details
+                            summary_msg = f"💳 Payment Summary:\n"
+                            summary_msg += get_cart_summary(data["cart"])
+                            summary_msg += f"💰 Total: ${cart_total:.2f}\n"
+                            summary_msg += f"💵 Tendered: ${amount_paid:.2f}\n"
+        
+                            if data["payment_type"] == "full":
+                                if data["change_left"] > 0:
+                                    summary_msg += f"🪙 Change: ${data['change_left']:.2f}\n"
+                                summary_msg += f"\n✅ Full payment received.\n\n"
+                            elif data["payment_type"] == "partial":
+                                summary_msg += f"📋 Pending: ${data['pending_amount']:.2f}\n"
+                                if data["change_left"] > 0:
+                                    summary_msg += f"🪙 Change: ${data['change_left']:.2f}\n"
+                                summary_msg += f"\n⚠️ Partial payment - balance pending.\n\n"
+                            else:  # credit
+                                summary_msg += f"📋 Credit Amount: ${data['pending_amount']:.2f}\n"
+                                summary_msg += f"\n🔄 Sale on credit.\n\n"
+        
+                            # ✅ ONLY ask for customer details if credit sale OR change due
+                            if data["payment_type"] == "credit" or data["change_left"] > 0:
+                                summary_msg += "👤 Enter customer name:"
+                                user_states[chat_id] = {"action": "awaiting_sale", "step": 5, "data": data}
+                            else:
+                                # No customer details needed - go straight to confirmation
+                                summary_msg += "✅ Confirm sale? (yes/no)"
+                                user_states[chat_id] = {"action": "awaiting_sale", "step": 6, "data": data}
+        
+                            send_message(chat_id, summary_msg)
+        
+                        except ValueError:
+                            send_message(chat_id, "❌ Invalid number. Enter a valid amount:")
+                        return {"ok": True}
     
                     # STEP 5: customer name (ONLY for credit sales or change due)
                     elif step == 5:
