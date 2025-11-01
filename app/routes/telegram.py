@@ -1772,7 +1772,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "⚠️ Invalid product selection.")
                     return {"ok": True}
 
-                    # ✅ Direct fetch from tenant schema session
+                # ✅ Direct fetch from tenant schema session
                 try:
                     product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
                     logger.debug(f"📦 Product fetch result for ID {product_id}: {product}")
