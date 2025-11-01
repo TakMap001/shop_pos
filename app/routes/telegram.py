@@ -1716,8 +1716,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 text, kb = products_page_view(tenant_db, page=page)
                 send_message(chat_id, text, kb)
 
-            # -------------------- Product Selection / Multiple Buttons --------------------
-            elif action.startswith("select_update:") or action.startswith("select_product:"):
+            # -------------------- Product Selection for Update --------------------
+            elif action.startswith("select_update:"):
                 logger.info(f"🧩 Callback triggered: {action} from chat_id {chat_id}")
 
                 # Extract product ID
@@ -1729,65 +1729,20 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     return {"ok": True}
 
                 # Ensure tenant DB session
-                user = db.query(User).filter(User.chat_id == chat_id).first()
-                tenant_db_url = getattr(user, "tenant_schema", None)
-
-                # 🔧 Reconstruct URL if needed
-                if not tenant_db_url or "#" not in tenant_db_url:
-                    base_url = os.getenv("DATABASE_URL")
-                    schema_name = tenant_db_url if tenant_db_url and tenant_db_url.startswith("tenant_") else f"tenant_{chat_id}"
-                    tenant_db_url = f"{base_url}#{schema_name}"
-                    logger.info(f"🔗 Reconstructed tenant_db_url for {user.username}: {tenant_db_url}")
-
-                # ✅ Create tenant session
-                logger.info(f"🔗 Opening tenant session for product fetch: {tenant_db_url}")
-                tenant_db = get_tenant_session(tenant_db_url, chat_id)
+                tenant_db = ensure_tenant_session(chat_id, db)
+                if not tenant_db:
+                    send_message(chat_id, "⚠️ Tenant database not available.")
+                    return {"ok": True}
 
                 # -------------------- Fetch product --------------------
-                logger.info("🚦 Entering FETCH PRODUCT block with product_id=%s", product_id)
+                logger.info("🚦 Fetching product with ID: %s", product_id)
                 try:
-                    active_schema = tenant_db.execute(text("SHOW search_path")).scalar()
-                    logger.info(f"🧭 Active search_path: {active_schema}")
-
-                    # 📊 Quick row count
-                    count = tenant_db.execute(text("SELECT COUNT(*) FROM products")).scalar()
-                    logger.info(f"📦 Product count in schema: {count}")
-
-                    # -------------------- Deep Debug Diagnostics --------------------
-                    try:
-                        logger.info("🔍 Running tenant ORM diagnostics...")
-
-                        # Check search_path again for confirmation
-                        current_schema = tenant_db.execute(text("SHOW search_path")).scalar()
-                        logger.info(f"🧭 Active search_path (confirm): {current_schema}")
-
-                        # List all schemas that have a 'products' table
-                        schema_check = tenant_db.execute(text("""
-                            SELECT table_schema, COUNT(*) AS total_tables
-                            FROM information_schema.tables
-                            WHERE table_name = 'products'
-                            GROUP BY table_schema
-                            ORDER BY table_schema;
-                        """)).fetchall()
-                        logger.info(f"🏗️ Table presence by schema: {schema_check}")
-
-                        # ✅ NEW: Show visible products
-                        visible_products = tenant_db.execute(text("SELECT product_id, name, stock FROM products ORDER BY product_id")).fetchall()
-                        logger.info(f"📋 Visible products in current schema: {visible_products}")
-
-                        # ✅ NEW: Check ORM perspective explicitly
-                        all_orm_products = tenant_db.query(ProductORM).all()
-                        logger.info(f"🧱 ORM sees {len(all_orm_products)} products: {[p.name for p in all_orm_products]}")
-
-                    except Exception as diag_e:
-                        logger.error(f"❌ Debug diagnostics failed: {diag_e}", exc_info=True)
-
-                    # 🚀 Fetch the specific product
+                    # Fetch the specific product
                     product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
                     logger.info(f"📦 ORM product result for ID {product_id}: {product}")
 
                     if not product:
-                        send_message(chat_id, "⚠️ No products found.")
+                        send_message(chat_id, "❌ Product not found in database.")
                         return {"ok": True}
 
                 except Exception as e:
@@ -1795,30 +1750,28 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "⚠️ Database error while fetching product.")
                     return {"ok": True}
 
-                # Product not found
-                if not product:
-                    logger.warning(f"⚠️ Product with ID {product_id} not found in tenant schema.")
-                    kb = types.InlineKeyboardMarkup()
-                    kb.add(types.InlineKeyboardButton("🏠 Back to Main Menu", callback_data="back_to_menu"))
-                    send_message(chat_id, f"⚠️ No product found matching ID {product_id}.", kb)
-                    return {"ok": True}
-
-                # Product found — start update flow
-                safe_name_html = html.escape(product.name)
-                text_msg = (
-                    f"✏️ Updating <b>{safe_name_html}</b>\n\n"
-                    f"💰 Price: {product.price}\n📦 Stock: {product.stock}\n🧾 Unit: {product.unit_type}\n\n"
-                    "Please enter the new name or send '-' to keep the current name:"
-                )
-
-                user_states.pop(chat_id, None)
+                # ✅ Product found - start update flow from STEP 2 (name update)
+                # This matches the message handler's step 2 expectation
+                logger.info(f"✅ Starting update flow for product: {product.name} (ID: {product_id}) at step 2")
+    
                 user_states[chat_id] = {
                     "action": "awaiting_update",
-                    "step": 1,
-                    "data": {"product_id": product_id, "tenant_db_url": tenant_db_url},
+                    "step": 2,  # CRITICAL: Start from step 2 to match message handler flow
+                    "data": {"product_id": product_id}
                 }
 
-                send_message(chat_id, text_msg, parse_mode="HTML")
+                # Use markdown formatting
+                text_msg = (
+                    f"✏️ Updating *{escape_markdown_v2(product.name)}*\n\n"
+                    f"Current details:\n"
+                    f"💰 Price: ${product.price}\n"
+                    f"📦 Stock: {product.stock} {product.unit_type}\n"
+                    f"📊 Min Level: {product.min_stock_level}\n"
+                    f"⚠️ Low Stock: {product.low_stock_threshold}\n\n"
+                    "Enter *NEW NAME* (or send `-` to keep current):"
+                )
+
+                send_message(chat_id, text_msg, parse_mode="MarkdownV2")
                 return {"ok": True}
 
             # -------------------- Record Sale --------------------
