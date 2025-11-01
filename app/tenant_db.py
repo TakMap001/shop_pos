@@ -12,7 +12,8 @@ logger = logging.getLogger("tenant_db")
 def create_tenant_db(chat_id: int) -> str:
     """
     Create a dedicated SCHEMA for the tenant if it doesn't exist.
-    Also ensures a tenant record exists in the central tenants table.
+    Also ensures a tenant record exists in the central tenants table,
+    and links the user (from users table) to the tenant schema.
     Returns the schema-specific database URL for SQLAlchemy session creation.
     """
     if not chat_id:
@@ -31,7 +32,7 @@ def create_tenant_db(chat_id: int) -> str:
     engine = create_engine(base_url, execution_options={"isolation_level": "AUTOCOMMIT"})
 
     with engine.connect() as conn:
-        # Check if schema exists
+        # -------------------- Ensure tenant schema exists --------------------
         try:
             result = conn.execute(
                 text("SELECT schema_name FROM information_schema.schemata WHERE schema_name=:s"),
@@ -41,7 +42,6 @@ def create_tenant_db(chat_id: int) -> str:
             logger.error(f"❌ Failed to check schema existence: {e}")
             raise
 
-        # Create schema if missing
         if not result:
             try:
                 conn.execute(text(f'CREATE SCHEMA "{schema_name}"'))
@@ -81,11 +81,38 @@ def create_tenant_db(chat_id: int) -> str:
         except Exception as e:
             logger.error(f"❌ Failed to ensure tenant record: {e}")
 
-    # Ensure tenant tables exist
+        # -------------------- Link user to tenant schema --------------------
+        try:
+            # Update users table to reflect schema link
+            conn.execute(
+                text("""
+                    UPDATE users
+                    SET tenant_schema = :schema
+                    WHERE chat_id = :cid
+                """),
+                {"schema": schema_name, "cid": chat_id},
+            )
+            logger.info(f"✅ Linked user {chat_id} to tenant schema '{schema_name}' in users table.")
+
+            # Also ensure tenant table stores correct URL
+            conn.execute(
+                text("""
+                    UPDATE tenants
+                    SET database_url = :url
+                    WHERE telegram_owner_id = :cid
+                """),
+                {"url": tenant_db_url, "cid": chat_id},
+            )
+            logger.info(f"✅ Updated tenants record with URL for chat_id={chat_id}")
+
+        except Exception as e:
+            logger.warning(f"⚠️ Could not link user {chat_id} to tenant schema: {e}")
+
+    # -------------------- Ensure tenant tables exist --------------------
     ensure_tenant_tables(base_url, schema_name)
 
+    logger.info(f"✅ Tenant setup complete for chat_id={chat_id} ({schema_name})")
     return tenant_db_url
-
 
 # -------------------- Ensure tenant tables exist --------------------
 def ensure_tenant_tables(base_url: str, schema_name: str):
