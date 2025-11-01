@@ -29,6 +29,7 @@ from telegram.helpers import escape_markdown
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import re
 import html
+from app.models.models import User
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -1757,6 +1758,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             # -------------------- Product Selection / Multiple Buttons (Diagnostic Mode) --------------------
             elif action.startswith("select_update:") or action.startswith("select_product:"):
                 logger.info(f"🧩 Callback triggered: {action} from chat_id {chat_id}")
+
+                logger.debug(f"🔍 Checking tenant_db_url before session for chat_id={chat_id}")
+                user = db.query(User).filter(User.chat_id == chat_id).first()
+                if user:
+                    logger.debug(f"📡 User tenant_schema: {user.tenant_schema}")
+                else:
+                    logger.debug("❌ No user record found in central DB for this chat_id")
 
                 tenant_db = ensure_tenant_session(chat_id, db)
                 if not tenant_db:
