@@ -121,23 +121,43 @@ def role_menu(chat_id):
 def ensure_tenant_session(chat_id, db):
     """
     Always return a valid tenant session for this Telegram user.
-    If tenant_schema is missing on the User, recover it from the Tenant table and persist it.
+    If tenant_schema is missing, recover it from the Tenant table or infer from chat_id.
+    Ensures we always pass a correct tenant_db_url format to get_tenant_session().
     """
     user = db.query(User).filter(User.chat_id == chat_id).first()
-    tenant_db_url = getattr(user, "tenant_schema", None)
+    tenant_schema = getattr(user, "tenant_schema", None)
+    base_url = os.getenv("DATABASE_URL")
 
-    if not tenant_db_url:
+    if not base_url:
+        logger.error("❌ DATABASE_URL not set — cannot create tenant session.")
+        return None
+
+    # Recover schema if missing
+    if not tenant_schema:
         tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
         if tenant and tenant.database_url:
-            tenant_db_url = tenant.database_url
-            user.tenant_schema = tenant_db_url
+            tenant_schema = tenant.database_url.split("#")[-1] if "#" in tenant.database_url else f"tenant_{chat_id}"
+            user.tenant_schema = tenant_schema
             db.commit()
-            logger.info(f"✅ Persisted tenant_db_url for {user.username}: {tenant_db_url}")
+            logger.info(f"✅ Persisted tenant_schema '{tenant_schema}' for {user.username}")
         else:
-            logger.warning(f"⚠️ No tenant DB found for chat_id={chat_id}")
-            return None
+            tenant_schema = f"tenant_{chat_id}"
+            user.tenant_schema = tenant_schema
+            db.commit()
+            logger.warning(f"⚠️ Created fallback tenant_schema '{tenant_schema}' for chat_id={chat_id}")
 
-    return get_tenant_session(tenant_db_url, chat_id)
+    # Construct valid URL for get_tenant_session
+    tenant_db_url = f"{base_url}#{tenant_schema}"
+
+    # Log what we’re actually using
+    logger.info(f"🔗 Creating tenant session using schema '{tenant_schema}' for chat_id={chat_id}")
+
+    # Create and return a tenant-bound session
+    try:
+        return get_tenant_session(tenant_db_url, chat_id)
+    except Exception as e:
+        logger.error(f"❌ Failed to get tenant session for chat_id={chat_id}: {e}")
+        return None
 
 def main_menu(role: str):
     if role == "owner":
@@ -927,45 +947,43 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                 # -------------------- Ensure tenant schema for owners --------------------
                 if user.role == "owner":
-                    tenant_db_url = None
                     try:
-                        if not user.tenant_schema:
-                            # Create a new tenant database if not linked
-                            tenant_db_url = create_tenant_db(user.chat_id)
-                            user.tenant_schema = tenant_db_url
-                            db.commit()
-                            logger.info(f"✅ Tenant schema created for owner {user.username}: {tenant_db_url}")
-                        else:
-                            tenant_db_url = user.tenant_schema
-                            logger.info(f"ℹ️ Existing tenant schema found for {user.username}: {tenant_db_url}")
+                        schema_name = f"tenant_{chat_id}"
 
-                        # ✅ Ensure tenant record exists in central table
-                        existing_tenant = db.query(Tenant).filter(Tenant.tenant_id == str(chat_id)).first()
+                        # ✅ Create tenant schema if not exists
+                        tenant_db_url = create_tenant_db(chat_id)
+
+                        # ✅ Always store only schema name in user.tenant_schema
+                        if not user.tenant_schema or user.tenant_schema != schema_name:
+                            user.tenant_schema = schema_name
+                            db.commit()
+                            logger.info(f"✅ Linked user {user.username} to tenant schema '{schema_name}'")
+
+                        # ✅ Ensure tenant record exists or update
+                        existing_tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
                         if not existing_tenant:
                             new_tenant = Tenant(
                                 tenant_id=str(chat_id),
                                 store_name=f"Owner{chat_id}",
                                 telegram_owner_id=chat_id,
-                                database_url=tenant_db_url
+                                database_url=tenant_db_url,
                             )
                             db.add(new_tenant)
                             db.commit()
                             logger.info(f"✅ Tenant record added for owner {user.username}")
+                        else:
+                            existing_tenant.database_url = tenant_db_url
+                            db.commit()
+                            logger.info(f"ℹ️ Tenant record updated for owner {user.username}")
 
                         # ✅ Initialize tenant tables
-                        base_url, schema_name = (
+                        base_url, schema = (
                             tenant_db_url.split("#", 1)
                             if "#" in tenant_db_url
                             else (tenant_db_url, "public")
                         )
-                        ensure_tenant_tables(base_url, schema_name)
-                        logger.info(f"✅ Tenant tables ensured for {user.username} in schema '{schema_name}'")
-
-                        # ✅ Always re-link tenant_schema to user in case it was missing
-                        if not user.tenant_schema or user.tenant_schema != tenant_db_url:
-                            user.tenant_schema = tenant_db_url
-                            db.commit()
-                            logger.info(f"✅ Linked tenant schema for {user.username}: {tenant_db_url}")
+                        ensure_tenant_tables(base_url, schema)
+                        logger.info(f"✅ Tenant tables ensured for {user.username} in schema '{schema}'")
 
                     except Exception as e:
                         logger.error(f"❌ Failed to create tenant schema for owner {user.username}: {e}")

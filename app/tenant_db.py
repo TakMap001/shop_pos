@@ -198,3 +198,4 @@ def get_tenant_session(tenant_db_url: str, chat_id: int = None):
     except Exception as e:
         logger.error(f"❌ Failed to create tenant engine for schema '{schema_name}': {e}")
         raise
+
