@@ -1122,13 +1122,33 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Cart Management Callbacks --------------------
             elif text == "add_another_item":
-                # ✅ Preserve existing cart data
-                user_states[chat_id] = {"action": "awaiting_sale", "step": 1, "data": data}
+                logger.info(f"🎯 Processing callback: add_another_item from chat_id={chat_id}")
+    
+                # ✅ CRITICAL FIX: Get current state from user_states, not callback data
+                current_state = user_states.get(chat_id, {})
+                current_data = current_state.get("data", {})
+    
+                # Debug logging
+                logger.info(f"🔍 CART DEBUG [add_another_item] - Chat: {chat_id}, Items: {len(current_data.get('cart', []))}")
+    
+                # Preserve existing cart and data
+                user_states[chat_id] = {
+                    "action": "awaiting_sale", 
+                    "step": 1, 
+                    "data": current_data  # This preserves the cart!
+                }
                 send_message(chat_id, "➕ Add another item. Enter product name:")
                 return {"ok": True}
-                
+    
             elif text == "view_cart":
-                cart = data.get("cart", [])
+                # ✅ FIX: Get cart from current state, not callback data
+                current_state = user_states.get(chat_id, {})
+                current_data = current_state.get("data", {})
+                cart = current_data.get("cart", [])
+    
+                # Debug logging
+                logger.info(f"🔍 CART DEBUG [view_cart] - Chat: {chat_id}, Items: {len(cart)}")
+    
                 cart_summary = get_cart_summary(cart)
                 kb_rows = [
                     [{"text": "➕ Add Item", "callback_data": "add_another_item"}],
@@ -1138,32 +1158,107 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 ]
                 send_message(chat_id, cart_summary, {"inline_keyboard": kb_rows})
                 return {"ok": True}
-                
+    
             elif text == "remove_item":
-                cart = data.get("cart", [])
+                # ✅ FIX: Get cart from current state
+                current_state = user_states.get(chat_id, {})
+                current_data = current_state.get("data", {})
+                cart = current_data.get("cart", [])
+    
+                # Debug logging
+                logger.info(f"🔍 CART DEBUG [remove_item] - Chat: {chat_id}, Items: {len(cart)}")
+    
                 if not cart:
                     send_message(chat_id, "🛒 Cart is empty. Add items first.")
                     return {"ok": True}
-                
+    
                 kb_rows = []
                 for i, item in enumerate(cart, 1):
                     kb_rows.append([{"text": f"Remove: {item['name']} ({item['quantity']})", "callback_data": f"remove_cart_item:{i-1}"}])
                 kb_rows.append([{"text": "⬅️ Back to Cart", "callback_data": "view_cart"}])
-                
+    
                 send_message(chat_id, "🗑 Select item to remove:", {"inline_keyboard": kb_rows})
                 return {"ok": True}
-                
+
+            elif text == "checkout_cart":
+                logger.info(f"🎯 Processing callback: checkout_cart from chat_id={chat_id}")
+    
+                # ✅ FIX: Get cart from current state
+                current_state = user_states.get(chat_id, {})
+                current_data = current_state.get("data", {})
+                cart = current_data.get("cart", [])
+    
+                # Debug logging
+                logger.info(f"🔍 CART DEBUG [checkout_cart] - Chat: {chat_id}, Items: {len(cart)}")
+    
+                if not cart:
+                    send_message(chat_id, "❌ Cart is empty! Add items first.")
+                    return {"ok": True}
+    
+                # Move to checkout step
+                user_states[chat_id] = {
+                    "action": "awaiting_sale", 
+                    "step": 3, 
+                    "data": current_data  # Preserve cart for checkout
+                }
+    
+                # Show payment options
+                kb_rows = [
+                    [{"text": "💵 Full Payment", "callback_data": "payment_type:full"}],
+                    [{"text": "📋 Partial Payment", "callback_data": "payment_type:partial"}],
+                    [{"text": "🔄 Credit Sale", "callback_data": "payment_type:credit"}],
+                    [{"text": "⬅️ Back to Cart", "callback_data": "view_cart"}]
+                ]
+    
+                cart_summary = get_cart_summary(cart)
+                total = sum(item["subtotal"] for item in cart)
+                message = f"🛒 Checkout\n\n{cart_summary}\n💰 Total: ${total:.2f}\n\n💳 Select payment type:"
+    
+                send_message(chat_id, message, {"inline_keyboard": kb_rows})
+                return {"ok": True}
+
+            elif text == "cancel_sale":
+                logger.info(f"🎯 Processing callback: cancel_sale from chat_id={chat_id}")
+    
+                # Debug logging before clearing
+                current_state = user_states.get(chat_id, {})
+                current_data = current_state.get("data", {})
+                cart = current_data.get("cart", [])
+                logger.info(f"🔍 CART DEBUG [cancel_sale] - Chat: {chat_id}, Items: {len(cart)}")
+    
+                user_states.pop(chat_id, None)
+                send_message(chat_id, "❌ Sale cancelled.")
+                kb = main_menu(user.role)
+                send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+                return {"ok": True}
+
+            # Handle remove cart item callbacks
             elif text.startswith("remove_cart_item:"):
+                # ✅ FIX: Get cart from current state
+                current_state = user_states.get(chat_id, {})
+                current_data = current_state.get("data", {})
+                cart = current_data.get("cart", [])
+    
+                # Debug logging before removal
+                logger.info(f"🔍 CART DEBUG [before_remove] - Chat: {chat_id}, Items: {len(cart)}")
+    
                 try:
-                    item_index = int(text.split(":")[1])
-                    cart = data.get("cart", [])
-                    if 0 <= item_index < len(cart):
-                        removed_item = cart.pop(item_index)
-                        send_message(chat_id, f"🗑 Removed: {removed_item['name']}")
-                        
-                        # ✅ Update state with modified cart
-                        user_states[chat_id] = {"action": "awaiting_sale", "step": 1, "data": data}
-                        
+                    index = int(text.split(":")[1])
+                    if 0 <= index < len(cart):
+                        removed_item = cart.pop(index)
+            
+                        # Update the state with modified cart
+                        user_states[chat_id] = {
+                            "action": "awaiting_sale",
+                            "step": 1, 
+                            "data": current_data
+                        }
+            
+                        # Debug logging after removal
+                        logger.info(f"🔍 CART DEBUG [after_remove] - Chat: {chat_id}, Items: {len(cart)}")
+            
+                        send_message(chat_id, f"✅ Removed: {removed_item['name']}")
+            
                         # Show updated cart
                         cart_summary = get_cart_summary(cart)
                         kb_rows = [
@@ -1178,25 +1273,31 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 except (ValueError, IndexError):
                     send_message(chat_id, "❌ Error removing item.")
                 return {"ok": True}
-                
-            elif text == "checkout_cart":
-                cart = data.get("cart", [])
-                if not cart:
-                    send_message(chat_id, "🛒 Cart is empty. Add items first.")
-                    return {"ok": True}
-                
-                # ✅ CRITICAL: Update state with cart data and move to checkout step
-                user_states[chat_id] = {"action": "awaiting_sale", "step": 3, "data": data}
-                send_message(chat_id, "💰 Enter payment type (full, partial, credit):")
+
+            # Handle payment type selection
+            elif text.startswith("payment_type:"):
+                payment_type = text.split(":")[1]
+    
+                # ✅ FIX: Get current state
+                current_state = user_states.get(chat_id, {})
+                current_data = current_state.get("data", {})
+    
+                # Debug logging
+                cart = current_data.get("cart", [])
+                logger.info(f"🔍 CART DEBUG [payment_type] - Chat: {chat_id}, Items: {len(cart)}, Type: {payment_type}")
+    
+                current_data["payment_type"] = payment_type
+                user_states[chat_id] = {
+                    "action": "awaiting_sale", 
+                    "step": 4, 
+                    "data": current_data
+                }
+    
+                cart = current_data.get("cart", [])
+                total = sum(item["subtotal"] for item in cart)
+                send_message(chat_id, f"💰 Cart Total: ${total:.2f}\n💵 Enter amount tendered by customer:")
                 return {"ok": True}
-                
-            elif text == "cancel_sale":
-                user_states.pop(chat_id, None)
-                send_message(chat_id, "❌ Sale cancelled.")
-                kb = main_menu(user.role)
-                send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
-                return {"ok": True}
-                
+                                    
                 
             # -------------------- View Stock --------------------
             elif text == "view_stock":
@@ -1957,11 +2058,14 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         return {"ok": True}
 
                     data = state.get("data", {})
-                    
+    
                     # Initialize cart if not exists
                     if "cart" not in data:
-                        data["cart"] = []  # List of items: {product_id, name, price, quantity, unit_type, subtotal}
-
+                        data["cart"] = []
+    
+                    # DEBUG: Log cart state at the start of each sale interaction
+                    logger.info(f"🔍 CART DEBUG [sale_start] - Chat: {chat_id}, Items: {len(data['cart'])}")
+    
                     # STEP 1: search by product name (Add to cart)
                     if step == 1:
                         if not text or not text.strip():
