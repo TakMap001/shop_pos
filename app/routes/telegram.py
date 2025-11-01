@@ -1749,35 +1749,40 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     active_schema = tenant_db.execute(text("SHOW search_path")).scalar()
                     logger.info(f"🧭 Active search_path: {active_schema}")
 
+                    # 📊 Quick row count
                     count = tenant_db.execute(text("SELECT COUNT(*) FROM products")).scalar()
                     logger.info(f"📦 Product count in schema: {count}")
 
-                    # -------------------- Debug Diagnostics --------------------
+                    # -------------------- Deep Debug Diagnostics --------------------
                     try:
                         logger.info("🔍 Running tenant ORM diagnostics...")
 
-                        # Check search_path
+                        # Check search_path again for confirmation
                         current_schema = tenant_db.execute(text("SHOW search_path")).scalar()
-                        logger.info(f"🧭 Active search_path: {current_schema}")
+                        logger.info(f"🧭 Active search_path (confirm): {current_schema}")
 
-                        # Check which schema SQL sees
+                        # List all schemas that have a 'products' table
                         schema_check = tenant_db.execute(text("""
-                            SELECT table_schema, COUNT(*) AS total_rows
-                            FROM information_schema.tables t
-                            JOIN pg_tables p ON p.tablename = t.table_name
-                            WHERE t.table_name = 'products'
+                            SELECT table_schema, COUNT(*) AS total_tables
+                            FROM information_schema.tables
+                            WHERE table_name = 'products'
                             GROUP BY table_schema
-                            ORDER BY table_schema
+                            ORDER BY table_schema;
                         """)).fetchall()
                         logger.info(f"🏗️ Table presence by schema: {schema_check}")
 
-                        # Check where ORM sees records
-                        sql_count = tenant_db.execute(text("SELECT COUNT(*) FROM products")).scalar()
-                        logger.info(f"📦 Direct SQL count (products): {sql_count}")
+                        # ✅ NEW: Show visible products
+                        visible_products = tenant_db.execute(text("SELECT product_id, name, stock FROM products ORDER BY product_id")).fetchall()
+                        logger.info(f"📋 Visible products in current schema: {visible_products}")
 
-                    except Exception as e:
-                        logger.error(f"❌ Debug diagnostics failed: {e}")
+                        # ✅ NEW: Check ORM perspective explicitly
+                        all_orm_products = tenant_db.query(ProductORM).all()
+                        logger.info(f"🧱 ORM sees {len(all_orm_products)} products: {[p.name for p in all_orm_products]}")
 
+                    except Exception as diag_e:
+                        logger.error(f"❌ Debug diagnostics failed: {diag_e}", exc_info=True)
+
+                    # 🚀 Fetch the specific product
                     product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
                     logger.info(f"📦 ORM product result for ID {product_id}: {product}")
 
