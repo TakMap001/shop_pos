@@ -1754,57 +1754,64 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "⚠️ Cannot fetch products: tenant DB unavailable.")
 
 
-            # -------------------- Product Selection / Multiple Buttons --------------------
+            # -------------------- Product Selection / Multiple Buttons (Diagnostic Mode) --------------------
             elif action.startswith("select_update:") or action.startswith("select_product:"):
-                logger.debug(f"🧩 Callback triggered: {action} from chat_id {chat_id}")
+                logger.info(f"🧩 Callback triggered: {action} from chat_id {chat_id}")
 
-                # ✅ Always derive tenant session dynamically (not from user.tenant_schema)
                 tenant_db = ensure_tenant_session(chat_id, db)
                 if not tenant_db:
-                    send_message(chat_id, "⚠️ Tenant database unavailable. Please restart with /start.")
+                    send_message(chat_id, "⚠️ Tenant DB unavailable. Please restart with /start.")
                     return {"ok": True}
 
-                # Extract product ID safely
                 try:
                     product_id = int(action.split(":")[1])
-                    logger.debug(f"🔹 Extracted product_id: {product_id}")
+                    logger.info(f"🔹 Parsed product_id={product_id}")
                 except (IndexError, ValueError):
-                    send_message(chat_id, "⚠️ Invalid product selection.")
+                    send_message(chat_id, "⚠️ Invalid selection format.")
                     return {"ok": True}
 
-                # ✅ Direct fetch from tenant schema session
+                # 👇 DIAGNOSTIC QUERY — LIST EVERYTHING IN DB
+                try:
+                    all_products = tenant_db.query(ProductORM).all()
+                    logger.info(f"📋 Total products in tenant schema: {len(all_products)}")
+                    for p in all_products:
+                        logger.info(f"🧾 Product: id={p.product_id}, name={p.name}, stock={p.stock}, unit={p.unit_type}")
+                except Exception as e:
+                    logger.exception(f"❌ Could not list products: {e}")
+                    send_message(chat_id, "❌ Failed to inspect products in tenant DB.")
+                    return {"ok": True}
+
+                # ✅ Now fetch by ID
                 try:
                     product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
-                    logger.debug(f"📦 Product fetch result for ID {product_id}: {product}")
+                    logger.info(f"📦 Product fetch result for ID {product_id}: {product}")
                 except Exception as e:
-                    logger.error(f"❌ DB fetch failed for product_id={product_id}: {e}")
-                    send_message(chat_id, "⚠️ Database error while fetching product.")
+                    logger.exception(f"❌ DB fetch failed for product_id={product_id}: {e}")
+                    send_message(chat_id, "⚠️ Error fetching product details.")
                     return {"ok": True}
 
-                # Handle not found
                 if not product:
                     logger.warning(f"⚠️ Product with ID {product_id} not found in tenant schema.")
                     kb = types.InlineKeyboardMarkup()
                     kb.add(types.InlineKeyboardButton("🏠 Back to Main Menu", callback_data="back_to_menu"))
                     send_message(chat_id, f"⚠️ No product found matching ID {product_id}.", kb)
                     return {"ok": True}
-
-                # ✅ Product found, begin interactive update flow
+     
+                # ✅ If found, continue
                 safe_name_html = html.escape(product.name)
                 text_msg = (
                     f"✏️ Updating <b>{safe_name_html}</b>\n"
                     "Please enter the new name or send '-' to keep the current name:"
                 )
 
-                # Clear old state and begin update process
                 user_states.pop(chat_id, None)
                 user_states[chat_id] = {
                     "action": "awaiting_update",
-                    "step": 2,  # Start at the rename step
+                    "step": 2,
                     "data": {"product_id": product_id},
                 }
 
-                send_message(chat_id, text_msg, keyboard=None, parse_mode="HTML")
+                send_message(chat_id, text_msg, parse_mode="HTML")
                 return {"ok": True}
 
 
