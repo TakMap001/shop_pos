@@ -1758,6 +1758,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             elif action.startswith("select_update:") or action.startswith("select_product:"):
                 logger.debug(f"🧩 Callback triggered: {action} from chat_id {chat_id}")
 
+                # ✅ Always derive tenant session dynamically (not from user.tenant_schema)
                 tenant_db = ensure_tenant_session(chat_id, db)
                 if not tenant_db:
                     send_message(chat_id, "⚠️ Tenant database unavailable. Please restart with /start.")
@@ -1766,40 +1767,44 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 # Extract product ID safely
                 try:
                     product_id = int(action.split(":")[1])
+                    logger.debug(f"🔹 Extracted product_id: {product_id}")
                 except (IndexError, ValueError):
                     send_message(chat_id, "⚠️ Invalid product selection.")
                     return {"ok": True}
 
-                # Fetch product cleanly
-                product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
-                logger.debug(f"📦 Product fetch result for ID {product_id}: {product}")
+                    # ✅ Direct fetch from tenant schema session
+                try:
+                    product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
+                    logger.debug(f"📦 Product fetch result for ID {product_id}: {product}")
+                except Exception as e:
+                    logger.error(f"❌ DB fetch failed for product_id={product_id}: {e}")
+                    send_message(chat_id, "⚠️ Database error while fetching product.")
+                    return {"ok": True}
 
+                # Handle not found
                 if not product:
-                    # Add a return button for convenience
+                    logger.warning(f"⚠️ Product with ID {product_id} not found in tenant schema.")
                     kb = types.InlineKeyboardMarkup()
                     kb.add(types.InlineKeyboardButton("🏠 Back to Main Menu", callback_data="back_to_menu"))
                     send_message(chat_id, f"⚠️ No product found matching ID {product_id}.", kb)
                     return {"ok": True}
 
-                # Clear any stale state before continuing
-                user_states.pop(chat_id, None)
-
+                # ✅ Product found, begin interactive update flow
                 safe_name_html = html.escape(product.name)
-
-                # Start interactive update process (step 2)
                 text_msg = (
                     f"✏️ Updating <b>{safe_name_html}</b>\n"
                     "Please enter the new name or send '-' to keep the current name:"
                 )
-                send_message(chat_id, text_msg, keyboard=None, parse_mode="HTML")
 
-                # Save user state for next step
+                # Clear old state and begin update process
+                user_states.pop(chat_id, None)
                 user_states[chat_id] = {
                     "action": "awaiting_update",
-                    "step": 2,  # move directly into step 2 (update flow)
+                    "step": 2,  # Start at the rename step
                     "data": {"product_id": product_id},
                 }
 
+                send_message(chat_id, text_msg, keyboard=None, parse_mode="HTML")
                 return {"ok": True}
 
 
