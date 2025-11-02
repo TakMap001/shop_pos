@@ -30,6 +30,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import re
 import html
 from app.models.models import User
+from app.tenant_utils import create_tenant_schema
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -525,40 +526,51 @@ def get_cart_summary(cart):
 def record_cart_sale(tenant_db, chat_id, data):
     """Record a sale from cart data"""
     try:
-        # ✅ Ensure user exists in tenant DB
-        tenant_user = tenant_db.query(User).filter(User.user_id == chat_id).first()
-        if not tenant_user:
-            # Create user in tenant DB if not exists
-            from app.models.models import User as TenantUser
-            tenant_user = TenantUser(
-                user_id=chat_id,
-                name="Owner",  # You might want to get this from central DB
-                email=f"{chat_id}@example.com",
-                password_hash="",
-                role="owner"
-            )
-            tenant_db.add(tenant_user)
-            tenant_db.commit()
+        # ✅ Handle CUSTOMER creation in tenant DB if needed
+        customer_id = None
+        if data.get("customer_name"):
+            # Create or find customer in Tenant DB customers table
+            customer = tenant_db.query(CustomerORM).filter(
+                CustomerORM.name == data["customer_name"]
+            ).first()
+            
+            if not customer:
+                customer = CustomerORM(
+                    name=data["customer_name"],
+                    contact=data.get("customer_contact", "")
+                )
+                tenant_db.add(customer)
+                tenant_db.flush()  # Get customer_id without commit
+                customer_id = customer.customer_id
+                logger.info(f"✅ Created new CUSTOMER in tenant DB: {data['customer_name']}")
+            else:
+                customer_id = customer.customer_id
         
         # Record each item in cart as separate sale
         for item in data["cart"]:
-            sale_data = {
-                "product_id": item["product_id"],
-                "quantity": item["quantity"],
-                "unit_type": item["unit_type"],
-                "payment_type": data["payment_type"],
-                "amount_paid": data.get("amount_paid", 0),
-                "pending_amount": data.get("pending_amount", 0),
-                "change_left": data.get("change_left", 0),
-                "customer_name": data.get("customer_name"),
-                "customer_contact": data.get("customer_contact")
-            }
-            record_sale(tenant_db, chat_id, sale_data)
+            sale = SaleORM(
+                user_id=chat_id,  # Shopkeeper ID from Telegram
+                product_id=item["product_id"],
+                customer_id=customer_id,  # References customer from tenant DB (or None)
+                quantity=item["quantity"],
+                unit_type=item["unit_type"],
+                total_amount=item["subtotal"],
+                payment_type=data.get("payment_type", "full"),
+                amount_paid=data.get("amount_paid", 0),
+                pending_amount=data.get("pending_amount", 0),
+                change_left=data.get("change_left", 0),
+                sale_date=datetime.utcnow()
+            )
+            tenant_db.add(sale)
+        
+        # Commit all sales and customer (if created)
+        tenant_db.commit()
         
         # Show final receipt
         receipt = f"✅ *Sale Completed Successfully!*\n\n"
         receipt += get_cart_summary(data["cart"])
-        receipt += f"\n💳 Payment: {data['payment_type'].title()}\n"
+        receipt += f"\n💳 Payment Method: {data.get('payment_method', 'cash').title()}\n"
+        receipt += f"💰 Sale Type: {data.get('sale_type', 'cash').title()}\n"
         receipt += f"💵 Amount Paid: ${data.get('amount_paid', 0):.2f}\n"
         
         if data.get("change_left", 0) > 0:
@@ -567,16 +579,17 @@ def record_cart_sale(tenant_db, chat_id, data):
             receipt += f"📋 Pending: ${data['pending_amount']:.2f}\n"
         if data.get("customer_name"):
             receipt += f"👤 Customer: {data['customer_name']}\n"
-        if data.get("customer_contact"):
-            receipt += f"📞 Contact: {data['customer_contact']}\n"
             
         send_message(chat_id, receipt)
+        logger.info(f"✅ Sale recorded successfully for chat_id: {chat_id}")
         return True
         
     except Exception as e:
         logger.error(f"❌ Cart sale recording failed: {e}")
+        tenant_db.rollback()
+        send_message(chat_id, f"❌ Failed to record sale: {str(e)}")
         return False
-        
+                        
         
 def record_sale(db: Session, chat_id: int, data: dict):
     """
@@ -1133,11 +1146,10 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             elif text == "add_another_item":
                 logger.info(f"🎯 Processing callback: add_another_item from chat_id={chat_id}")
     
-                # ✅ CRITICAL FIX: Get current state from user_states, not callback data
+                # ✅ FIX: Get current state from user_states, not callback data
                 current_state = user_states.get(chat_id, {})
                 current_data = current_state.get("data", {})
     
-                # Debug logging
                 logger.info(f"🔍 CART DEBUG [add_another_item] - Chat: {chat_id}, Items: {len(current_data.get('cart', []))}")
     
                 # Preserve existing cart and data
@@ -1155,7 +1167,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 current_data = current_state.get("data", {})
                 cart = current_data.get("cart", [])
     
-                # Debug logging
                 logger.info(f"🔍 CART DEBUG [view_cart] - Chat: {chat_id}, Items: {len(cart)}")
     
                 cart_summary = get_cart_summary(cart)
@@ -1174,7 +1185,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 current_data = current_state.get("data", {})
                 cart = current_data.get("cart", [])
     
-                # Debug logging
                 logger.info(f"🔍 CART DEBUG [remove_item] - Chat: {chat_id}, Items: {len(cart)}")
     
                 if not cart:
@@ -1197,7 +1207,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 current_data = current_state.get("data", {})
                 cart = current_data.get("cart", [])
     
-                # Debug logging
                 logger.info(f"🔍 CART DEBUG [checkout_cart] - Chat: {chat_id}, Items: {len(cart)}")
     
                 if not cart:
@@ -1211,17 +1220,17 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     "data": current_data  # Preserve cart for checkout
                 }
     
-                # Show payment options
+                # Show payment options - UPDATED: Cash, Ecocash, Swipe
                 kb_rows = [
-                    [{"text": "💵 Full Payment", "callback_data": "payment_type:full"}],
-                    [{"text": "📋 Partial Payment", "callback_data": "payment_type:partial"}],
-                    [{"text": "🔄 Credit Sale", "callback_data": "payment_type:credit"}],
+                    [{"text": "💵 Cash", "callback_data": "payment_method:cash"}],
+                    [{"text": "📱 Ecocash", "callback_data": "payment_method:ecocash"}],
+                    [{"text": "💳 Swipe", "callback_data": "payment_method:swipe"}],
                     [{"text": "⬅️ Back to Cart", "callback_data": "view_cart"}]
                 ]
     
                 cart_summary = get_cart_summary(cart)
                 total = sum(item["subtotal"] for item in cart)
-                message = f"🛒 Checkout\n\n{cart_summary}\n💰 Total: ${total:.2f}\n\n💳 Select payment type:"
+                message = f"🛒 Checkout\n\n{cart_summary}\n💰 Total: ${total:.2f}\n\n💳 Select payment method:"
     
                 send_message(chat_id, message, {"inline_keyboard": kb_rows})
                 return {"ok": True}
@@ -1229,7 +1238,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             elif text == "cancel_sale":
                 logger.info(f"🎯 Processing callback: cancel_sale from chat_id={chat_id}")
     
-                # Debug logging before clearing
                 current_state = user_states.get(chat_id, {})
                 current_data = current_state.get("data", {})
                 cart = current_data.get("cart", [])
@@ -1248,7 +1256,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 current_data = current_state.get("data", {})
                 cart = current_data.get("cart", [])
     
-                # Debug logging before removal
                 logger.info(f"🔍 CART DEBUG [before_remove] - Chat: {chat_id}, Items: {len(cart)}")
     
                 try:
@@ -1263,7 +1270,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             "data": current_data
                         }
             
-                        # Debug logging after removal
                         logger.info(f"🔍 CART DEBUG [after_remove] - Chat: {chat_id}, Items: {len(cart)}")
             
                         send_message(chat_id, f"✅ Removed: {removed_item['name']}")
@@ -1283,31 +1289,199 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "❌ Error removing item.")
                 return {"ok": True}
 
-            # Handle payment type selection
-            elif text.startswith("payment_type:"):
-                payment_type = text.split(":")[1]
+            # ✅ NEW: Handle product selection from multiple matches
+            elif text.startswith("select_sale:"):
+                try:
+                    product_id = int(text.split(":")[1])
+        
+                    # ✅ CRITICAL: Get current state to preserve cart
+                    current_state = user_states.get(chat_id, {})
+                    current_data = current_state.get("data", {})
+        
+                    logger.info(f"🔍 CART DEBUG [select_sale] - Chat: {chat_id}, Items: {len(current_data.get('cart', []))}")
+        
+                    # Ensure tenant session is available
+                    tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                    if tenant_db is None:
+                        send_message(chat_id, "❌ Unable to access tenant database.")
+                        return {"ok": True}
+        
+                    # Find the selected product
+                    product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
+                    if not product:
+                        send_message(chat_id, "❌ Product not found. Please try again.")
+                        return {"ok": True}
+        
+                    # Store selected product and preserve existing cart
+                    current_data["current_product"] = {
+                        "product_id": product.product_id,
+                        "name": product.name,
+                        "price": float(product.price),
+                        "unit_type": product.unit_type,
+                        "available_stock": product.stock
+                    }
+        
+                    # Update state with preserved cart and new product
+                    user_states[chat_id] = {
+                        "action": "awaiting_sale", 
+                        "step": 2, 
+                        "data": current_data  # This preserves the cart!
+                    }
+        
+                    send_message(chat_id, f"📦 Selected {product.name} ({product.unit_type}). Enter quantity to add:")
+        
+                except (ValueError, IndexError):
+                    send_message(chat_id, "❌ Invalid product selection.")
     
-                # ✅ FIX: Get current state
+                return {"ok": True}
+
+            # ✅ NEW: Payment method selection
+            elif text.startswith("payment_method:"):
+                payment_method = text.split(":")[1]
+    
+                # Get current state
                 current_state = user_states.get(chat_id, {})
                 current_data = current_state.get("data", {})
     
-                # Debug logging
-                cart = current_data.get("cart", [])
-                logger.info(f"🔍 CART DEBUG [payment_type] - Chat: {chat_id}, Items: {len(cart)}, Type: {payment_type}")
+                logger.info(f"🔍 CART DEBUG [payment_method] - Chat: {chat_id}, Items: {len(current_data.get('cart', []))}, Method: {payment_method}")
     
-                current_data["payment_type"] = payment_type
-                user_states[chat_id] = {
-                    "action": "awaiting_sale", 
-                    "step": 4, 
-                    "data": current_data
-                }
+                current_data["payment_method"] = payment_method
     
-                cart = current_data.get("cart", [])
-                total = sum(item["subtotal"] for item in cart)
-                send_message(chat_id, f"💰 Cart Total: ${total:.2f}\n💵 Enter amount tendered by customer:")
+                if payment_method == "cash":
+                    # For cash, ask for sale type (cash/credit)
+                    user_states[chat_id] = {
+                        "action": "awaiting_sale", 
+                        "step": 3.1, 
+                        "data": current_data
+                    }
+        
+                    kb_rows = [
+                        [{"text": "💵 Cash Sale", "callback_data": "sale_type:cash"}],
+                        [{"text": "🔄 Credit Sale", "callback_data": "sale_type:credit"}],
+                        [{"text": "⬅️ Back", "callback_data": "view_cart"}]
+                    ]
+        
+                    cart_total = sum(item["subtotal"] for item in current_data["cart"])
+                    send_message(chat_id, f"💰 Cart Total: ${cart_total:.2f}\n\n💳 Select sale type:", {"inline_keyboard": kb_rows})
+    
+                else:
+                    # For Ecocash/Swipe, it's always full payment
+                    current_data["sale_type"] = "cash"
+                    current_data["payment_type"] = "full"
+                    current_data["amount_paid"] = sum(item["subtotal"] for item in current_data["cart"])
+                    current_data["pending_amount"] = 0
+                    current_data["change_left"] = 0
+        
+                    user_states[chat_id] = {
+                        "action": "awaiting_sale", 
+                        "step": 6, 
+                        "data": current_data
+                    }
+                    send_message(chat_id, f"✅ {payment_method.title()} payment confirmed.\n\nConfirm sale? (yes/no)")
+    
                 return {"ok": True}
-                                    
-                
+
+            # ✅ NEW: Sale type selection for cash
+            elif text.startswith("sale_type:"):
+                sale_type = text.split(":")[1]
+    
+                current_state = user_states.get(chat_id, {})
+                current_data = current_state.get("data", {})
+    
+                current_data["sale_type"] = sale_type
+    
+                if sale_type == "cash":
+                    # For cash sales, ask for amount tendered
+                    current_data["payment_type"] = "full"
+                    user_states[chat_id] = {
+                        "action": "awaiting_sale", 
+                        "step": 4, 
+                        "data": current_data
+                    }
+        
+                    cart_total = sum(item["subtotal"] for item in current_data["cart"])
+                    send_message(chat_id, f"💰 Cart Total: ${cart_total:.2f}\n💵 Enter cash amount tendered by customer:")
+    
+                else:  # credit
+                    # For credit sales, ask for credit type
+                    user_states[chat_id] = {
+                        "action": "awaiting_sale", 
+                        "step": 3.2, 
+                        "data": current_data
+                    }
+        
+                    kb_rows = [
+                        [{"text": "💰 Full Credit", "callback_data": "credit_type:full"}],
+                        [{"text": "📋 Partial Credit", "callback_data": "credit_type:partial"}],
+                        [{"text": "⬅️ Back", "callback_data": "view_cart"}]
+                    ]
+        
+                    cart_total = sum(item["subtotal"] for item in current_data["cart"])
+                    send_message(chat_id, f"💰 Cart Total: ${cart_total:.2f}\n\n💳 Select credit type:", {"inline_keyboard": kb_rows})
+    
+                return {"ok": True}
+
+            # ✅ NEW: Credit type selection
+            elif text.startswith("credit_type:"):
+                credit_type = text.split(":")[1]
+    
+                current_state = user_states.get(chat_id, {})
+                current_data = current_state.get("data", {})
+    
+                current_data["payment_type"] = credit_type
+    
+                if credit_type == "full":
+                    # Full credit - no payment, go to customer details
+                    current_data["amount_paid"] = 0
+                    current_data["pending_amount"] = sum(item["subtotal"] for item in current_data["cart"])
+                    current_data["change_left"] = 0
+        
+                    user_states[chat_id] = {
+                        "action": "awaiting_sale", 
+                        "step": 5, 
+                        "data": current_data
+                    }
+                    send_message(chat_id, "🔄 Full credit sale.\n👤 Enter customer name for credit follow-up:")
+    
+                else:  # partial
+                    # Partial credit - ask for amount paid
+                    user_states[chat_id] = {
+                        "action": "awaiting_sale", 
+                        "step": 4, 
+                        "data": current_data
+                    }
+        
+                    cart_total = sum(item["subtotal"] for item in current_data["cart"])
+                    send_message(chat_id, f"💰 Cart Total: ${cart_total:.2f}\n💵 Enter amount paid now (remaining will be credit):")
+    
+                return {"ok": True}
+
+            # ✅ NEW: Change availability check
+            elif text.startswith("has_change:"):
+                has_change = text.split(":")[1]
+    
+                current_state = user_states.get(chat_id, {})
+                current_data = current_state.get("data", {})
+    
+                if has_change == "yes":
+                    # Has change - no customer details needed
+                    user_states[chat_id] = {
+                        "action": "awaiting_sale", 
+                        "step": 6, 
+                        "data": current_data
+                    }
+                    send_message(chat_id, "✅ Change ready. Confirm sale? (yes/no)")
+                else:
+                    # No change - need customer details
+                    user_states[chat_id] = {
+                        "action": "awaiting_sale", 
+                        "step": 5, 
+                        "data": current_data
+                    }
+                    send_message(chat_id, "👤 Enter customer name (for change follow-up):")
+    
+                return {"ok": True}
+                    
             # -------------------- View Stock --------------------
             elif text == "view_stock":
                 tenant_db = get_tenant_session(user.tenant_schema, chat_id)
@@ -1400,8 +1574,14 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         try:
                             schema_name = f"tenant_{chat_id}"
 
-                            # ✅ Create tenant schema if not exists
-                            tenant_db_url = create_tenant_db(chat_id)
+                            # ✅ Create tenant schema if not exists with NEW method
+                            from app.tenant_utils import create_tenant_schema
+                            tenant_created = create_tenant_schema(schema_name)
+                            
+                            if not tenant_created:
+                                logger.error(f"❌ Failed to create tenant schema for owner {user.username}")
+                                send_message(chat_id, "❌ Could not initialize tenant database.")
+                                return {"ok": True}
 
                             # ✅ Always store only schema name in user.tenant_schema
                             if not user.tenant_schema or user.tenant_schema != schema_name:
@@ -1416,24 +1596,17 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                     tenant_id=str(chat_id),
                                     store_name=f"Owner{chat_id}",
                                     telegram_owner_id=chat_id,
-                                    database_url=tenant_db_url,
+                                    database_url=schema_name,  # Store schema name instead of full URL
                                 )
                                 db.add(new_tenant)
                                 db.commit()
                                 logger.info(f"✅ Tenant record added for owner {user.username}")
                             else:
-                                existing_tenant.database_url = tenant_db_url
+                                existing_tenant.database_url = schema_name
                                 db.commit()
                                 logger.info(f"ℹ️ Tenant record updated for owner {user.username}")
 
-                            # ✅ Initialize tenant tables
-                            base_url, schema = (
-                                tenant_db_url.split("#", 1)
-                                if "#" in tenant_db_url
-                                else (tenant_db_url, "public")
-                            )
-                            ensure_tenant_tables(base_url, schema)
-                            logger.info(f"✅ Tenant tables ensured for {user.username} in schema '{schema}'")
+                            logger.info(f"✅ Tenant schema '{schema_name}' created with all tables for {user.username}")
 
                         except Exception as e:
                             logger.error(f"❌ Failed to create tenant schema for owner {user.username}: {e}")
@@ -1458,10 +1631,19 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     db.commit()
                     db.refresh(new_user)
 
-                    # ✅ Create tenant schema immediately
+                    # ✅ Create tenant schema immediately with NEW method
                     try:
-                        tenant_db_url = create_tenant_db(chat_id)
-                        new_user.tenant_schema = tenant_db_url
+                        schema_name = f"tenant_{chat_id}"
+                        from app.tenant_utils import create_tenant_schema
+                        tenant_created = create_tenant_schema(schema_name)
+                        
+                        if not tenant_created:
+                            logger.error(f"❌ Failed to create tenant schema for new owner {generated_username}")
+                            send_message(chat_id, "❌ Could not initialize tenant database.")
+                            return {"ok": True}
+
+                        # Store schema name in user
+                        new_user.tenant_schema = schema_name
                         db.commit()
 
                         # ✅ Add tenant record to central table
@@ -1469,20 +1651,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             tenant_id=str(chat_id),
                             store_name=f"Owner{chat_id}",
                             telegram_owner_id=chat_id,
-                            database_url=tenant_db_url
+                            database_url=schema_name  # Store schema name instead of full URL
                         )
                         db.add(new_tenant)
                         db.commit()
                         logger.info(f"✅ Tenant record created for {generated_username}")
 
-                        # Initialize tenant tables
-                        base_url, schema_name = (
-                            tenant_db_url.split("#", 1)
-                            if "#" in tenant_db_url
-                            else (tenant_db_url, "public")
-                        )
-                        ensure_tenant_tables(base_url, schema_name)
-                        logger.info(f"✅ Tenant tables ensured for new owner {generated_username} in schema '{schema_name}'")
+                        logger.info(f"✅ Tenant schema '{schema_name}' created with all tables for new owner {generated_username}")
 
                     except Exception as e:
                         logger.error(f"❌ Failed to create tenant schema for new owner {generated_username}: {e}")
@@ -1494,7 +1669,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     user_states[chat_id] = {"action": "setup_shop", "step": 1, "data": {}}
 
                 return {"ok": True}
-
+                
 
             # -------------------- Login flow --------------------
             if chat_id in user_states:
@@ -1531,89 +1706,63 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, f"✅ Login successful! Welcome, {user.name}.")
                     user_states.pop(chat_id, None)
 
-                    # -------------------- Link tenant schema from Tenant table --------------------
+                    # -------------------- NEW: Ensure tenant schema exists --------------------
                     try:
-                        tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
-                        if tenant:
-                            # Prefer explicit tenant_schema field, fallback to database_url for backward compatibility
-                            user.tenant_schema = tenant.database_url
-                            db.commit()
-                            logger.info(f"✅ Tenant schema linked for {user.username}: {user.tenant_schema}")
-                        else:
-                            logger.warning(f"⚠️ No tenant record found for {user.username} ({chat_id})")
-                    except Exception as e:
-                        logger.error(f"⚠️ Tenant schema lookup failed for {user.username}: {e}")
-
-                    # -------------------- Ensure tenant schema --------------------
-                    tenant_db_url = None
-
-                    try:
+                        from app.tenant_utils import create_tenant_schema, check_tenant_tables_exist
+                        
                         if user.role == "owner":
-                            logger.debug(f"LOGIN DEBUG: Owner {user.username} tenant_schema = {user.tenant_schema}")
-                            if not user.tenant_schema:
-                                tenant_db_url = create_tenant_db(user.chat_id)
-                                user.tenant_schema = tenant_db_url
+                            # For owners, create/ensure their tenant schema
+                            schema_name = f"tenant_{chat_id}"
+                            
+                            # Check if tenant schema exists and has all tables
+                            table_check = check_tenant_tables_exist(schema_name)
+                            if not table_check["exists"]:
+                                logger.info(f"🔄 Creating missing tenant schema for {user.username}: {schema_name}")
+                                tenant_created = create_tenant_schema(schema_name)
+                                
+                                if not tenant_created:
+                                    logger.error(f"❌ Failed to create tenant schema for {user.username}")
+                                    send_message(chat_id, "❌ Could not initialize tenant database. Please contact support.")
+                                    return {"ok": True}
+                                
+                                # Update user with schema name
+                                user.tenant_schema = schema_name
                                 db.commit()
-                                logger.info(f"✅ Tenant schema created for owner {user.username}: {tenant_db_url}")
+                                logger.info(f"✅ Tenant schema created for {user.username}: {schema_name}")
                             else:
-                                tenant_db_url = user.tenant_schema
+                                logger.info(f"✅ Tenant schema verified for {user.username}: {schema_name}")
 
                         elif user.role == "shopkeeper":
+                            # For shopkeepers, get schema from their owner
                             owner = db.query(User).filter(User.user_id == user.owner_id).first()
                             if not owner or not owner.tenant_schema:
-                                send_message(chat_id, "❌ Unable to access tenant database. Contact support.")
+                                send_message(chat_id, "❌ Unable to access store database. Contact the store owner.")
                                 return {"ok": True}
-                            tenant_db_url = owner.tenant_schema
+                            
+                            schema_name = owner.tenant_schema
+                            user.tenant_schema = schema_name  # Link shopkeeper to owner's schema
+                            db.commit()
+                            logger.info(f"✅ Shopkeeper {user.username} linked to owner schema: {schema_name}")
 
-                        else:  # fallback
-                            tenant_db_url = user.tenant_schema
-
-                        # -------------------- Auto-create tenant record if missing --------------------
-                        if not tenant_db_url or tenant_db_url.endswith("#public"):
-                            tenant = db.query(Tenant).filter(Tenant.owner_id == user.user_id).first()
-                            if not tenant:
-                                logger.warning(f"⚠️ No tenant record found for {user.username} ({chat_id}). Creating new one...")
-                                tenant_db_url = create_tenant_db(user.chat_id)
-                                user.tenant_schema = tenant_db_url
-                                db.commit()
-                                logger.info(f"✅ Tenant schema created for {user.username}: {tenant_db_url}")
-                            else:
-                                tenant_db_url = tenant.database_url
-                                user.tenant_schema = tenant_db_url
-                                db.commit()
-                                logger.info(f"✅ Tenant schema restored for {user.username}: {tenant_db_url}")
-
-                        # -------------------- Tenant DB Initialization --------------------
-                        if not tenant_db_url:
-                            send_message(chat_id, "⚠️ Tenant database missing. Please contact support.")
-                            return {"ok": True}
-
-                        tenant_db = get_tenant_session(tenant_db_url, chat_id)
+                        # Verify tenant connection
+                        tenant_db = get_tenant_session(user.tenant_schema, chat_id)
                         if tenant_db is None:
-                            logger.warning(f"⚠️ Tenant DB connection failed for {user.username}: {tenant_db_url}")
-                            send_message(chat_id, "⚠️ Unable to access tenant database. Please contact support.")
+                            logger.error(f"❌ Tenant DB connection failed for {user.username}: {user.tenant_schema}")
+                            send_message(chat_id, "❌ Unable to access store database. Please contact support.")
                             return {"ok": True}
-
-                        # Extract base_url and schema_name for table creation
-                        if "#" in tenant_db_url:
-                            base_url, schema_name = tenant_db_url.split("#", 1)
-                        else:
-                            base_url = tenant_db_url
-                            schema_name = "public"
-
-                        ensure_tenant_tables(base_url, schema_name)
-                        logger.info(f"✅ Tenant tables ensured for {user.username} in schema '{schema_name}'")
+                            
+                        logger.info(f"✅ Tenant DB connection successful for {user.username}")
 
                     except Exception as e:
-                        logger.error(f"❌ Tenant DB session init failed for {user.username}: {e}")
-                        send_message(chat_id, "❌ Unable to access tenant database. Contact support.")
+                        logger.error(f"❌ Tenant setup failed for {user.username}: {e}")
+                        send_message(chat_id, "❌ Database initialization failed. Please contact support.")
                         return {"ok": True}
 
                     # -------------------- Show main menu --------------------
                     kb = main_menu(user.role)
                     send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                     return {"ok": True}
-
+                    
 
                 # -------------------- Shop Setup (Owner only) --------------------
                 elif action == "setup_shop" and user.role == "owner":
@@ -1643,66 +1792,64 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                         data["contact"] = contact
 
-                        # -------------------- Check if tenant already exists --------------------
-                        existing_tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
-
-                        schema_url = None
-                        tenant_schema = None
-
-                        if existing_tenant:
-                            # Update existing tenant info
-                            existing_tenant.store_name = data["name"]
-                            existing_tenant.location = data["location"]
-                            existing_tenant.contact = contact
-                            tenant_schema = existing_tenant.database_url  # keep compatibility
-
-                            send_message(
-                                chat_id,
-                                f"✅ Your existing shop info has been updated!\n\n"
-                                f"🏪 {data['name']}\n📍 {data['location']}\n📞 {contact}"
-                            )
-                        else:
-                            # No existing tenant — create a new one
-                            try:
-                                schema_url = create_tenant_db(chat_id)
-                                tenant_schema = schema_url
-                            except Exception as e:
-                                logger.error(f"❌ Failed to create tenant schema for owner {user.username}: {e}")
-                                send_message(chat_id, "❌ Could not initialize tenant database.")
+                        # -------------------- NEW: Use simplified tenant schema creation --------------------
+                        try:
+                            from app.tenant_utils import create_tenant_schema
+                            
+                            schema_name = f"tenant_{chat_id}"
+                            
+                            # Create tenant schema with all tables
+                            tenant_created = create_tenant_schema(schema_name)
+                            if not tenant_created:
+                                logger.error(f"❌ Failed to create tenant schema for owner {user.username}")
+                                send_message(chat_id, "❌ Could not initialize store database.")
                                 return {"ok": True}
 
-                            # Save tenant info in main DB
-                            new_tenant = Tenant(
-                                tenant_id=str(uuid.uuid4()),
-                                telegram_owner_id=chat_id,
-                                store_name=data["name"],
-                                database_url=schema_url,  # full URL + schema tag
-                                location=data["location"],
-                                contact=contact,
-                            )
-                            db.add(new_tenant)
+                            # -------------------- Check if tenant already exists --------------------
+                            existing_tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
+
+                            if existing_tenant:
+                                # Update existing tenant info
+                                existing_tenant.store_name = data["name"]
+                                existing_tenant.location = data["location"]
+                                existing_tenant.contact = contact
+                                existing_tenant.database_url = schema_name  # Update to schema name
+                                db.commit()
+
+                                send_message(
+                                    chat_id,
+                                    f"✅ Your existing shop info has been updated!\n\n"
+                                    f"🏪 {data['name']}\n📍 {data['location']}\n📞 {contact}"
+                                )
+                            else:
+                                # Create new tenant record
+                                import uuid
+                                new_tenant = Tenant(
+                                    tenant_id=str(uuid.uuid4()),
+                                    telegram_owner_id=chat_id,
+                                    store_name=data["name"],
+                                    database_url=schema_name,  # Store schema name only
+                                    location=data["location"],
+                                    contact=contact,
+                                )
+                                db.add(new_tenant)
+                                db.commit()
+
+                                send_message(
+                                    chat_id,
+                                    f"✅ Shop info saved!\n\n"
+                                    f"🏪 {data['name']}\n📍 {data['location']}\n📞 {contact}"
+                                )
+
+                            # -------------------- Link owner to tenant schema --------------------
+                            user.tenant_schema = schema_name
                             db.commit()
 
-                            send_message(
-                                chat_id,
-                                f"✅ Shop info saved!\n\n"
-                                f"🏪 {data['name']}\n📍 {data['location']}\n📞 {contact}"
-                            )
+                            logger.info(f"✅ Shop setup completed for {user.username} with schema '{schema_name}'")
 
-                        # -------------------- Link owner to tenant schema --------------------
-                        user.tenant_schema = tenant_schema
-                        db.commit()
-
-                        # -------------------- Ensure tenant tables exist --------------------
-                        try:
-                            base_url, schema_name = (
-                                tenant_schema.split("#", 1) if "#" in tenant_schema else (tenant_schema, "public")
-                            )
-                            ensure_tenant_tables(base_url, schema_name)
-                            logger.info(f"✅ Tenant tables ensured for owner {user.username} in schema '{schema_name}'")
                         except Exception as e:
-                            logger.error(f"❌ Failed to initialize tenant tables for owner {user.username}: {e}")
-                            send_message(chat_id, "⚠️ Shop created but tenant tables could not be initialized.")
+                            logger.error(f"❌ Shop setup failed for {user.username}: {e}")
+                            send_message(chat_id, "❌ Could not complete shop setup. Please contact support.")
                             return {"ok": True}
 
                         # -------------------- Show Owner Main Menu --------------------
@@ -1750,7 +1897,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             chat_id=None,  # will link on Telegram login
                             role="shopkeeper",
                             owner_id=user.user_id,
-                            tenant_schema=user.tenant_schema  # ✅ unified tenant linkage
+                            tenant_schema=user.tenant_schema  # ✅ Share owner's tenant schema
                         )
                         db.add(new_sk)
                         db.commit()
@@ -1763,7 +1910,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             f"👤 Name: {data['name']}\n"
                             f"🔑 Username: {username}\n"
                             f"🔑 Password: {password}\n"
-                            f"📞 Contact: {contact}"
+                            f"📞 Contact: {contact}\n\n"
+                            f"Share these credentials with the shopkeeper for login."
                         )
 
                         # -------------------- Reset & Show Menu --------------------
@@ -1771,6 +1919,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         kb_dict = main_menu(user.role)
                         send_message(chat_id, "🏠 Main Menu:", kb_dict)
                         return {"ok": True}
+                        
 
                 # -------------------- Add Product --------------------
                 elif action == "awaiting_product":
@@ -2060,21 +2209,21 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                 # -------------------- Record Sale (Cart-based system) --------------------
                 elif action == "awaiting_sale":
-                    # Ensure tenant session is available
-                    tenant_db = get_tenant_session(user.tenant_schema, chat_id)
-                    if tenant_db is None:
-                        send_message(chat_id, "❌ Unable to access tenant database.")
-                        return {"ok": True}
+                # Ensure tenant session is available
+                tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                if tenant_db is None:
+                    send_message(chat_id, "❌ Unable to access tenant database.")
+                    return {"ok": True}
 
-                    data = state.get("data", {})
+                data = state.get("data", {})
     
-                    # Initialize cart if not exists
-                    if "cart" not in data:
-                        data["cart"] = []
+                # Initialize cart if not exists
+                if "cart" not in data:
+                    data["cart"] = []
     
-                    # DEBUG: Log cart state at the start of each sale interaction
-                    logger.info(f"🔍 CART DEBUG [sale_start] - Chat: {chat_id}, Items: {len(data['cart'])}")
-    
+                # ✅ DEBUG: Log cart state at the start of each sale interaction
+                logger.info(f"🔍 CART DEBUG [sale_start] - Chat: {chat_id}, Items: {len(data['cart'])}")
+        
                     # STEP 1: search by product name (Add to cart)
                     if step == 1:
                         if not text or not text.strip():
@@ -2164,100 +2313,224 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             send_message(chat_id, "❌ Invalid quantity. Enter a positive integer:")
                         return {"ok": True}
 
-                    # STEP 3: checkout - payment type
+                    # STEP 3: checkout - payment method
                     elif step == 3:
-                        payment_type = text.strip().lower()
-                        if not payment_type:
-                            send_message(chat_id, "❌ Payment type cannot be empty. Choose: full, partial, credit:")
+                        payment_method = text.strip().lower()
+                        if not payment_method:
+                            send_message(chat_id, "❌ Payment method cannot be empty. Choose: cash, ecocash, swipe:")
                             return {"ok": True}
-                        if payment_type not in ["full", "partial", "credit"]:
-                            send_message(chat_id, "❌ Invalid type. Choose: full, partial, credit:")
+                        if payment_method not in ["cash", "ecocash", "swipe"]:
+                            send_message(chat_id, "❌ Invalid method. Choose: cash, ecocash, swipe:")
                             return {"ok": True}
 
-                        data["payment_type"] = payment_type
+                        data["payment_method"] = payment_method
     
-                        # ✅ FIX: Calculate cart_total from cart
+                        # Calculate cart_total from cart
                         cart_total = sum(item["subtotal"] for item in data["cart"])
                         data["cart_total"] = cart_total
     
-                        user_states[chat_id] = {"action": "awaiting_sale", "step": 4, "data": data}
-                        send_message(chat_id, f"💰 Cart Total: ${cart_total:.2f}\n💵 Enter amount tendered by customer:")
+                        # If payment method is CASH, ask for sale type (cash/credit)
+                        if payment_method == "cash":
+                            user_states[chat_id] = {"action": "awaiting_sale", "step": 3.1, "data": data}
+        
+                            kb_rows = [
+                                [{"text": "💵 Cash Sale", "callback_data": "sale_type:cash"}],
+                                [{"text": "🔄 Credit Sale", "callback_data": "sale_type:credit"}],
+                                [{"text": "⬅️ Back", "callback_data": "view_cart"}]
+                            ]
+        
+                            send_message(chat_id, f"💰 Cart Total: ${cart_total:.2f}\n\n💳 Select sale type:", {"inline_keyboard": kb_rows})
+                        else:
+                            # For Ecocash/Swipe, it's always full payment
+                            data["sale_type"] = "cash"
+                            data["payment_type"] = "full"
+                            data["amount_paid"] = cart_total
+                            data["pending_amount"] = 0
+                            data["change_left"] = 0
+        
+                            user_states[chat_id] = {"action": "awaiting_sale", "step": 6, "data": data}
+                            send_message(chat_id, f"💰 Cart Total: ${cart_total:.2f}\n✅ {payment_method.title()} payment confirmed.\n\nConfirm sale? (yes/no)")
+    
+                        return {"ok": True}
+                            
+                    # STEP 3.1: Cash sale type selection (callback handler)
+                    elif text.startswith("sale_type:"):
+                        sale_type = text.split(":")[1]
+    
+                        # Get current state
+                        current_state = user_states.get(chat_id, {})
+                        current_data = current_state.get("data", {})
+    
+                        current_data["sale_type"] = sale_type
+    
+                        if sale_type == "cash":
+                            # For cash sales, ask for amount tendered
+                            current_data["payment_type"] = "full"  # Cash sales are always full payment
+                            user_states[chat_id] = {"action": "awaiting_sale", "step": 4, "data": current_data}
+        
+                            cart_total = sum(item["subtotal"] for item in current_data["cart"])
+                            send_message(chat_id, f"💰 Cart Total: ${cart_total:.2f}\n💵 Enter cash amount tendered by customer:")
+    
+                        else:  # credit
+                            # For credit sales, ask for payment type (full/partial credit)
+                            user_states[chat_id] = {"action": "awaiting_sale", "step": 3.2, "data": current_data}
+        
+                            kb_rows = [
+                                [{"text": "💰 Full Credit", "callback_data": "credit_type:full"}],
+                                [{"text": "📋 Partial Credit", "callback_data": "credit_type:partial"}],
+                                [{"text": "⬅️ Back", "callback_data": "view_cart"}]
+                            ]
+        
+                            cart_total = sum(item["subtotal"] for item in current_data["cart"])
+                            send_message(chat_id, f"💰 Cart Total: ${cart_total:.2f}\n\n💳 Select credit type:", {"inline_keyboard": kb_rows})
+    
+                        return {"ok": True}
+    
+                    # STEP 3.2: Credit type selection (callback handler)
+                    elif text.startswith("credit_type:"):
+                        credit_type = text.split(":")[1]
+    
+                        # Get current state
+                        current_state = user_states.get(chat_id, {})
+                        current_data = current_state.get("data", {})
+    
+                        current_data["payment_type"] = credit_type  # full or partial
+    
+                        if credit_type == "full":
+                            # Full credit - no payment, go straight to customer details
+                            current_data["amount_paid"] = 0
+                            current_data["pending_amount"] = current_data["cart_total"]
+                            current_data["change_left"] = 0
+        
+                            user_states[chat_id] = {"action": "awaiting_sale", "step": 5, "data": current_data}
+                            send_message(chat_id, "🔄 Full credit sale.\n👤 Enter customer name for credit follow-up:")
+    
+                        else:  # partial
+                            # Partial credit - ask for amount paid
+                            user_states[chat_id] = {"action": "awaiting_sale", "step": 4, "data": current_data}
+        
+                            cart_total = sum(item["subtotal"] for item in current_data["cart"])
+                            send_message(chat_id, f"💰 Cart Total: ${cart_total:.2f}\n💵 Enter amount paid now (remaining will be credit):")
+    
                         return {"ok": True}
     
                     # STEP 4: amount tendered
                     elif step == 4:
                         amount_text = text.strip()
                         if not amount_text:
-                            send_message(chat_id, "❌ Amount tendered cannot be empty. Please enter a valid amount:")
+                            send_message(chat_id, "❌ Amount cannot be empty. Please enter a valid amount:")
                             return {"ok": True}
                         try:
                             amount_paid = float(amount_text)
                             if amount_paid < 0:
-                                send_message(chat_id, "❌ Amount tendered cannot be negative. Please enter a valid amount:")
+                                send_message(chat_id, "❌ Amount cannot be negative. Please enter a valid amount:")
                                 return {"ok": True}
         
-                            # ✅ FIX: Calculate cart_total from cart instead of relying on stored value
+                            # Calculate cart_total from cart
                             cart_total = sum(item["subtotal"] for item in data["cart"])
         
                             data["amount_paid"] = amount_paid
-                            data["cart_total"] = cart_total  # Store it for later use if needed
+                            data["cart_total"] = cart_total
         
-                            # Calculate change or pending amount based on payment type
-                            if data["payment_type"] == "full":
+                            # Calculate based on sale type
+                            if data.get("sale_type") == "credit":
+                                # Credit sale with partial payment
+                                data["pending_amount"] = max(cart_total - amount_paid, 0)
+                                data["change_left"] = 0  # No change for credit sales
+            
+                                # Always ask for customer details for credit sales
+                                user_states[chat_id] = {"action": "awaiting_sale", "step": 5, "data": data}
+                                send_message(chat_id, f"📋 Partial credit sale.\nAmount paid: ${amount_paid:.2f}\nPending: ${data['pending_amount']:.2f}\n\n👤 Enter customer name:")
+            
+                            else:  # cash sale
                                 data["pending_amount"] = 0
                                 data["change_left"] = max(amount_paid - cart_total, 0)
-                            elif data["payment_type"] == "partial":
-                                data["pending_amount"] = max(cart_total - amount_paid, 0)
-                                data["change_left"] = max(amount_paid - cart_total, 0)
-                            else:  # credit
-                                data["pending_amount"] = cart_total  # No payment made
-                                data["change_left"] = 0
-        
-                            # Show payment summary with FULL cart details
-                            summary_msg = f"💳 Payment Summary:\n"
-                            summary_msg += get_cart_summary(data["cart"])
-                            summary_msg += f"💰 Total: ${cart_total:.2f}\n"
-                            summary_msg += f"💵 Tendered: ${amount_paid:.2f}\n"
-        
-                            if data["payment_type"] == "full":
+            
+                                # Show payment summary
+                                summary_msg = f"💵 Payment Summary:\n"
+                                summary_msg += get_cart_summary(data["cart"])
+                                summary_msg += f"💰 Total: ${cart_total:.2f}\n"
+                                summary_msg += f"💵 Tendered: ${amount_paid:.2f}\n"
+            
                                 if data["change_left"] > 0:
-                                    summary_msg += f"🪙 Change: ${data['change_left']:.2f}\n"
-                                summary_msg += f"\n✅ Full payment received.\n\n"
-                            elif data["payment_type"] == "partial":
-                                summary_msg += f"📋 Pending: ${data['pending_amount']:.2f}\n"
-                                if data["change_left"] > 0:
-                                    summary_msg += f"🪙 Change: ${data['change_left']:.2f}\n"
-                                summary_msg += f"\n⚠️ Partial payment - balance pending.\n\n"
-                            else:  # credit
-                                summary_msg += f"📋 Credit Amount: ${data['pending_amount']:.2f}\n"
-                                summary_msg += f"\n🔄 Sale on credit.\n\n"
-        
-                            # ✅ ONLY ask for customer details if credit sale OR change due
-                            if data["payment_type"] == "credit" or data["change_left"] > 0:
-                                summary_msg += "👤 Enter customer name:"
-                                user_states[chat_id] = {"action": "awaiting_sale", "step": 5, "data": data}
-                            else:
-                                # No customer details needed - go straight to confirmation
-                                summary_msg += "✅ Confirm sale? (yes/no)"
-                                user_states[chat_id] = {"action": "awaiting_sale", "step": 6, "data": data}
-        
-                            send_message(chat_id, summary_msg)
+                                    summary_msg += f"🪙 Change Due: ${data['change_left']:.2f}\n\n"
+                                    # Ask if shopkeeper has change
+                                    kb_rows = [
+                                        [{"text": "✅ Yes, I have change", "callback_data": "has_change:yes"}],
+                                        [{"text": "❌ No, need customer details", "callback_data": "has_change:no"}]
+                                    ]
+                                    summary_msg += "Do you have change for the customer?"
+                                    send_message(chat_id, summary_msg, {"inline_keyboard": kb_rows})
+                                    user_states[chat_id] = {"action": "awaiting_sale", "step": 4.1, "data": data}
+                                else:
+                                    # No change due - go straight to confirmation
+                                    summary_msg += "✅ Exact amount received.\n\nConfirm sale? (yes/no)"
+                                    user_states[chat_id] = {"action": "awaiting_sale", "step": 6, "data": data}
+                                    send_message(chat_id, summary_msg)
         
                         except ValueError:
                             send_message(chat_id, "❌ Invalid number. Enter a valid amount:")
                         return {"ok": True}
+        
+                    # STEP 4.1: Change availability check (callback handler)
+                    elif text.startswith("has_change:"):
+                        has_change = text.split(":")[1]
     
-                    # STEP 5: customer name (ONLY for credit sales or change due)
+                        # Get current state
+                        current_state = user_states.get(chat_id, {})
+                        current_data = current_state.get("data", {})
+    
+                        if has_change == "yes":
+                            # Has change - no customer details needed
+                            user_states[chat_id] = {"action": "awaiting_sale", "step": 6, "data": current_data}
+                            send_message(chat_id, "✅ Change ready. Confirm sale? (yes/no)")
+                        else:
+                            # No change - need customer details for follow-up
+                            user_states[chat_id] = {"action": "awaiting_sale", "step": 5, "data": current_data}
+                            send_message(chat_id, "👤 Enter customer name (for change follow-up):")
+    
+                        return {"ok": True}
+                        
+                    # STEP 5: customer name (ONLY when needed - credit or no change)
                     elif step == 5:
                         customer_name = text.strip()
                         if not customer_name:
                             send_message(chat_id, "❌ Customer name cannot be empty. Please enter customer name:")
                             return {"ok": True}
                         data["customer_name"] = customer_name
-                        user_states[chat_id] = {"action": "awaiting_sale", "step": 6, "data": data}
-                        send_message(chat_id, "📞 Enter customer contact number:")
+    
+                        # Only ask for contact if it's a credit sale (optional for change due)
+                        if data.get("sale_type") == "credit":
+                            user_states[chat_id] = {"action": "awaiting_sale", "step": 5.1, "data": data}
+                            send_message(chat_id, "📞 Enter customer contact number (optional for credit follow-up):")
+                        else:
+                            # For change due, contact is optional
+                            user_states[chat_id] = {"action": "awaiting_sale", "step": 6, "data": data}
+                            send_message(chat_id, "📞 Enter customer contact number (optional for change follow-up) or type 'skip':")
                         return {"ok": True}
 
+                    # STEP 5.1: Customer contact (optional)
+                    elif step == 5.1:
+                        customer_contact = text.strip()
+                        if customer_contact.lower() == "skip":
+                            customer_contact = ""
+    
+                        data["customer_contact"] = customer_contact
+                        user_states[chat_id] = {"action": "awaiting_sale", "step": 6, "data": data}
+                        send_message(chat_id, f"✅ Customer info recorded. Confirm sale? (yes/no)")
+                        return {"ok": True}
+    
+                    # STEP 5.1: Customer contact (optional)
+                    elif step == 5.1:
+                        customer_contact = text.strip()
+                        if customer_contact.lower() == "skip":
+                            customer_contact = ""
+    
+                        data["customer_contact"] = customer_contact
+                        user_states[chat_id] = {"action": "awaiting_sale", "step": 6, "data": data}
+                        send_message(chat_id, f"✅ Customer info recorded. Confirm sale? (yes/no)")
+                        return {"ok": True}
+    
                     # STEP 6: customer contact OR confirmation
                     elif step == 6:
                         # Check if we need customer contact (credit sales or change due)
