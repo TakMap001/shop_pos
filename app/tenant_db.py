@@ -111,24 +111,32 @@ def ensure_tenant_tables(base_url: str, schema_name: str):
 
 
 # ======================================================
-# 🔹 CREATE TENANT SESSION (Corrected Version)
+# 🔹 CREATE TENANT SESSION (Updated Version)
 # ======================================================
-def get_tenant_session(tenant_db_url: str, chat_id: int):
+def get_tenant_session(tenant_identifier: str, chat_id: int):
     """
-    Create a tenant-scoped SQLAlchemy session using the '#tenant_xxx' schema tag.
-    Ensures the ORM session itself executes within the tenant schema.
+    Create a tenant-scoped SQLAlchemy session.
+    Now accepts: full URL, schema name, or tenant_xxx format
     """
-    if not tenant_db_url:
-        raise ValueError("❌ Missing tenant_db_url")
+    if not tenant_identifier:
+        raise ValueError("❌ Missing tenant identifier")
 
-    if "#" in tenant_db_url:
-        base_url, schema_name = tenant_db_url.split("#", 1)
+    # Determine schema name and base URL
+    if "://" in tenant_identifier:
+        # Full URL provided (backward compatibility)
+        if "#" in tenant_identifier:
+            base_url, schema_name = tenant_identifier.split("#", 1)
+        else:
+            base_url = tenant_identifier
+            schema_name = f"tenant_{chat_id}"
     else:
-        base_url = tenant_db_url
-        schema_name = f"tenant_{chat_id}"
-
+        # Schema name provided (new approach)
+        schema_name = tenant_identifier
+        base_url = os.getenv("DATABASE_URL").rsplit('/', 1)[0]  # Remove DB name
+    
     logger.info(f"🔗 Creating tenant session → {schema_name}")
 
+    # Create engine with schema in search path
     engine = create_engine(
         base_url,
         pool_pre_ping=True,
@@ -141,6 +149,7 @@ def get_tenant_session(tenant_db_url: str, chat_id: int):
         active_path = conn.execute(text("SHOW search_path")).scalar()
         logger.info(f"🧭 Active search_path (explicitly set): {active_path}")
 
+    # Ensure tables exist in the schema
     TenantBase.metadata.schema = schema_name
     TenantBase.metadata.create_all(bind=engine)
 
@@ -154,30 +163,45 @@ def get_tenant_session(tenant_db_url: str, chat_id: int):
     return session
 
 # ======================================================
-# 🔹 ENSURE TENANT SESSION (Main entry point)
+# 🔹 ENSURE TENANT SESSION (Updated Version)
 # ======================================================
 def ensure_tenant_session(chat_id, db):
     """
     Return a tenant-specific session, ensuring proper schema and persistence.
+    Updated to handle schema names directly.
     """
     user = db.query(User).filter(User.chat_id == chat_id).first()
     tenant_schema = getattr(user, "tenant_schema", None)
 
-    # Derive or rebuild URL
-    if tenant_schema and "#" in tenant_schema:
-        tenant_db_url = tenant_schema
-    else:
-        tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
-        if tenant and tenant.database_url:
-            tenant_db_url = tenant.database_url
+    # Handle different identifier formats
+    if tenant_schema:
+        if "://" in tenant_schema or "#" in tenant_schema:
+            # Old URL format - convert to schema name
+            if "#" in tenant_schema:
+                _, schema_name = tenant_schema.split("#", 1)
+            else:
+                schema_name = f"tenant_{chat_id}"
+            
+            # Update user record to use schema name only
+            user.tenant_schema = schema_name
+            db.commit()
+            logger.info(f"🔄 Converted tenant URL to schema name: {schema_name}")
+            
+            return get_tenant_session(schema_name, chat_id)
         else:
-            base_url = os.getenv("DATABASE_URL")
-            schema_name = tenant_schema if tenant_schema else f"tenant_{chat_id}"
-            tenant_db_url = f"{base_url}#{schema_name}"
-            logger.warning(f"⚠️ Reconstructed tenant_db_url: {tenant_db_url}")
-
-        # Persist to user record
-        user.tenant_schema = tenant_db_url
-        db.commit()
-
-    return get_tenant_session(tenant_db_url, chat_id)
+            # Already using schema name format
+            return get_tenant_session(tenant_schema, chat_id)
+    else:
+        # No tenant schema - create one
+        schema_name = f"tenant_{chat_id}"
+        from app.tenant_utils import create_tenant_schema
+        tenant_created = create_tenant_schema(schema_name)
+        
+        if tenant_created:
+            user.tenant_schema = schema_name
+            db.commit()
+            logger.info(f"✅ Created and linked tenant schema: {schema_name}")
+            return get_tenant_session(schema_name, chat_id)
+        else:
+            logger.error(f"❌ Failed to create tenant schema for {chat_id}")
+            return None
