@@ -8,7 +8,7 @@ from datetime import datetime
 from sqlalchemy import func, text, extract
 from app.models.central_models import Tenant  # Central DB
 from app.models.models import Base as TenantBase
-from app.models.models import User, ProductORM, SaleORM  # Tenant DB
+from app.models.models import User, ProductORM, CustomerORM, SaleORM  # Tenant DB
 from app.database import get_db  # central DB session
 from app.telegram_notifications import notify_low_stock, notify_top_product, notify_high_value_sale, send_message
 from app.tenants import create_tenant_db, get_engine_for_tenant, get_session_for_tenant
@@ -526,10 +526,9 @@ def get_cart_summary(cart):
 def record_cart_sale(tenant_db, chat_id, data):
     """Record a sale from cart data"""
     try:
-        # ✅ Handle CUSTOMER creation in tenant DB if needed
+        # Handle CUSTOMER creation
         customer_id = None
         if data.get("customer_name"):
-            # Create or find customer in Tenant DB customers table
             customer = tenant_db.query(CustomerORM).filter(
                 CustomerORM.name == data["customer_name"]
             ).first()
@@ -540,22 +539,20 @@ def record_cart_sale(tenant_db, chat_id, data):
                     contact=data.get("customer_contact", "")
                 )
                 tenant_db.add(customer)
-                tenant_db.flush()  # Get customer_id without commit
-                customer_id = customer.customer_id
-                logger.info(f"✅ Created new CUSTOMER in tenant DB: {data['customer_name']}")
-            else:
+                tenant_db.flush()
                 customer_id = customer.customer_id
         
         # Record each item in cart as separate sale
         for item in data["cart"]:
             sale = SaleORM(
-                user_id=chat_id,  # Shopkeeper ID from Telegram
+                user_id=chat_id,
                 product_id=item["product_id"],
-                customer_id=customer_id,  # References customer from tenant DB (or None)
+                customer_id=customer_id,
                 quantity=item["quantity"],
                 unit_type=item["unit_type"],
                 total_amount=item["subtotal"],
                 payment_type=data.get("payment_type", "full"),
+                payment_method=data.get("payment_method", "cash"),  # ✅ Include payment method
                 amount_paid=data.get("amount_paid", 0),
                 pending_amount=data.get("pending_amount", 0),
                 change_left=data.get("change_left", 0),
@@ -563,15 +560,21 @@ def record_cart_sale(tenant_db, chat_id, data):
             )
             tenant_db.add(sale)
         
-        # Commit all sales and customer (if created)
         tenant_db.commit()
         
-        # Show final receipt
+        # Show receipt with Ecocash surcharge if applicable
         receipt = f"✅ *Sale Completed Successfully!*\n\n"
         receipt += get_cart_summary(data["cart"])
-        receipt += f"\n💳 Payment Method: {data.get('payment_method', 'cash').title()}\n"
-        receipt += f"💰 Sale Type: {data.get('sale_type', 'cash').title()}\n"
-        receipt += f"💵 Amount Paid: ${data.get('amount_paid', 0):.2f}\n"
+        
+        if data.get("payment_method") == "ecocash" and data.get("surcharge", 0) > 0:
+            receipt += f"\n💳 *Payment Method: Ecocash*\n"
+            receipt += f"💰 Subtotal: ${data.get('original_total', 0):.2f}\n"
+            receipt += f"⚡ Surcharge (10%): ${data.get('surcharge', 0):.2f}\n"
+            receipt += f"💵 *Amount Paid: ${data.get('amount_paid', 0):.2f}*\n"
+        else:
+            receipt += f"\n💳 Payment Method: {data.get('payment_method', 'cash').title()}\n"
+            receipt += f"💰 Sale Type: {data.get('sale_type', 'cash').title()}\n"
+            receipt += f"💵 Amount Paid: ${data.get('amount_paid', 0):.2f}\n"
         
         if data.get("change_left", 0) > 0:
             receipt += f"🪙 Change: ${data['change_left']:.2f}\n"
@@ -581,15 +584,12 @@ def record_cart_sale(tenant_db, chat_id, data):
             receipt += f"👤 Customer: {data['customer_name']}\n"
             
         send_message(chat_id, receipt)
-        logger.info(f"✅ Sale recorded successfully for chat_id: {chat_id}")
         return True
         
     except Exception as e:
         logger.error(f"❌ Cart sale recording failed: {e}")
         tenant_db.rollback()
-        send_message(chat_id, f"❌ Failed to record sale: {str(e)}")
         return False
-                        
         
 def record_sale(db: Session, chat_id: int, data: dict):
     """
@@ -1335,7 +1335,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
     
                 return {"ok": True}
 
-            # ✅ NEW: Payment method selection
+            # ✅ UPDATED: Payment method selection with Ecocash surcharge
             elif text.startswith("payment_method:"):
                 payment_method = text.split(":")[1]
     
@@ -1346,6 +1346,9 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 logger.info(f"🔍 CART DEBUG [payment_method] - Chat: {chat_id}, Items: {len(current_data.get('cart', []))}, Method: {payment_method}")
     
                 current_data["payment_method"] = payment_method
+    
+                # Calculate cart total
+                cart_total = sum(item["subtotal"] for item in current_data["cart"])
     
                 if payment_method == "cash":
                     # For cash, ask for sale type (cash/credit)
@@ -1361,14 +1364,20 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         [{"text": "⬅️ Back", "callback_data": "view_cart"}]
                     ]
         
-                    cart_total = sum(item["subtotal"] for item in current_data["cart"])
                     send_message(chat_id, f"💰 Cart Total: ${cart_total:.2f}\n\n💳 Select sale type:", {"inline_keyboard": kb_rows})
     
-                else:
-                    # For Ecocash/Swipe, it's always full payment
+                elif payment_method == "ecocash":
+                    # ✅ Apply 10% surcharge for Ecocash
+                    surcharge = cart_total * 0.10
+                    final_total = cart_total + surcharge
+                    current_data["original_total"] = cart_total  # Store original for receipt
+                    current_data["surcharge"] = surcharge
+                    current_data["final_total"] = final_total
+        
+                    # For Ecocash, it's always full payment with surcharge
                     current_data["sale_type"] = "cash"
                     current_data["payment_type"] = "full"
-                    current_data["amount_paid"] = sum(item["subtotal"] for item in current_data["cart"])
+                    current_data["amount_paid"] = final_total
                     current_data["pending_amount"] = 0
                     current_data["change_left"] = 0
         
@@ -1377,10 +1386,34 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         "step": 6, 
                         "data": current_data
                     }
-                    send_message(chat_id, f"✅ {payment_method.title()} payment confirmed.\n\nConfirm sale? (yes/no)")
+        
+                    # Show surcharge breakdown
+                    message = f"📱 *Ecocash Payment*\n\n"
+                    message += get_cart_summary(current_data["cart"])
+                    message += f"💰 Subtotal: ${cart_total:.2f}\n"
+                    message += f"⚡ Surcharge (10%): ${surcharge:.2f}\n"
+                    message += f"💳 *Final Amount: ${final_total:.2f}*\n\n"
+                    message += "✅ Ecocash payment confirmed.\n\nConfirm sale? (yes/no)"
+        
+                    send_message(chat_id, message)
+    
+                else:  # swipe
+                    # For Swipe, it's always full payment (no surcharge)
+                    current_data["sale_type"] = "cash"
+                    current_data["payment_type"] = "full"
+                    current_data["amount_paid"] = cart_total
+                    current_data["pending_amount"] = 0
+                    current_data["change_left"] = 0
+        
+                    user_states[chat_id] = {
+                        "action": "awaiting_sale", 
+                        "step": 6, 
+                        "data": current_data
+                    }
+                    send_message(chat_id, f"💰 Cart Total: ${cart_total:.2f}\n✅ {payment_method.title()} payment confirmed.\n\nConfirm sale? (yes/no)")
     
                 return {"ok": True}
-
+    
             # ✅ NEW: Sale type selection for cash
             elif text.startswith("sale_type:"):
                 sale_type = text.split(":")[1]

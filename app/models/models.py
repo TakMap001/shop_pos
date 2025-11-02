@@ -80,9 +80,11 @@ class SaleORM(TenantBase):
     sale_date = Column(DateTime, default=datetime.utcnow)
 
     payment_type = Column(String(50), default="full")
+    payment_method = Column(String(50), default="cash")  # ✅ ADD THIS FIELD
     amount_paid = Column(Numeric(10, 2), default=0.0)
     pending_amount = Column(Numeric(10, 2), default=0.0)
     change_left = Column(Numeric(10, 2), default=0.0)
 
     product = relationship("ProductORM", back_populates="sales")
     customer = relationship("CustomerORM", back_populates="sales")
+    
