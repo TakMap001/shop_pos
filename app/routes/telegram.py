@@ -2209,20 +2209,20 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                 # -------------------- Record Sale (Cart-based system) --------------------
                 elif action == "awaiting_sale":
-                # Ensure tenant session is available
-                tenant_db = get_tenant_session(user.tenant_schema, chat_id)
-                if tenant_db is None:
-                    send_message(chat_id, "❌ Unable to access tenant database.")
-                    return {"ok": True}
+                    # Ensure tenant session is available
+                    tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                    if tenant_db is None:
+                        send_message(chat_id, "❌ Unable to access tenant database.")
+                        return {"ok": True}
 
-                data = state.get("data", {})
+                    data = state.get("data", {})
     
-                # Initialize cart if not exists
-                if "cart" not in data:
-                    data["cart"] = []
+                    # Initialize cart if not exists
+                    if "cart" not in data:
+                        data["cart"] = []
     
-                # ✅ DEBUG: Log cart state at the start of each sale interaction
-                logger.info(f"🔍 CART DEBUG [sale_start] - Chat: {chat_id}, Items: {len(data['cart'])}")
+                    # ✅ DEBUG: Log cart state at the start of each sale interaction
+                    logger.info(f"🔍 CART DEBUG [sale_start] - Chat: {chat_id}, Items: {len(data['cart'])}")
         
                     # STEP 1: search by product name (Add to cart)
                     if step == 1:
