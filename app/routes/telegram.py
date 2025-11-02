@@ -1084,42 +1084,51 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
             # -------------------- Product Selection for Sale --------------------
             elif text.startswith("select_sale:"):
-                tenant_db = get_tenant_session(user.tenant_schema, chat_id)
-                if not tenant_db:
-                    send_message(chat_id, "⚠️ Cannot record sale: tenant DB unavailable.")
-                    return {"ok": True}
-
                 try:
                     product_id = int(text.split(":")[1])
-                except (IndexError, ValueError):
-                    send_message(chat_id, "⚠️ Invalid product selection.")
-                    return {"ok": True}
-
-                product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
-                if not product:
-                    send_message(chat_id, "⚠️ Product not found. Try again.")
-                    return {"ok": True}
-
-                # ✅ CRITICAL: Set current_product data for the quantity step
-                data["current_product"] = {
-                    "product_id": product.product_id,
-                    "name": product.name,
-                    "price": float(product.price),
-                    "unit_type": product.unit_type,
-                    "available_stock": product.stock
-                }
-                
-                # ✅ Update state with current_product data
-                user_states[chat_id] = {
-                    "action": "awaiting_sale",
-                    "step": 2,  # Move to quantity step
-                    "data": data
-                }
-
-                send_message(chat_id, f"📦 Selected {product.name} ({product.unit_type}). Enter quantity to add:")
+        
+                    # ✅ CRITICAL: Get current state to preserve cart
+                    current_state = user_states.get(chat_id, {})
+                    current_data = current_state.get("data", {})
+        
+                    # Debug logging
+                    logger.info(f"🔍 CART DEBUG [select_sale] - Chat: {chat_id}, Items: {len(current_data.get('cart', []))}")
+        
+                    # Ensure tenant session is available
+                    tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                    if tenant_db is None:
+                        send_message(chat_id, "❌ Unable to access tenant database.")
+                        return {"ok": True}
+        
+                    # Find the selected product
+                    product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
+                    if not product:
+                        send_message(chat_id, "❌ Product not found. Please try again.")
+                        return {"ok": True}
+        
+                    # Store selected product and preserve existing cart
+                    current_data["current_product"] = {
+                        "product_id": product.product_id,
+                        "name": product.name,
+                        "price": float(product.price),
+                        "unit_type": product.unit_type,
+                        "available_stock": product.stock
+                    }
+        
+                    # Update state with preserved cart and new product
+                    user_states[chat_id] = {
+                        "action": "awaiting_sale", 
+                        "step": 2, 
+                        "data": current_data  # This preserves the cart!
+                    }
+        
+                    send_message(chat_id, f"📦 Selected {product.name} ({product.unit_type}). Enter quantity to add:")
+        
+                except (ValueError, IndexError):
+                    send_message(chat_id, "❌ Invalid product selection.")
+    
                 return {"ok": True}
-                
-
+        
             # -------------------- Cart Management Callbacks --------------------
             elif text == "add_another_item":
                 logger.info(f"🎯 Processing callback: add_another_item from chat_id={chat_id}")
