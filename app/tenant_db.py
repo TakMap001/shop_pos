@@ -143,15 +143,16 @@ def get_tenant_session(tenant_identifier: str, chat_id: int):
         connect_args={"options": f"-csearch_path={schema_name},public"}
     )
 
-    # Explicitly set and verify search_path at engine level
+    # ✅ CRITICAL: Set search_path BEFORE any table inspection
     with engine.connect() as conn:
         conn.execute(text(f"SET search_path TO {schema_name},public"))
         active_path = conn.execute(text("SHOW search_path")).scalar()
         logger.info(f"🧭 Active search_path (explicitly set): {active_path}")
 
-    # ❌ REMOVED: Table creation - tables should already exist from create_tenant_schema()
-    # TenantBase.metadata.schema = schema_name
-    # TenantBase.metadata.create_all(bind=engine)  # ⚠️ This recreates tables and drops data!
+    # ✅ IMPORTANT: Refresh metadata to pick up the new column
+    from app.models.models import TenantBase
+    TenantBase.metadata.clear()  # Clear cached metadata
+    TenantBase.metadata.reflect(bind=engine)  # Re-reflect from database
 
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
