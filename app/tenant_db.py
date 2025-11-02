@@ -111,7 +111,7 @@ def ensure_tenant_tables(base_url: str, schema_name: str):
 
 
 # ======================================================
-# 🔹 CREATE TENANT SESSION (Updated Version)
+# 🔹 CREATE TENANT SESSION (Fixed Version - No Table Recreation)
 # ======================================================
 def get_tenant_session(tenant_identifier: str, chat_id: int):
     """
@@ -149,9 +149,9 @@ def get_tenant_session(tenant_identifier: str, chat_id: int):
         active_path = conn.execute(text("SHOW search_path")).scalar()
         logger.info(f"🧭 Active search_path (explicitly set): {active_path}")
 
-    # Ensure tables exist in the schema
-    TenantBase.metadata.schema = schema_name
-    TenantBase.metadata.create_all(bind=engine)
+    # ❌ REMOVED: Table creation - tables should already exist from create_tenant_schema()
+    # TenantBase.metadata.schema = schema_name
+    # TenantBase.metadata.create_all(bind=engine)  # ⚠️ This recreates tables and drops data!
 
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
@@ -171,8 +171,14 @@ def ensure_tenant_session(chat_id, db):
     Updated to handle schema names directly.
     """
     user = db.query(User).filter(User.chat_id == chat_id).first()
+    
+    # ✅ Add this safety check
+    if not user:
+        logger.error(f"❌ User not found for chat_id: {chat_id}")
+        return None
+        
     tenant_schema = getattr(user, "tenant_schema", None)
-
+    
     # Handle different identifier formats
     if tenant_schema:
         if "://" in tenant_schema or "#" in tenant_schema:
