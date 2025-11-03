@@ -523,9 +523,50 @@ def get_cart_summary(cart):
     summary += f"\n💰 *Total: ${total:.2f}*\n"
     return summary
 
-def record_cart_sale(tenant_db, chat_id, data):
-    """Record a sale from cart data"""
+def ensure_payment_method_column(tenant_db, schema_name):
+    """Safely add payment_method column if it doesn't exist"""
     try:
+        # Check if column exists using raw SQL
+        check_stmt = text("""
+            SELECT column_name 
+            FROM information_schema.columns 
+            WHERE table_schema = :schema 
+            AND table_name = 'sales' 
+            AND column_name = 'payment_method'
+        """)
+        result = tenant_db.execute(check_stmt, {"schema": schema_name}).fetchone()
+        
+        if not result:
+            # Add the column
+            alter_stmt = text("""
+                ALTER TABLE sales 
+                ADD COLUMN payment_method VARCHAR(50) DEFAULT 'cash'
+            """)
+            tenant_db.execute(alter_stmt)
+            tenant_db.commit()
+            logger.info(f"✅ Added payment_method column to sales table in {schema_name}")
+            return True
+        else:
+            logger.info(f"✅ payment_method column already exists in {schema_name}")
+            return True
+            
+    except Exception as e:
+        logger.error(f"❌ Failed to ensure payment_method column: {e}")
+        tenant_db.rollback()
+        return False
+        
+def record_cart_sale(tenant_db, chat_id, data):
+    """Record a sale from cart data with payment_method tracking"""
+    try:
+        from app.models.models import CustomerORM
+        
+        # ✅ Ensure payment_method column exists
+        schema_name = f"tenant_{chat_id}"
+        column_ensured = ensure_payment_method_column(tenant_db, schema_name)
+        if not column_ensured:
+            logger.error("❌ Could not ensure payment_method column")
+            # Continue anyway, but log the issue
+        
         # Handle CUSTOMER creation
         customer_id = None
         if data.get("customer_name"):
@@ -542,27 +583,37 @@ def record_cart_sale(tenant_db, chat_id, data):
                 tenant_db.flush()
                 customer_id = customer.customer_id
         
-        # Record each item in cart as separate sale
+        # Record each item using raw SQL (bypasses ORM metadata issues)
         for item in data["cart"]:
-            sale = SaleORM(
-                user_id=chat_id,
-                product_id=item["product_id"],
-                customer_id=customer_id,
-                quantity=item["quantity"],
-                unit_type=item["unit_type"],
-                total_amount=item["subtotal"],
-                payment_type=data.get("payment_type", "full"),
-                payment_method=data.get("payment_method", "cash"),  # ✅ Include payment method
-                amount_paid=data.get("amount_paid", 0),
-                pending_amount=data.get("pending_amount", 0),
-                change_left=data.get("change_left", 0),
-                sale_date=datetime.utcnow()
-            )
-            tenant_db.add(sale)
+            stmt = text("""
+                INSERT INTO sales 
+                (user_id, product_id, customer_id, unit_type, quantity, total_amount, 
+                 sale_date, payment_type, payment_method, amount_paid, pending_amount, change_left)
+                VALUES 
+                (:user_id, :product_id, :customer_id, :unit_type, :quantity, :total_amount,
+                 :sale_date, :payment_type, :payment_method, :amount_paid, :pending_amount, :change_left)
+            """)
+            
+            params = {
+                "user_id": chat_id,
+                "product_id": item["product_id"],
+                "customer_id": customer_id,
+                "unit_type": item["unit_type"],
+                "quantity": item["quantity"],
+                "total_amount": item["subtotal"],
+                "sale_date": datetime.utcnow(),
+                "payment_type": data.get("payment_type", "full"),
+                "payment_method": data.get("payment_method", "cash"),  # ✅ Now included
+                "amount_paid": data.get("amount_paid", 0),
+                "pending_amount": data.get("pending_amount", 0),
+                "change_left": data.get("change_left", 0)
+            }
+            
+            tenant_db.execute(stmt, params)
         
         tenant_db.commit()
         
-        # Show receipt with Ecocash surcharge if applicable
+        # Show final receipt
         receipt = f"✅ *Sale Completed Successfully!*\n\n"
         receipt += get_cart_summary(data["cart"])
         
@@ -584,12 +635,15 @@ def record_cart_sale(tenant_db, chat_id, data):
             receipt += f"👤 Customer: {data['customer_name']}\n"
             
         send_message(chat_id, receipt)
+        logger.info(f"✅ Sale recorded with payment_method: {data.get('payment_method', 'cash')}")
         return True
         
     except Exception as e:
         logger.error(f"❌ Cart sale recording failed: {e}")
         tenant_db.rollback()
+        send_message(chat_id, f"❌ Failed to record sale: {str(e)}")
         return False
+        
         
 def record_sale(db: Session, chat_id: int, data: dict):
     """
@@ -678,6 +732,7 @@ def record_sale(db: Session, chat_id: int, data: dict):
     except Exception as e:
         db.rollback()
         send_message(chat_id, f"❌ Failed to record sale: {str(e)}")
+
 
 # -------------------- Clean Tenant-Aware Reports --------------------
 def generate_report(db: Session, report_type: str, tenant_id: int = None):
