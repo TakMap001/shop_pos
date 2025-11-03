@@ -125,8 +125,9 @@ def main_menu(role: str):
             "inline_keyboard": [
                 [{"text": "➕ Add Product", "callback_data": "add_product"}],
                 [{"text": "✏️ Update Product", "callback_data": "update_product"}],
+                [{"text": "📈 Quick Stock Update", "callback_data": "quick_stock_update"}],  # ✅ NEW
                 [{"text": "📦 View Stock", "callback_data": "view_stock"}],
-                [{"text": "💰 Record Sale", "callback_data": "record_sale"}],  # NEW BUTTON
+                [{"text": "💰 Record Sale", "callback_data": "record_sale"}],
                 [{"text": "📊 Reports", "callback_data": "report_menu"}],
                 [{"text": "🏪 Update Shop Info", "callback_data": "setup_shop"}],
                 [{"text": "👤 Create Shopkeeper", "callback_data": "create_shopkeeper"}],
@@ -138,9 +139,10 @@ def main_menu(role: str):
             "inline_keyboard": [
                 [{"text": "➕ Add Product", "callback_data": "add_product"}],
                 [{"text": "✏️ Update Product", "callback_data": "update_product"}],
+                [{"text": "📈 Quick Stock Update", "callback_data": "quick_stock_update"}],  # ✅ NEW
                 [{"text": "📦 View Stock", "callback_data": "view_stock"}],
                 [{"text": "💰 Record Sale", "callback_data": "record_sale"}],
-                [{"text": "📊 Reports", "callback_data": "report_menu"}],  # ✅ ADD THIS LINE
+                [{"text": "📊 Reports", "callback_data": "report_menu"}],
                 [{"text": "❓ Help", "callback_data": "help"}]
             ]
         }
@@ -148,7 +150,7 @@ def main_menu(role: str):
         kb_dict = {"inline_keyboard": []}
 
     return kb_dict
-
+    
 def build_keyboard(kb_dict):
     """Convert our menu dict into a Telebot InlineKeyboardMarkup."""
     keyboard = types.InlineKeyboardMarkup()
@@ -556,15 +558,11 @@ def ensure_payment_method_column(tenant_db, schema_name):
         return False
         
 def record_cart_sale(tenant_db, chat_id, data):
-    """Record a sale from cart data with payment_method tracking"""
+    """Record a sale from cart data with payment_method tracking and stock updates"""
     try:
-        
         # ✅ Ensure payment_method column exists
         schema_name = f"tenant_{chat_id}"
         column_ensured = ensure_payment_method_column(tenant_db, schema_name)
-        if not column_ensured:
-            logger.error("❌ Could not ensure payment_method column")
-            # Continue anyway, but log the issue
         
         # Handle CUSTOMER creation
         customer_id = None
@@ -582,7 +580,20 @@ def record_cart_sale(tenant_db, chat_id, data):
                 tenant_db.flush()
                 customer_id = customer.customer_id
         
-        # Record each item using raw SQL (bypasses ORM metadata issues)
+        # ✅ FIRST: Update stock for each product
+        for item in data["cart"]:
+            product = tenant_db.query(ProductORM).filter(
+                ProductORM.product_id == item["product_id"]
+            ).first()
+            
+            if product:
+                new_stock = max(product.stock - item["quantity"], 0)
+                product.stock = new_stock
+                logger.info(f"📦 Stock updated: {product.name} from {product.stock + item['quantity']} to {new_stock}")
+            else:
+                logger.error(f"❌ Product not found for stock update: {item['product_id']}")
+        
+        # THEN: Record each item as separate sale
         for item in data["cart"]:
             stmt = text("""
                 INSERT INTO sales 
@@ -602,15 +613,17 @@ def record_cart_sale(tenant_db, chat_id, data):
                 "total_amount": item["subtotal"],
                 "sale_date": datetime.utcnow(),
                 "payment_type": data.get("payment_type", "full"),
-                "payment_method": data.get("payment_method", "cash"),  # ✅ Now included
+                "payment_method": data.get("payment_method", "cash"),
                 "amount_paid": data.get("amount_paid", 0),
                 "pending_amount": data.get("pending_amount", 0),
                 "change_left": data.get("change_left", 0)
             }
             
             tenant_db.execute(stmt, params)
+            logger.info(f"✅ Sale recorded: {item['name']} x {item['quantity']}")
         
         tenant_db.commit()
+        logger.info(f"✅ All sales recorded and stock updated for chat_id: {chat_id}")
         
         # Show final receipt
         receipt = f"✅ *Sale Completed Successfully!*\n\n"
@@ -634,7 +647,6 @@ def record_cart_sale(tenant_db, chat_id, data):
             receipt += f"👤 Customer: {data['customer_name']}\n"
             
         send_message(chat_id, receipt)
-        logger.info(f"✅ Sale recorded with payment_method: {data.get('payment_method', 'cash')}")
         return True
         
     except Exception as e:
@@ -642,7 +654,6 @@ def record_cart_sale(tenant_db, chat_id, data):
         tenant_db.rollback()
         send_message(chat_id, f"❌ Failed to record sale: {str(e)}")
         return False
-        
         
 def record_sale(db: Session, chat_id: int, data: dict):
     """
@@ -1096,6 +1107,49 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 user_states[chat_id] = {"action": "awaiting_product", "step": 1, "data": {}}
                 return {"ok": True}
 
+            # -------------------- Quick Stock Update --------------------
+            elif text == "📈 Quick Stock Update":
+                user_states[chat_id] = {"action": "quick_stock_update", "step": 1, "data": {}}
+                send_message(chat_id, "🔍 Enter product name to search:")
+                return {"ok": True}
+                
+            # -------------------- Quick Stock Update Callbacks --------------------
+            elif text.startswith("select_stock_product:"):
+                try:
+                    product_id = int(text.split(":")[1])
+        
+                    current_state = user_states.get(chat_id, {})
+                    current_data = current_state.get("data", {})
+        
+                    # Find the selected product from search results
+                    selected_product = None
+                    for product in current_data.get("search_results", []):
+                        if product["product_id"] == product_id:
+                            selected_product = product
+                            break
+        
+                    if selected_product:
+                        current_data["selected_product"] = selected_product
+                        user_states[chat_id] = {"action": "quick_stock_update", "step": 2, "data": current_data}
+            
+                        send_message(chat_id, f"📦 Selected: {selected_product['name']}\nCurrent stock: {selected_product['current_stock']}\n\nEnter quantity to ADD to stock:")
+                    else:
+                        send_message(chat_id, "❌ Product selection failed. Please try again.")
+                        user_states.pop(chat_id, None)
+    
+                except (ValueError, IndexError):
+                    send_message(chat_id, "❌ Invalid product selection.")
+                    user_states.pop(chat_id, None)
+    
+                return {"ok": True}
+
+            elif text == "cancel_quick_stock":
+                user_states.pop(chat_id, None)
+                send_message(chat_id, "❌ Quick stock update cancelled.")
+                kb = main_menu(user.role)
+                send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+                return {"ok": True}
+    
             # -------------------- Update Product --------------------
             elif text == "update_product":
                 tenant_db = get_tenant_session(user.tenant_schema, chat_id)
@@ -2183,6 +2237,111 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         return {"ok": True}
                         
 
+                # -------------------- Quick Stock Update Flow --------------------
+                elif action == "quick_stock_update":
+                    # Ensure tenant session is available
+                    tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                    if tenant_db is None:
+                        send_message(chat_id, "❌ Unable to access tenant database.")
+                        return {"ok": True}
+
+                    data = state.get("data", {})
+
+                    # STEP 1: Search for product
+                    if step == 1:
+                        product_name = text.strip()
+                        if not product_name:
+                            send_message(chat_id, "❌ Product name cannot be empty. Please enter a product name:")
+                            return {"ok": True}
+
+                        # Search for products
+                        matches = tenant_db.query(ProductORM).filter(
+                            ProductORM.name.ilike(f"%{product_name}%")
+                        ).all()
+
+                        if not matches:
+                            send_message(chat_id, "❌ No products found with that name. Try again:")
+                            return {"ok": True}
+
+                        if len(matches) == 1:
+                            # Single match - proceed directly to quantity
+                            product = matches[0]
+                            data["selected_product"] = {
+                                "product_id": product.product_id,
+                                "name": product.name,
+                                "current_stock": product.stock
+                            }
+                            user_states[chat_id] = {"action": "quick_stock_update", "step": 2, "data": data}
+                            send_message(chat_id, f"📦 Selected: {product.name}\nCurrent stock: {product.stock}\n\nEnter quantity to ADD to stock:")
+                        else:
+                            # Multiple matches - show selection
+                            data["search_results"] = [
+                                {
+                                    "product_id": p.product_id,
+                                    "name": p.name,
+                                    "current_stock": p.stock
+                                } for p in matches
+                            ]
+                            user_states[chat_id] = {"action": "quick_stock_update", "step": 1.5, "data": data}
+                            
+                            kb_rows = []
+                            for product in matches:
+                                kb_rows.append([{
+                                    "text": f"{product.name} (Stock: {product.stock})",
+                                    "callback_data": f"select_stock_product:{product.product_id}"
+                                }])
+                            kb_rows.append([{"text": "❌ Cancel", "callback_data": "cancel_quick_stock"}])
+                            
+                            send_message(chat_id, "🔍 Multiple products found. Select one:", {"inline_keyboard": kb_rows})
+                        return {"ok": True}
+
+                    # STEP 2: Enter quantity to add
+                    elif step == 2:
+                        quantity_text = text.strip()
+                        if not quantity_text:
+                            send_message(chat_id, "❌ Quantity cannot be empty. Enter quantity to add:")
+                            return {"ok": True}
+
+                        try:
+                            quantity_to_add = int(quantity_text)
+                            if quantity_to_add <= 0:
+                                send_message(chat_id, "❌ Quantity must be greater than 0. Enter a positive number:")
+                                return {"ok": True}
+
+                            product = data["selected_product"]
+                            
+                            # Update stock in database
+                            db_product = tenant_db.query(ProductORM).filter(
+                                ProductORM.product_id == product["product_id"]
+                            ).first()
+                            
+                            if db_product:
+                                old_stock = db_product.stock
+                                new_stock = old_stock + quantity_to_add
+                                db_product.stock = new_stock
+                                tenant_db.commit()
+                                
+                                # Success message
+                                success_msg = f"✅ Stock updated successfully!\n\n"
+                                success_msg += f"📦 Product: {product['name']}\n"
+                                success_msg += f"📊 Old Stock: {old_stock}\n"
+                                success_msg += f"📈 Added: +{quantity_to_add}\n"
+                                success_msg += f"🆕 New Stock: {new_stock}\n"
+                                
+                                send_message(chat_id, success_msg)
+                                
+                                # Return to main menu
+                                user_states.pop(chat_id, None)
+                                kb = main_menu(user.role)
+                                send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+                            else:
+                                send_message(chat_id, "❌ Product not found in database.")
+                                user_states.pop(chat_id, None)
+
+                        except ValueError:
+                            send_message(chat_id, "❌ Invalid quantity. Enter a valid number:")
+                        return {"ok": True}
+                        
                 # -------------------- Update Product (owner only, step-by-step) --------------------
                 elif action == "awaiting_update" and user.role == "owner":
                     # ✅ Use the SAME method as callback
@@ -2611,8 +2770,9 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                     # No change due - go straight to confirmation
                                     summary_msg += "✅ Exact amount received.\n\nConfirm sale? (yes/no)"
                                     user_states[chat_id] = {"action": "awaiting_sale", "step": 6, "data": data}
+                                    logger.info(f"🔍 STEP 4 → STEP 6 - No change due, awaiting confirmation. Chat: {chat_id}, Customer Name: {data.get('customer_name')}")
                                     send_message(chat_id, summary_msg)
-        
+                                            
                         except ValueError:
                             send_message(chat_id, "❌ Invalid number. Enter a valid amount:")
                         return {"ok": True}
@@ -2678,8 +2838,11 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
     
                     # STEP 6: customer contact OR confirmation
                     elif step == 6:
+                        logger.info(f"🔍 STEP 6 ENTERED - Chat: {chat_id}, Customer Name: {data.get('customer_name')}, Text: '{text}'")
+                        
                         # Check if we need customer contact (credit sales or change due)
                         if data.get("customer_name"):  # We're collecting customer details
+                            logger.info(f"🔍 STEP 6 → Collecting contact - Chat: {chat_id}")
                             customer_contact = text.strip()
                             if not customer_contact:
                                 send_message(chat_id, "❌ Contact cannot be empty. Enter customer contact number:")
@@ -2689,6 +2852,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             send_message(chat_id, f"✅ Customer info recorded. Confirm sale? (yes/no)")
                         else:
                             # No customer details needed - this is confirmation for cash sales with no change
+                            logger.info(f"🔍 STEP 6 → Processing confirmation - Chat: {chat_id}")
                             confirmation = text.strip().lower()
                             if not confirmation:
                                 send_message(chat_id, "⚠️ Please confirm with 'yes' or 'no':")
@@ -2700,17 +2864,20 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                 send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                                 return {"ok": True}
                             
+                            logger.info(f"✅ STEP 6 → Recording sale - Chat: {chat_id}")
                             # Record sale without customer details
                             record_sale_result = record_cart_sale(tenant_db, chat_id, data)
                             if record_sale_result:
+                                logger.info(f"🎉 STEP 6 → Sale recorded successfully - Chat: {chat_id}")
                                 user_states.pop(chat_id, None)
                                 kb = main_menu(user.role)
                                 send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                             else:
+                                logger.error(f"❌ STEP 6 → Sale recording failed - Chat: {chat_id}")
                                 send_message(chat_id, "❌ Failed to record sale. Please try again.")
                                 user_states.pop(chat_id, None)
                         return {"ok": True}
-
+                        
                     # STEP 7: final confirmation (ONLY when customer details were collected)
                     elif step == 7:
                         confirmation = text.strip().lower()
