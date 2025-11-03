@@ -760,57 +760,120 @@ def generate_report(db: Session, report_type: str):
             lines.append(f"{r.day}: {r.total_qty} items, ${float(r.total_revenue or 0):.2f}")
         return "\n".join(lines)
 
-    # -------------------- Weekly Sales --------------------
+    # -------------------- Weekly Sales (Last 7 Days) --------------------
     elif report_type == "report_weekly":
+        from datetime import datetime, timedelta
+        
+        # Calculate last 7 days
+        today = datetime.utcnow().date()
+        week_ago = today - timedelta(days=7)
+        
         results = (
             db.query(
-                extract("week", SaleORM.sale_date).label("week"),
+                func.date(SaleORM.sale_date).label("day"),
                 func.sum(SaleORM.quantity).label("total_qty"),
                 func.sum(SaleORM.total_amount).label("total_revenue")
             )
-            .group_by("week")
-            .order_by("week")
+            .filter(SaleORM.sale_date >= week_ago)
+            .group_by(func.date(SaleORM.sale_date))
+            .order_by(func.date(SaleORM.sale_date))
             .all()
         )
+        
         if not results:
-            return "No sales data."
-        lines = ["📆 *Weekly Sales*"]
-        for r in results:
-            lines.append(f"Week {int(r.week)}: {r.total_qty} items, ${float(r.total_revenue or 0):.2f}")
-        return "\n".join(lines)
+            return "No sales data for the past week."
+        
+        # Calculate weekly totals
+        weekly_qty = sum(r.total_qty or 0 for r in results)
+        weekly_revenue = sum(r.total_revenue or 0 for r in results)
+        
+        lines = [f"📆 *Weekly Sales - Last 7 Days ({week_ago} to {today})*"]
+        lines.append(f"💰 Weekly Total: ${weekly_revenue:.2f}")
+        lines.append(f"🛒 Total Items: {weekly_qty}")
+        lines.append(f"\n📊 Daily Breakdown:")
 
-    # -------------------- Monthly Sales per Product --------------------
+        # Fill in missing days with zero sales
+        current_date = week_ago
+        while current_date <= today:
+            # Find sales for this date
+            day_sales = next((r for r in results if r.day == current_date), None)
+            
+            if day_sales:
+                lines.append(f"• {current_date}: {day_sales.total_qty} items, ${float(day_sales.total_revenue or 0):.2f}")
+            else:
+                lines.append(f"• {current_date}: 0 items, $0.00")
+            
+            current_date += timedelta(days=1)
+        
+        return "\n".join(lines)
+        
+    # -------------------- Monthly Sales (Current Month by Day) --------------------
     elif report_type == "report_monthly":
-        now = datetime.now()
+        from datetime import datetime
+        
+        today = datetime.utcnow().date()
+        month_start = today.replace(day=1)
+        
         results = (
             db.query(
-                ProductORM.name.label("product"),
+                func.date(SaleORM.sale_date).label("day"),
                 func.sum(SaleORM.quantity).label("total_qty"),
                 func.sum(SaleORM.total_amount).label("total_revenue")
             )
-            .join(ProductORM, SaleORM.product_id == ProductORM.product_id)
-            .filter(extract("year", SaleORM.sale_date) == now.year)
-            .filter(extract("month", SaleORM.sale_date) == now.month)
-            .group_by(ProductORM.name)
+            .filter(SaleORM.sale_date >= month_start)
+            .group_by(func.date(SaleORM.sale_date))
+            .order_by(func.date(SaleORM.sale_date))
             .all()
         )
+        
         if not results:
-            return "No sales data."
-        lines = ["📊 *Monthly Sales per Product*"]
+            return f"No sales data for {today.strftime('%B %Y')}."
+        
+        # Calculate monthly totals
+        monthly_qty = sum(r.total_qty or 0 for r in results)
+        monthly_revenue = sum(r.total_revenue or 0 for r in results)
+        
+        lines = [f"📊 *Monthly Sales - {today.strftime('%B %Y')}*"]
+        lines.append(f"💰 Monthly Total: ${monthly_revenue:.2f}")
+        lines.append(f"🛒 Total Items: {monthly_qty}")
+        lines.append(f"\n📅 Daily Breakdown:")
+        
         for r in results:
-            lines.append(f"{r.product}: {r.total_qty} items, ${float(r.total_revenue or 0):.2f}")
+            lines.append(f"• {r.day}: {r.total_qty} items, ${float(r.total_revenue or 0):.2f}")
+        
         return "\n".join(lines)
-
+        
     # -------------------- Low Stock Products --------------------
     elif report_type == "report_low_stock":
-        products = db.query(ProductORM).filter(ProductORM.stock <= 10).all()
+        # Products at or below their individual low stock threshold
+        products = db.query(ProductORM).filter(
+            ProductORM.stock <= ProductORM.low_stock_threshold
+        ).order_by(ProductORM.stock).all()
+        
         if not products:
-            return "All products have sufficient stock."
-        lines = ["⚠️ *Low Stock Products:*"]
-        for p in products:
-            lines.append(f"{p.name}: {p.stock} units left")
+            return "✅ All products have sufficient stock!"
+        
+        lines = ["⚠️ *Low Stock Alert*"]
+        
+        # Separate out-of-stock from low stock
+        out_of_stock = [p for p in products if p.stock == 0]
+        low_stock = [p for p in products if p.stock > 0]
+        
+        if out_of_stock:
+            lines.append("\n🔴 *OUT OF STOCK:*")
+            for p in out_of_stock:
+                lines.append(f"• {p.name}: 0 {p.unit_type}")
+        
+        if low_stock:
+            lines.append("\n🟡 *LOW STOCK:*")
+            for p in low_stock:
+                lines.append(f"• {p.name}: {p.stock} {p.unit_type} (threshold: {p.low_stock_threshold})")
+        
+        # Summary
+        lines.append(f"\n📊 Summary: {len(out_of_stock)} out of stock, {len(low_stock)} low stock")
+        
         return "\n".join(lines)
-
+        
     # -------------------- Top Products --------------------
     elif report_type == "report_top_products":
         results = (
@@ -853,40 +916,74 @@ def generate_report(db: Session, report_type: str):
 
     # -------------------- Credit List --------------------
     elif report_type == "report_credits":
+        # Only show sales where credit is pending AND customer details were recorded
         sales_with_credit = (
             db.query(SaleORM)
+            .join(CustomerORM, SaleORM.customer_id == CustomerORM.customer_id)
             .filter(SaleORM.pending_amount > 0)
+            .filter(CustomerORM.name.isnot(None))  # Only customers who provided details
             .order_by(SaleORM.sale_date.desc())
             .all()
         )
+        
         if not sales_with_credit:
-            return "No outstanding credits."
-        lines = ["💳 *Credit List*"]
+            return "✅ No outstanding credits (where customer details were recorded)."
+        
+        lines = ["💳 *Outstanding Credits*"]
+        total_credit_outstanding = 0
+        
         for sale in sales_with_credit:
-            customer_name = sale.customer.name if sale.customer else "Unknown Customer"
+            customer_name = sale.customer.name
+            contact = sale.customer.contact or "No contact"
             product = db.query(ProductORM).filter(ProductORM.product_id == sale.product_id).first()
             product_name = product.name if product else "Unknown Product"
-            lines.append(f"{customer_name}: ${float(sale.pending_amount):.2f} pending for {sale.quantity} × {product_name}")
+            
+            lines.append(f"• {customer_name} ({contact}): ${float(sale.pending_amount):.2f}")
+            lines.append(f"  📦 For: {sale.quantity} × {product_name}")
+            lines.append(f"  📅 Date: {sale.sale_date.strftime('%Y-%m-%d')}")
+            lines.append("")  # Empty line for readability
+            
+            total_credit_outstanding += sale.pending_amount
+        
+        lines.append(f"💰 *Total Credit Outstanding: ${total_credit_outstanding:.2f}*")
+        
         return "\n".join(lines)
-
+        
     # -------------------- Change List --------------------
     elif report_type == "report_change":
+        # Only show sales where change is due AND customer details were recorded
         sales_with_change = (
             db.query(SaleORM)
+            .join(CustomerORM, SaleORM.customer_id == CustomerORM.customer_id)
             .filter(SaleORM.change_left > 0)
+            .filter(CustomerORM.name.isnot(None))  # Only customers who provided details
             .order_by(SaleORM.sale_date.desc())
             .all()
         )
+        
         if not sales_with_change:
-            return "No sales with change due."
-        lines = ["💵 *Change List*"]
+            return "✅ No customers with change due (where details were recorded)."
+        
+        lines = ["💵 *Change Due to Customers*"]
+        total_change_due = 0
+        
         for sale in sales_with_change:
-            customer_name = sale.customer.name if sale.customer else "Unknown Customer"
+            customer_name = sale.customer.name
+            contact = sale.customer.contact or "No contact"
             product = db.query(ProductORM).filter(ProductORM.product_id == sale.product_id).first()
             product_name = product.name if product else "Unknown Product"
-            lines.append(f"{customer_name}: ${float(sale.change_left):.2f} change for {sale.quantity} × {product_name}")
+            
+            lines.append(f"• {customer_name} ({contact}): ${float(sale.change_left):.2f}")
+            lines.append(f"  📦 For: {sale.quantity} × {product_name}")
+            lines.append(f"  📅 Date: {sale.sale_date.strftime('%Y-%m-%d')}")
+            lines.append("")  # Empty line for readability
+            
+            total_change_due += sale.change_left
+        
+        lines.append(f"💰 *Total Change Due: ${total_change_due:.2f}*")
+        
         return "\n".join(lines)
-
+        
     else:
         return "❌ Unknown report type."
         
