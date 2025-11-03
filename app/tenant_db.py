@@ -123,40 +123,33 @@ def get_tenant_session(tenant_identifier: str, chat_id: int):
 
     # Determine schema name and base URL
     if "://" in tenant_identifier:
-        # Full URL provided (backward compatibility)
         if "#" in tenant_identifier:
             base_url, schema_name = tenant_identifier.split("#", 1)
         else:
             base_url = tenant_identifier
             schema_name = f"tenant_{chat_id}"
     else:
-        # Schema name provided (new approach)
         schema_name = tenant_identifier
-        base_url = os.getenv("DATABASE_URL").rsplit('/', 1)[0]  # Remove DB name
+        base_url = os.getenv("DATABASE_URL").rsplit('/', 1)[0]
     
     logger.info(f"🔗 Creating tenant session → {schema_name}")
 
-    # Create engine with schema in search path
+    # Create engine
     engine = create_engine(
         base_url,
         pool_pre_ping=True,
         connect_args={"options": f"-csearch_path={schema_name},public"}
     )
 
-    # ✅ CRITICAL: Set search_path BEFORE any table inspection
+    # ✅ SIMPLER APPROACH: Just set the search_path, don't manipulate metadata
     with engine.connect() as conn:
         conn.execute(text(f"SET search_path TO {schema_name},public"))
         active_path = conn.execute(text("SHOW search_path")).scalar()
         logger.info(f"🧭 Active search_path (explicitly set): {active_path}")
 
-    # ✅ IMPORTANT: Refresh metadata to pick up the new column
-    from app.models.models import TenantBase
-    TenantBase.metadata.clear()  # Clear cached metadata
-    TenantBase.metadata.reflect(bind=engine)  # Re-reflect from database
-
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
-    # ✅ Explicitly enforce schema in ORM session itself
+    # Create session and set search_path
     session = SessionLocal()
     session.execute(text(f"SET search_path TO {schema_name},public"))
     logger.info(f"✅ ORM session search_path locked to: {schema_name},public")
