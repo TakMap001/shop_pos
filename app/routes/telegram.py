@@ -558,7 +558,6 @@ def ensure_payment_method_column(tenant_db, schema_name):
 def record_cart_sale(tenant_db, chat_id, data):
     """Record a sale from cart data with payment_method tracking"""
     try:
-        from app.models.models import CustomerORM
         
         # ✅ Ensure payment_method column exists
         schema_name = f"tenant_{chat_id}"
@@ -735,27 +734,20 @@ def record_sale(db: Session, chat_id: int, data: dict):
 
 
 # -------------------- Clean Tenant-Aware Reports --------------------
-def generate_report(db: Session, report_type: str, tenant_id: int = None):
+def generate_report(db: Session, report_type: str):
     """
     Generate tenant-aware reports.
-    - db: SQLAlchemy session (tenant DB or central DB)
+    - db: SQLAlchemy session (already tenant-specific)
     - report_type: report_daily, report_weekly, report_monthly, etc.
-    - tenant_id: optional, used for multi-tenant filtering in central DB
     """
-
-    def apply_tenant_filter(query, model):
-        return query.filter(model.tenant_id == tenant_id) if tenant_id else query
 
     # -------------------- Daily Sales --------------------
     if report_type == "report_daily":
         results = (
-            apply_tenant_filter(
-                db.query(
-                    func.date(SaleORM.sale_date).label("day"),
-                    func.sum(SaleORM.quantity).label("total_qty"),
-                    func.sum(SaleORM.total_amount).label("total_revenue")
-                ),
-                SaleORM
+            db.query(
+                func.date(SaleORM.sale_date).label("day"),
+                func.sum(SaleORM.quantity).label("total_qty"),
+                func.sum(SaleORM.total_amount).label("total_revenue")
             )
             .group_by(func.date(SaleORM.sale_date))
             .order_by(func.date(SaleORM.sale_date))
@@ -765,19 +757,16 @@ def generate_report(db: Session, report_type: str, tenant_id: int = None):
             return "No sales data."
         lines = ["📅 *Daily Sales*"]
         for r in results:
-            lines.append(f"{r.day}: {r.total_qty} items, ${float(r.total_revenue)}")
+            lines.append(f"{r.day}: {r.total_qty} items, ${float(r.total_revenue or 0):.2f}")
         return "\n".join(lines)
 
     # -------------------- Weekly Sales --------------------
     elif report_type == "report_weekly":
         results = (
-            apply_tenant_filter(
-                db.query(
-                    extract("week", SaleORM.sale_date).label("week"),
-                    func.sum(SaleORM.quantity).label("total_qty"),
-                    func.sum(SaleORM.total_amount).label("total_revenue")
-                ),
-                SaleORM
+            db.query(
+                extract("week", SaleORM.sale_date).label("week"),
+                func.sum(SaleORM.quantity).label("total_qty"),
+                func.sum(SaleORM.total_amount).label("total_revenue")
             )
             .group_by("week")
             .order_by("week")
@@ -787,20 +776,17 @@ def generate_report(db: Session, report_type: str, tenant_id: int = None):
             return "No sales data."
         lines = ["📆 *Weekly Sales*"]
         for r in results:
-            lines.append(f"Week {int(r.week)}: {r.total_qty} items, ${float(r.total_revenue)}")
+            lines.append(f"Week {int(r.week)}: {r.total_qty} items, ${float(r.total_revenue or 0):.2f}")
         return "\n".join(lines)
 
     # -------------------- Monthly Sales per Product --------------------
     elif report_type == "report_monthly":
         now = datetime.now()
         results = (
-            apply_tenant_filter(
-                db.query(
-                    ProductORM.name.label("product"),
-                    func.sum(SaleORM.quantity).label("total_qty"),
-                    func.sum(SaleORM.total_amount).label("total_revenue")
-                ),
-                SaleORM
+            db.query(
+                ProductORM.name.label("product"),
+                func.sum(SaleORM.quantity).label("total_qty"),
+                func.sum(SaleORM.total_amount).label("total_revenue")
             )
             .join(ProductORM, SaleORM.product_id == ProductORM.product_id)
             .filter(extract("year", SaleORM.sale_date) == now.year)
@@ -812,12 +798,12 @@ def generate_report(db: Session, report_type: str, tenant_id: int = None):
             return "No sales data."
         lines = ["📊 *Monthly Sales per Product*"]
         for r in results:
-            lines.append(f"{r.product}: {r.total_qty} items, ${float(r.total_revenue)}")
+            lines.append(f"{r.product}: {r.total_qty} items, ${float(r.total_revenue or 0):.2f}")
         return "\n".join(lines)
 
     # -------------------- Low Stock Products --------------------
     elif report_type == "report_low_stock":
-        products = apply_tenant_filter(db.query(ProductORM), ProductORM).filter(ProductORM.stock <= 10).all()
+        products = db.query(ProductORM).filter(ProductORM.stock <= 10).all()
         if not products:
             return "All products have sufficient stock."
         lines = ["⚠️ *Low Stock Products:*"]
@@ -828,13 +814,10 @@ def generate_report(db: Session, report_type: str, tenant_id: int = None):
     # -------------------- Top Products --------------------
     elif report_type == "report_top_products":
         results = (
-            apply_tenant_filter(
-                db.query(
-                    ProductORM.name.label("product"),
-                    func.sum(SaleORM.quantity).label("total_qty"),
-                    func.sum(SaleORM.total_amount).label("total_revenue")
-                ),
-                ProductORM
+            db.query(
+                ProductORM.name.label("product"),
+                func.sum(SaleORM.quantity).label("total_qty"),
+                func.sum(SaleORM.total_amount).label("total_revenue")
             )
             .join(SaleORM, ProductORM.product_id == SaleORM.product_id)
             .group_by(ProductORM.name)
@@ -846,73 +829,24 @@ def generate_report(db: Session, report_type: str, tenant_id: int = None):
             return "No sales data."
         lines = ["🏆 *Top Selling Products*"]
         for r in results:
-            lines.append(f"{r.product}: {r.total_qty} sold, ${float(r.total_revenue)} revenue")
-        return "\n".join(lines)
-
-    # -------------------- Top Customers --------------------
-    elif report_type == "report_top_customers":
-        results = (
-            apply_tenant_filter(
-                db.query(
-                    User.name.label("user"),
-                    func.sum(SaleORM.quantity).label("total_qty"),
-                    func.sum(SaleORM.total_amount).label("total_spent")
-                ),
-                User
-            )
-            .join(SaleORM, User.user_id == SaleORM.user_id)
-            .group_by(User.name)
-            .order_by(func.sum(SaleORM.total_amount).desc())
-            .limit(5)
-            .all()
-        )
-        if not results:
-            return "No sales data."
-        lines = ["👥 *Top Customers*"]
-        for r in results:
-            lines.append(f"{r.user}: {r.total_qty} items, ${float(r.total_spent)} spent")
-        return "\n".join(lines)
-
-    # -------------------- Top Repeat Customers --------------------
-    elif report_type == "report_top_repeat_customers":
-        customers = (
-            apply_tenant_filter(
-                db.query(
-                    SaleORM.user_id,
-                    func.count(SaleORM.sale_id).label("num_purchases"),
-                    func.sum(SaleORM.total_amount).label("total_spent")
-                ),
-                SaleORM
-            )
-            .group_by(SaleORM.user_id)
-            .order_by(func.count(SaleORM.sale_id).desc())
-            .limit(5)
-            .all()
-        )
-        if not customers:
-            return "No sales data."
-        lines = ["🔁 *Top Repeat Customers*"]
-        for c in customers:
-            user = apply_tenant_filter(db.query(User), User).filter(User.user_id == c.user_id).first()
-            name = user.name if user else f"User {c.user_id}"
-            lines.append(f"{name}: {c.num_purchases} purchases, ${float(c.total_spent)} spent")
+            lines.append(f"{r.product}: {r.total_qty} sold, ${float(r.total_revenue or 0):.2f} revenue")
         return "\n".join(lines)
 
     # -------------------- Average Order Value --------------------
     elif report_type == "report_aov":
-        total_orders = apply_tenant_filter(db.query(func.count(SaleORM.sale_id)), SaleORM).scalar() or 0
-        total_revenue = apply_tenant_filter(db.query(func.sum(SaleORM.total_amount)), SaleORM).scalar() or 0
+        total_orders = db.query(func.count(SaleORM.sale_id)).scalar() or 0
+        total_revenue = db.query(func.sum(SaleORM.total_amount)).scalar() or 0
         aov = round(total_revenue / total_orders, 2) if total_orders > 0 else 0
-        return f"💰 *Average Order Value*\nTotal Orders: {total_orders}\nTotal Revenue: ${total_revenue}\nAOV: ${aov}"
+        return f"💰 *Average Order Value*\nTotal Orders: {total_orders}\nTotal Revenue: ${total_revenue:.2f}\nAOV: ${aov:.2f}"
 
     # -------------------- Stock Turnover --------------------
     elif report_type == "report_stock_turnover":
-        products = apply_tenant_filter(db.query(ProductORM), ProductORM).all()
+        products = db.query(ProductORM).all()
         if not products:
             return "No products found."
         lines = ["📦 *Stock Turnover per Product*"]
         for p in products:
-            total_sold = apply_tenant_filter(db.query(func.sum(SaleORM.quantity)), SaleORM).filter(SaleORM.product_id == p.product_id).scalar() or 0
+            total_sold = db.query(func.sum(SaleORM.quantity)).filter(SaleORM.product_id == p.product_id).scalar() or 0
             turnover_rate = total_sold / (p.stock + total_sold) if (p.stock + total_sold) > 0 else 0
             lines.append(f"{p.name}: Sold {total_sold}, Stock {p.stock}, Turnover Rate {turnover_rate:.2f}")
         return "\n".join(lines)
@@ -920,7 +854,7 @@ def generate_report(db: Session, report_type: str, tenant_id: int = None):
     # -------------------- Credit List --------------------
     elif report_type == "report_credits":
         sales_with_credit = (
-            apply_tenant_filter(db.query(SaleORM), SaleORM)
+            db.query(SaleORM)
             .filter(SaleORM.pending_amount > 0)
             .order_by(SaleORM.sale_date.desc())
             .all()
@@ -928,36 +862,34 @@ def generate_report(db: Session, report_type: str, tenant_id: int = None):
         if not sales_with_credit:
             return "No outstanding credits."
         lines = ["💳 *Credit List*"]
-        for s in sales_with_credit:
-            customer = db.query(CustomerORM).filter(CustomerORM.customer_id == s.customer_id).first()
-            if customer:
-                lines.append(
-                    f"{customer.name} ({customer.contact}): ${float(s.pending_amount)} pending for {s.quantity} × {s.unit_type} of {s.product.name}"
-                )
+        for sale in sales_with_credit:
+            customer_name = sale.customer.name if sale.customer else "Unknown Customer"
+            product = db.query(ProductORM).filter(ProductORM.product_id == sale.product_id).first()
+            product_name = product.name if product else "Unknown Product"
+            lines.append(f"{customer_name}: ${float(sale.pending_amount):.2f} pending for {sale.quantity} × {product_name}")
         return "\n".join(lines)
 
     # -------------------- Change List --------------------
     elif report_type == "report_change":
         sales_with_change = (
-            apply_tenant_filter(db.query(SaleORM), SaleORM)
+            db.query(SaleORM)
             .filter(SaleORM.change_left > 0)
             .order_by(SaleORM.sale_date.desc())
             .all()
         )
         if not sales_with_change:
-            return "No sales with change."
+            return "No sales with change due."
         lines = ["💵 *Change List*"]
-        for s in sales_with_change:
-            customer = db.query(CustomerORM).filter(CustomerORM.customer_id == s.customer_id).first()
-            if customer:
-                lines.append(
-                    f"{customer.name} ({customer.contact}): ${float(s.change_left)} change for {s.quantity} × {s.unit_type} of {s.product.name}"
-                )
+        for sale in sales_with_change:
+            customer_name = sale.customer.name if sale.customer else "Unknown Customer"
+            product = db.query(ProductORM).filter(ProductORM.product_id == sale.product_id).first()
+            product_name = product.name if product else "Unknown Product"
+            lines.append(f"{customer_name}: ${float(sale.change_left):.2f} change for {sale.quantity} × {product_name}")
         return "\n".join(lines)
 
     else:
         return "❌ Unknown report type."
-
+        
 
 def report_menu_keyboard(role: str):
     """Build the reports submenu with buttons."""
@@ -969,8 +901,6 @@ def report_menu_keyboard(role: str):
                 [{"text": "📊 Monthly Sales per Product", "callback_data": "report_monthly"}],
                 [{"text": "⚠️ Low Stock Products", "callback_data": "report_low_stock"}],
                 [{"text": "🏆 Top Products", "callback_data": "report_top_products"}],
-                [{"text": "👥 Top Customers", "callback_data": "report_top_customers"}],
-                [{"text": "🔁 Top Repeat Customers", "callback_data": "report_top_repeat_customers"}],
                 [{"text": "💰 Average Order Value", "callback_data": "report_aov"}],
                 [{"text": "📦 Stock Turnover", "callback_data": "report_stock_turnover"}],
                 [{"text": "💳 Credit List", "callback_data": "report_credits"}],
@@ -1588,6 +1518,36 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 send_message(chat_id, "📊 Select a report:", kb_dict)
                 return {"ok": True}
 
+            # -------------------- Report Callbacks --------------------
+            elif text in ["report_daily", "report_weekly", "report_monthly", "report_low_stock", 
+                          "report_top_products", "report_aov", "report_stock_turnover", 
+                          "report_credits", "report_change"]:
+    
+                logger.info(f"🎯 Processing callback: {text} from chat_id={chat_id}")
+    
+                tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                if tenant_db is None:
+                    send_message(chat_id, "❌ Unable to access tenant database.")
+                    return {"ok": True}
+    
+                try:
+                    # Use your existing generate_report function
+                    report = generate_report(tenant_db, text)
+                    send_message(chat_id, report)
+                except Exception as e:
+                    logger.error(f"❌ {text} failed: {e}")
+                    send_message(chat_id, f"❌ Failed to generate {text.replace('_', ' ')}.")
+    
+                return {"ok": True}
+
+            # Handle back to menu
+            elif text == "back_to_menu":
+                logger.info(f"🎯 Processing callback: back_to_menu from chat_id={chat_id}")
+    
+                kb = main_menu(user.role)
+                send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+                return {"ok": True}
+    
             # -------------------- Help --------------------
             elif text == "help":
                 help_text = (
@@ -2677,7 +2637,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             send_message(chat_id, "❌ Failed to record sale. Please try again.")
                             user_states.pop(chat_id, None)
                         return {"ok": True}
-                                                                        
+                
+                # Reports
+                elif text == "📊 Reports":
+                    kb_dict = report_menu_keyboard(user.role)
+                    send_message(chat_id, "📊 Select a report:", kb_dict)
+                    return {"ok": True}
+                                                            
         return {"ok": True}
 
     except Exception as e:
