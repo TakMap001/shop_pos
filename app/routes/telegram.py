@@ -1108,7 +1108,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 return {"ok": True}
 
             # -------------------- Quick Stock Update --------------------
-            elif text == "📈 Quick Stock Update":
+            elif text == "quick_stock_update":
                 user_states[chat_id] = {"action": "quick_stock_update", "step": 1, "data": {}}
                 send_message(chat_id, "🔍 Enter product name to search:")
                 return {"ok": True}
@@ -1149,7 +1149,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 kb = main_menu(user.role)
                 send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                 return {"ok": True}
-    
+                    
             # -------------------- Update Product --------------------
             elif text == "update_product":
                 tenant_db = get_tenant_session(user.tenant_schema, chat_id)
