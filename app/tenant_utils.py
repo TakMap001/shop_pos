@@ -6,31 +6,23 @@ from app.models.models import TenantBase
 
 logger = logging.getLogger(__name__)
 
+# In app/tenant_utils.py - Update create_tenant_schema function
 def create_tenant_schema(schema_name):
-    """Create a new tenant schema with all required tables - FIXED VERSION"""
+    """Create a new tenant schema with all required tables - IMPROVED VERSION"""
     try:
         with engine.connect() as conn:
-            # ✅ Create schema if not exists
-            conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema_name}"))
+            # ✅ DROP AND RECREATE for complete freshness
+            conn.execute(text(f"DROP SCHEMA IF EXISTS {schema_name} CASCADE"))
+            conn.execute(text(f"CREATE SCHEMA {schema_name}"))
             conn.commit()
             
-            # ✅ Set search path to the new schema BEFORE creating tables
+            logger.info(f"✅ Fresh schema '{schema_name}' created")
+            
+            # Set search path to the new schema
             conn.execute(text(f"SET search_path TO {schema_name}"))
             
-            # ✅ Create all tables in the tenant schema
-            # This ensures tables are created in the correct schema
+            # Create all tables in the tenant schema
             TenantBase.metadata.create_all(bind=conn)
-            
-            # ✅ Verify tables were created in correct schema
-            result = conn.execute(text("""
-                SELECT table_name, table_schema
-                FROM information_schema.tables 
-                WHERE table_schema = :schema
-                ORDER BY table_name
-            """), {"schema": schema_name})
-            
-            created_tables = [row[0] for row in result]
-            logger.info(f"🔍 Tables created in {schema_name}: {created_tables}")
             
             # Reset search path
             conn.execute(text("SET search_path TO public"))
