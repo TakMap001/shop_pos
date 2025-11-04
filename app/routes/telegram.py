@@ -2246,21 +2246,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             db.commit()
                             logger.info(f"✅ Linked user {user.username} to tenant schema '{schema_name}'")
 
-                            # ✅ VERIFY: Ensure schema is empty for this user
-                            verification_db = get_tenant_session(schema_name, chat_id)
-                            if verification_db:
-                                product_count = verification_db.query(ProductORM).count()
-                                logger.info(f"🔍 SCHEMA VERIFICATION - Schema: {schema_name}, Products: {product_count}")
-                    
-                                # If this user has products but shouldn't (new setup), clean them
-                                if product_count > 0 and not user.tenant_schema:
-                                    logger.warning(f"🔄 Cleaning {product_count} existing products from new user's schema")
-                                    verification_db.query(ProductORM).delete()
-                                    verification_db.query(SaleORM).delete()
-                                    verification_db.query(CustomerORM).delete()
-                                    verification_db.commit()
-                                    logger.info(f"✅ Cleared existing data from {schema_name}")
-
                             logger.info(f"✅ Tenant schema '{schema_name}' ready for {user.username}")
 
                         except Exception as e:
