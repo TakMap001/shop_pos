@@ -747,6 +747,438 @@ def record_sale(db: Session, chat_id: int, data: dict):
 # -------------------- Clean Tenant-Aware Reports --------------------
 def generate_report(db: Session, report_type: str):
     """
+    Generate tenant-aware reports with payment method details.
+    - db: SQLAlchemy session (already tenant-specific)
+    - report_type: report_daily, report_weekly, report_monthly, etc.
+    """
+
+    # -------------------- Daily Sales --------------------
+    if report_type == "report_daily":
+        # Get daily totals with payment method breakdown
+        daily_totals = (
+            db.query(
+                func.date(SaleORM.sale_date).label("day"),
+                func.sum(SaleORM.total_amount).label("total_revenue"),
+                func.count(SaleORM.sale_id).label("total_orders")
+            )
+            .group_by(func.date(SaleORM.sale_date))
+            .order_by(func.date(SaleORM.sale_date).desc())
+            .limit(1)
+            .first()
+        )
+        
+        if not daily_totals:
+            return "No sales data for today."
+        
+        # Get payment method breakdown for today
+        payment_breakdown = (
+            db.query(
+                SaleORM.payment_method,
+                func.sum(SaleORM.total_amount).label("amount"),
+                func.count(SaleORM.sale_id).label("count")
+            )
+            .filter(func.date(SaleORM.sale_date) == daily_totals.day)
+            .group_by(SaleORM.payment_method)
+            .all()
+        )
+        
+        lines = ["📅 *Daily Sales Report*"]
+        lines.append(f"📊 Date: {daily_totals.day}")
+        lines.append(f"💰 Total Revenue: ${float(daily_totals.total_revenue or 0):.2f}")
+        lines.append(f"🛒 Total Orders: {daily_totals.total_orders}")
+        
+        # Payment method breakdown
+        lines.append(f"\n💳 Payment Methods:")
+        for payment in payment_breakdown:
+            method = payment.payment_method or "Cash"  # Default to Cash if null
+            percentage = (payment.amount / daily_totals.total_revenue * 100) if daily_totals.total_revenue > 0 else 0
+            lines.append(f"• {method}: ${float(payment.amount):.2f} ({payment.count} orders, {percentage:.1f}%)")
+        
+        return "\n".join(lines)
+
+    # -------------------- Weekly Sales (Last 7 Days) --------------------
+    elif report_type == "report_weekly":
+        from datetime import datetime, timedelta
+        
+        # Calculate last 7 days
+        today = datetime.utcnow().date()
+        week_ago = today - timedelta(days=7)
+        
+        # Get weekly totals
+        weekly_totals = (
+            db.query(
+                func.sum(SaleORM.total_amount).label("total_revenue"),
+                func.count(SaleORM.sale_id).label("total_orders")
+            )
+            .filter(SaleORM.sale_date >= week_ago)
+            .first()
+        )
+        
+        if not weekly_totals or not weekly_totals.total_revenue:
+            return "No sales data for the past week."
+        
+        # Get payment method breakdown for the week
+        payment_breakdown = (
+            db.query(
+                SaleORM.payment_method,
+                func.sum(SaleORM.total_amount).label("amount"),
+                func.count(SaleORM.sale_id).label("count")
+            )
+            .filter(SaleORM.sale_date >= week_ago)
+            .group_by(SaleORM.payment_method)
+            .all()
+        )
+        
+        # Get daily breakdown
+        daily_results = (
+            db.query(
+                func.date(SaleORM.sale_date).label("day"),
+                func.sum(SaleORM.total_amount).label("daily_revenue"),
+                func.count(SaleORM.sale_id).label("daily_orders")
+            )
+            .filter(SaleORM.sale_date >= week_ago)
+            .group_by(func.date(SaleORM.sale_date))
+            .order_by(func.date(SaleORM.sale_date))
+            .all()
+        )
+        
+        lines = [f"📆 *Weekly Sales Report - Last 7 Days*"]
+        lines.append(f"📅 Period: {week_ago} to {today}")
+        lines.append(f"💰 Total Revenue: ${float(weekly_totals.total_revenue):.2f}")
+        lines.append(f"🛒 Total Orders: {weekly_totals.total_orders}")
+        
+        # Payment method breakdown
+        lines.append(f"\n💳 Payment Methods:")
+        for payment in payment_breakdown:
+            method = payment.payment_method or "Cash"
+            percentage = (payment.amount / weekly_totals.total_revenue * 100) if weekly_totals.total_revenue > 0 else 0
+            lines.append(f"• {method}: ${float(payment.amount):.2f} ({payment.count} orders, {percentage:.1f}%)")
+        
+        # Daily breakdown
+        lines.append(f"\n📊 Daily Breakdown:")
+        
+        # Fill in missing days with zero sales
+        current_date = week_ago
+        while current_date <= today:
+            # Find sales for this date
+            day_sales = next((r for r in daily_results if r.day == current_date), None)
+            
+            if day_sales:
+                lines.append(f"• {current_date}: ${float(day_sales.daily_revenue or 0):.2f} ({day_sales.daily_orders} orders)")
+            else:
+                lines.append(f"• {current_date}: $0.00 (0 orders)")
+            
+            current_date += timedelta(days=1)
+        
+        return "\n".join(lines)
+        
+    # -------------------- Monthly Sales (Current Month by Day) --------------------
+    elif report_type == "report_monthly":
+        from datetime import datetime
+        
+        today = datetime.utcnow().date()
+        month_start = today.replace(day=1)
+        
+        # Get monthly totals
+        monthly_totals = (
+            db.query(
+                func.sum(SaleORM.total_amount).label("total_revenue"),
+                func.count(SaleORM.sale_id).label("total_orders")
+            )
+            .filter(SaleORM.sale_date >= month_start)
+            .first()
+        )
+        
+        if not monthly_totals or not monthly_totals.total_revenue:
+            return f"No sales data for {today.strftime('%B %Y')}."
+        
+        # Get payment method breakdown for the month
+        payment_breakdown = (
+            db.query(
+                SaleORM.payment_method,
+                func.sum(SaleORM.total_amount).label("amount"),
+                func.count(SaleORM.sale_id).label("count")
+            )
+            .filter(SaleORM.sale_date >= month_start)
+            .group_by(SaleORM.payment_method)
+            .all()
+        )
+        
+        # Get daily results
+        daily_results = (
+            db.query(
+                func.date(SaleORM.sale_date).label("day"),
+                func.sum(SaleORM.total_amount).label("daily_revenue"),
+                func.count(SaleORM.sale_id).label("daily_orders")
+            )
+            .filter(SaleORM.sale_date >= month_start)
+            .group_by(func.date(SaleORM.sale_date))
+            .order_by(func.date(SaleORM.sale_date))
+            .all()
+        )
+        
+        lines = [f"📊 *Monthly Sales Report - {today.strftime('%B %Y')}*"]
+        lines.append(f"💰 Monthly Total: ${float(monthly_totals.total_revenue):.2f}")
+        lines.append(f"🛒 Total Orders: {monthly_totals.total_orders}")
+        
+        # Payment method breakdown
+        lines.append(f"\n💳 Payment Methods:")
+        for payment in payment_breakdown:
+            method = payment.payment_method or "Cash"
+            percentage = (payment.amount / monthly_totals.total_revenue * 100) if monthly_totals.total_revenue > 0 else 0
+            lines.append(f"• {method}: ${float(payment.amount):.2f} ({payment.count} orders, {percentage:.1f}%)")
+        
+        lines.append(f"\n📅 Daily Breakdown:")
+        
+        for r in daily_results:
+            lines.append(f"• {r.day}: ${float(r.daily_revenue or 0):.2f} ({r.daily_orders} orders)")
+        
+        return "\n".join(lines)
+
+    # -------------------- Payment Method Summary Report --------------------
+    elif report_type == "report_payment_summary":
+        from datetime import datetime, timedelta
+        
+        today = datetime.utcnow().date()
+        month_start = today.replace(day=1)
+        week_ago = today - timedelta(days=7)
+        
+        # Today's payment breakdown
+        today_breakdown = (
+            db.query(
+                SaleORM.payment_method,
+                func.sum(SaleORM.total_amount).label("amount"),
+                func.count(SaleORM.sale_id).label("count")
+            )
+            .filter(func.date(SaleORM.sale_date) == today)
+            .group_by(SaleORM.payment_method)
+            .all()
+        )
+        
+        # Weekly payment breakdown
+        weekly_breakdown = (
+            db.query(
+                SaleORM.payment_method,
+                func.sum(SaleORM.total_amount).label("amount"),
+                func.count(SaleORM.sale_id).label("count")
+            )
+            .filter(SaleORM.sale_date >= week_ago)
+            .group_by(SaleORM.payment_method)
+            .all()
+        )
+        
+        # Monthly payment breakdown
+        monthly_breakdown = (
+            db.query(
+                SaleORM.payment_method,
+                func.sum(SaleORM.total_amount).label("amount"),
+                func.count(SaleORM.sale_id).label("count")
+            )
+            .filter(SaleORM.sale_date >= month_start)
+            .group_by(SaleORM.payment_method)
+            .all()
+        )
+        
+        lines = ["💳 *Payment Method Summary*"]
+        
+        # Today's summary
+        lines.append(f"\n📅 Today ({today}):")
+        today_total = sum(payment.amount for payment in today_breakdown)
+        for payment in today_breakdown:
+            method = payment.payment_method or "Cash"
+            percentage = (payment.amount / today_total * 100) if today_total > 0 else 0
+            lines.append(f"• {method}: ${float(payment.amount):.2f} ({payment.count} orders, {percentage:.1f}%)")
+        
+        if not today_breakdown:
+            lines.append("• No sales today")
+        
+        # Weekly summary
+        lines.append(f"\n📆 Last 7 Days:")
+        weekly_total = sum(payment.amount for payment in weekly_breakdown)
+        for payment in weekly_breakdown:
+            method = payment.payment_method or "Cash"
+            percentage = (payment.amount / weekly_total * 100) if weekly_total > 0 else 0
+            lines.append(f"• {method}: ${float(payment.amount):.2f} ({payment.count} orders, {percentage:.1f}%)")
+        
+        # Monthly summary
+        lines.append(f"\n📊 This Month ({today.strftime('%B')}):")
+        monthly_total = sum(payment.amount for payment in monthly_breakdown)
+        for payment in monthly_breakdown:
+            method = payment.payment_method or "Cash"
+            percentage = (payment.amount / monthly_total * 100) if monthly_total > 0 else 0
+            lines.append(f"• {method}: ${float(payment.amount):.2f} ({payment.count} orders, {percentage:.1f}%)")
+        
+        return "\n".join(lines)
+        
+    # -------------------- Low Stock Products --------------------
+    elif report_type == "report_low_stock":
+        # Products at or below their individual low stock threshold
+        products = db.query(ProductORM).filter(
+            ProductORM.stock <= ProductORM.low_stock_threshold
+        ).order_by(ProductORM.stock).all()
+        
+        if not products:
+            return "✅ All products have sufficient stock!"
+        
+        lines = ["⚠️ *Low Stock Alert*"]
+        
+        # Separate out-of-stock from low stock
+        out_of_stock = [p for p in products if p.stock == 0]
+        low_stock = [p for p in products if p.stock > 0]
+        
+        if out_of_stock:
+            lines.append("\n🔴 *OUT OF STOCK:*")
+            for p in out_of_stock:
+                lines.append(f"• {p.name}: 0 {p.unit_type}")
+        
+        if low_stock:
+            lines.append("\n🟡 *LOW STOCK:*")
+            for p in low_stock:
+                lines.append(f"• {p.name}: {p.stock} {p.unit_type} (threshold: {p.low_stock_threshold})")
+        
+        # Summary
+        lines.append(f"\n📊 Summary: {len(out_of_stock)} out of stock, {len(low_stock)} low stock")
+        
+        return "\n".join(lines)
+        
+    # -------------------- Top Products --------------------
+    elif report_type == "report_top_products":
+        results = (
+            db.query(
+                ProductORM.name.label("product"),
+                func.sum(SaleORM.quantity).label("total_qty"),
+                func.sum(SaleORM.total_amount).label("total_revenue")
+            )
+            .join(SaleORM, ProductORM.product_id == SaleORM.product_id)
+            .group_by(ProductORM.name)
+            .order_by(func.sum(SaleORM.quantity).desc())
+            .limit(5)
+            .all()
+        )
+        if not results:
+            return "No sales data."
+        lines = ["🏆 *Top Selling Products*"]
+        for r in results:
+            lines.append(f"{r.product}: {r.total_qty} sold, ${float(r.total_revenue or 0):.2f} revenue")
+        return "\n".join(lines)
+
+    # -------------------- Average Order Value --------------------
+    elif report_type == "report_aov":
+        total_orders = db.query(func.count(SaleORM.sale_id)).scalar() or 0
+        total_revenue = db.query(func.sum(SaleORM.total_amount)).scalar() or 0
+        aov = round(total_revenue / total_orders, 2) if total_orders > 0 else 0
+        
+        # Get payment method breakdown for AOV context
+        payment_breakdown = (
+            db.query(
+                SaleORM.payment_method,
+                func.avg(SaleORM.total_amount).label("avg_amount"),
+                func.count(SaleORM.sale_id).label("count")
+            )
+            .group_by(SaleORM.payment_method)
+            .all()
+        )
+        
+        lines = ["💰 *Average Order Value*"]
+        lines.append(f"Total Orders: {total_orders}")
+        lines.append(f"Total Revenue: ${total_revenue:.2f}")
+        lines.append(f"AOV: ${aov:.2f}")
+        
+        if payment_breakdown:
+            lines.append(f"\n💳 AOV by Payment Method:")
+            for payment in payment_breakdown:
+                method = payment.payment_method or "Cash"
+                lines.append(f"• {method}: ${float(payment.avg_amount or 0):.2f} ({payment.count} orders)")
+        
+        return "\n".join(lines)
+
+    # -------------------- Stock Turnover --------------------
+    elif report_type == "report_stock_turnover":
+        products = db.query(ProductORM).all()
+        if not products:
+            return "No products found."
+        lines = ["📦 *Stock Turnover per Product*"]
+        for p in products:
+            total_sold = db.query(func.sum(SaleORM.quantity)).filter(SaleORM.product_id == p.product_id).scalar() or 0
+            turnover_rate = total_sold / (p.stock + total_sold) if (p.stock + total_sold) > 0 else 0
+            lines.append(f"{p.name}: Sold {total_sold}, Stock {p.stock}, Turnover Rate {turnover_rate:.2f}")
+        return "\n".join(lines)
+
+    # -------------------- Credit List --------------------
+    elif report_type == "report_credits":
+        # Only show sales where credit is pending AND customer details were recorded
+        sales_with_credit = (
+            db.query(SaleORM)
+            .join(CustomerORM, SaleORM.customer_id == CustomerORM.customer_id)
+            .filter(SaleORM.pending_amount > 0)
+            .filter(CustomerORM.name.isnot(None))  # Only customers who provided details
+            .order_by(SaleORM.sale_date.desc())
+            .all()
+        )
+        
+        if not sales_with_credit:
+            return "✅ No outstanding credits (where customer details were recorded)."
+        
+        lines = ["💳 *Outstanding Credits*"]
+        total_credit_outstanding = 0
+        
+        for sale in sales_with_credit:
+            customer_name = sale.customer.name
+            contact = sale.customer.contact or "No contact"
+            product = db.query(ProductORM).filter(ProductORM.product_id == sale.product_id).first()
+            product_name = product.name if product else "Unknown Product"
+            
+            lines.append(f"• {customer_name} ({contact}): ${float(sale.pending_amount):.2f}")
+            lines.append(f"  📦 For: {sale.quantity} × {product_name}")
+            lines.append(f"  📅 Date: {sale.sale_date.strftime('%Y-%m-%d')}")
+            lines.append("")  # Empty line for readability
+            
+            total_credit_outstanding += sale.pending_amount
+        
+        lines.append(f"💰 *Total Credit Outstanding: ${total_credit_outstanding:.2f}*")
+        
+        return "\n".join(lines)
+        
+    # -------------------- Change List --------------------
+    elif report_type == "report_change":
+        # Only show sales where change is due AND customer details were recorded
+        sales_with_change = (
+            db.query(SaleORM)
+            .join(CustomerORM, SaleORM.customer_id == CustomerORM.customer_id)
+            .filter(SaleORM.change_left > 0)
+            .filter(CustomerORM.name.isnot(None))  # Only customers who provided details
+            .order_by(SaleORM.sale_date.desc())
+            .all()
+        )
+        
+        if not sales_with_change:
+            return "✅ No customers with change due (where details were recorded)."
+        
+        lines = ["💵 *Change Due to Customers*"]
+        total_change_due = 0
+        
+        for sale in sales_with_change:
+            customer_name = sale.customer.name
+            contact = sale.customer.contact or "No contact"
+            product = db.query(ProductORM).filter(ProductORM.product_id == sale.product_id).first()
+            product_name = product.name if product else "Unknown Product"
+            
+            lines.append(f"• {customer_name} ({contact}): ${float(sale.change_left):.2f}")
+            lines.append(f"  📦 For: {sale.quantity} × {product_name}")
+            lines.append(f"  📅 Date: {sale.sale_date.strftime('%Y-%m-%d')}")
+            lines.append("")  # Empty line for readability
+            
+            total_change_due += sale.change_left
+        
+        lines.append(f"💰 *Total Change Due: ${total_change_due:.2f}*")
+        
+        return "\n".join(lines)
+        
+    else:
+        return "❌ Unknown report type."
+        
+def generate_report(db: Session, report_type: str):
+    """
     Generate tenant-aware reports.
     - db: SQLAlchemy session (already tenant-specific)
     - report_type: report_daily, report_weekly, report_monthly, etc.
@@ -1067,6 +1499,34 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
         # 1. Get user from central DB
         user = db.query(User).filter(User.chat_id == chat_id).first()
 
+        # ✅ SECURITY: Fix schema assignment for EXISTING users
+        if user and user.tenant_schema:
+            expected_schema = f"tenant_{chat_id}"
+            if user.tenant_schema != expected_schema:
+                logger.error(f"🚨 SECURITY: User {user.username} has schema '{user.tenant_schema}' but should have '{expected_schema}'")
+        
+                # Force correction using create_tenant_schema
+                try:
+                    schema_created = create_tenant_schema(expected_schema)
+                    if schema_created:
+                        user.tenant_schema = expected_schema
+                        db.commit()
+                        logger.info(f"✅ Security fix: {user.username} → {expected_schema}")
+                
+                        # Clean any existing data in the correct schema
+                        tenant_db = get_tenant_session(expected_schema, chat_id)
+                        if tenant_db:
+                            product_count = tenant_db.query(ProductORM).count()
+                            if product_count > 0:
+                                tenant_db.query(ProductORM).delete()
+                                tenant_db.query(SaleORM).delete()
+                                tenant_db.commit()
+                                logger.info(f"✅ Cleared {product_count} products from corrected schema")
+                    else:
+                        logger.error(f"❌ Could not create correct schema {expected_schema}")
+                except Exception as e:
+                    logger.error(f"❌ Security fix failed: {e}")
+
         # ✅ CRITICAL: Handle callbacks FIRST and RETURN immediately
         if update_type == "callback":
             logger.info(f"🎯 Processing callback: {text} from chat_id={chat_id}")
@@ -1077,7 +1537,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 return {"ok": True}
 
             role = user.role
-
+            
             # -------------------- Cancel button --------------------
             if text == "back_to_menu":
                 user_states.pop(chat_id, None)
@@ -1773,39 +2233,35 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         try:
                             schema_name = f"tenant_{chat_id}"
 
-                            # ✅ Create tenant schema if not exists with NEW method
-                            from app.tenant_utils import create_tenant_schema
+                            # ✅ Use create_tenant_schema from tenant_utils.py
                             tenant_created = create_tenant_schema(schema_name)
-                            
+                
                             if not tenant_created:
                                 logger.error(f"❌ Failed to create tenant schema for owner {user.username}")
                                 send_message(chat_id, "❌ Could not initialize tenant database.")
                                 return {"ok": True}
 
-                            # ✅ Always store only schema name in user.tenant_schema
-                            if not user.tenant_schema or user.tenant_schema != schema_name:
-                                user.tenant_schema = schema_name
-                                db.commit()
-                                logger.info(f"✅ Linked user {user.username} to tenant schema '{schema_name}'")
+                            # ✅ CRITICAL: Always update user with correct schema
+                            user.tenant_schema = schema_name
+                            db.commit()
+                            logger.info(f"✅ Linked user {user.username} to tenant schema '{schema_name}'")
 
-                            # ✅ Ensure tenant record exists or update
-                            existing_tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
-                            if not existing_tenant:
-                                new_tenant = Tenant(
-                                    tenant_id=str(chat_id),
-                                    store_name=f"Owner{chat_id}",
-                                    telegram_owner_id=chat_id,
-                                    database_url=schema_name,  # Store schema name instead of full URL
-                                )
-                                db.add(new_tenant)
-                                db.commit()
-                                logger.info(f"✅ Tenant record added for owner {user.username}")
-                            else:
-                                existing_tenant.database_url = schema_name
-                                db.commit()
-                                logger.info(f"ℹ️ Tenant record updated for owner {user.username}")
+                            # ✅ VERIFY: Ensure schema is empty for this user
+                            verification_db = get_tenant_session(schema_name, chat_id)
+                            if verification_db:
+                                product_count = verification_db.query(ProductORM).count()
+                                logger.info(f"🔍 SCHEMA VERIFICATION - Schema: {schema_name}, Products: {product_count}")
+                    
+                                # If this user has products but shouldn't (new setup), clean them
+                                if product_count > 0 and not user.tenant_schema:
+                                    logger.warning(f"🔄 Cleaning {product_count} existing products from new user's schema")
+                                    verification_db.query(ProductORM).delete()
+                                    verification_db.query(SaleORM).delete()
+                                    verification_db.query(CustomerORM).delete()
+                                    verification_db.commit()
+                                    logger.info(f"✅ Cleared existing data from {schema_name}")
 
-                            logger.info(f"✅ Tenant schema '{schema_name}' created with all tables for {user.username}")
+                            logger.info(f"✅ Tenant schema '{schema_name}' ready for {user.username}")
 
                         except Exception as e:
                             logger.error(f"❌ Failed to create tenant schema for owner {user.username}: {e}")
@@ -1830,12 +2286,12 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     db.commit()
                     db.refresh(new_user)
 
-                    # ✅ Create tenant schema immediately with NEW method
+                    # ✅ Create tenant schema immediately with create_tenant_schema
                     try:
                         schema_name = f"tenant_{chat_id}"
                         from app.tenant_utils import create_tenant_schema
                         tenant_created = create_tenant_schema(schema_name)
-                        
+            
                         if not tenant_created:
                             logger.error(f"❌ Failed to create tenant schema for new owner {generated_username}")
                             send_message(chat_id, "❌ Could not initialize tenant database.")
@@ -1845,18 +2301,19 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         new_user.tenant_schema = schema_name
                         db.commit()
 
-                        # ✅ Add tenant record to central table
-                        new_tenant = Tenant(
-                            tenant_id=str(chat_id),
-                            store_name=f"Owner{chat_id}",
-                            telegram_owner_id=chat_id,
-                            database_url=schema_name  # Store schema name instead of full URL
-                        )
-                        db.add(new_tenant)
-                        db.commit()
-                        logger.info(f"✅ Tenant record created for {generated_username}")
+                        # ✅ VERIFY: Ensure new user's schema is empty
+                        verification_db = get_tenant_session(schema_name, chat_id)
+                        if verification_db:
+                            product_count = verification_db.query(ProductORM).count()
+                            if product_count > 0:
+                                logger.warning(f"🔄 Cleaning {product_count} products from new user's schema")
+                                verification_db.query(ProductORM).delete()
+                                verification_db.query(SaleORM).delete()
+                                verification_db.query(CustomerORM).delete()
+                                verification_db.commit()
+                                logger.info(f"✅ Ensured empty schema for new user")
 
-                        logger.info(f"✅ Tenant schema '{schema_name}' created with all tables for new owner {generated_username}")
+                        logger.info(f"✅ Tenant schema '{schema_name}' created for new owner {generated_username}")
 
                     except Exception as e:
                         logger.error(f"❌ Failed to create tenant schema for new owner {generated_username}: {e}")
@@ -1868,7 +2325,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     user_states[chat_id] = {"action": "setup_shop", "step": 1, "data": {}}
 
                 return {"ok": True}
-                
+    
 
             # -------------------- Login flow --------------------
             if chat_id in user_states:
@@ -1905,31 +2362,24 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, f"✅ Login successful! Welcome, {user.name}.")
                     user_states.pop(chat_id, None)
 
-                    # -------------------- NEW: Ensure tenant schema exists --------------------
+                    # -------------------- Ensure tenant schema exists --------------------
                     try:
-                        from app.tenant_utils import create_tenant_schema, check_tenant_tables_exist
-                        
                         if user.role == "owner":
-                            # For owners, create/ensure their tenant schema
+                            # For owners, ensure their tenant schema exists and is correct
                             schema_name = f"tenant_{chat_id}"
-                            
-                            # Check if tenant schema exists and has all tables
-                            table_check = check_tenant_tables_exist(schema_name)
-                            if not table_check["exists"]:
-                                logger.info(f"🔄 Creating missing tenant schema for {user.username}: {schema_name}")
-                                tenant_created = create_tenant_schema(schema_name)
-                                
-                                if not tenant_created:
-                                    logger.error(f"❌ Failed to create tenant schema for {user.username}")
-                                    send_message(chat_id, "❌ Could not initialize tenant database. Please contact support.")
-                                    return {"ok": True}
-                                
-                                # Update user with schema name
-                                user.tenant_schema = schema_name
-                                db.commit()
-                                logger.info(f"✅ Tenant schema created for {user.username}: {schema_name}")
-                            else:
-                                logger.info(f"✅ Tenant schema verified for {user.username}: {schema_name}")
+                
+                            # ✅ Use create_tenant_schema from tenant_utils.py
+                            tenant_created = create_tenant_schema(schema_name)
+                
+                            if not tenant_created:
+                                logger.error(f"❌ Failed to create tenant schema for {user.username}")
+                                send_message(chat_id, "❌ Could not initialize tenant database. Please contact support.")
+                                return {"ok": True}
+                    
+                            # Update user with schema name
+                            user.tenant_schema = schema_name
+                            db.commit()
+                            logger.info(f"✅ Tenant schema ensured for {user.username}: {schema_name}")
 
                         elif user.role == "shopkeeper":
                             # For shopkeepers, get schema from their owner
@@ -1937,7 +2387,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             if not owner or not owner.tenant_schema:
                                 send_message(chat_id, "❌ Unable to access store database. Contact the store owner.")
                                 return {"ok": True}
-                            
+                
                             schema_name = owner.tenant_schema
                             user.tenant_schema = schema_name  # Link shopkeeper to owner's schema
                             db.commit()
@@ -1949,7 +2399,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             logger.error(f"❌ Tenant DB connection failed for {user.username}: {user.tenant_schema}")
                             send_message(chat_id, "❌ Unable to access store database. Please contact support.")
                             return {"ok": True}
-                            
+                
                         logger.info(f"✅ Tenant DB connection successful for {user.username}")
 
                     except Exception as e:
@@ -1961,8 +2411,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     kb = main_menu(user.role)
                     send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                     return {"ok": True}
-                    
-
+        
+        
                 # -------------------- Shop Setup (Owner only) --------------------
                 elif action == "setup_shop" and user.role == "owner":
                     if step == 1:  # Shop Name

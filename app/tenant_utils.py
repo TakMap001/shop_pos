@@ -7,18 +7,30 @@ from app.models.models import TenantBase
 logger = logging.getLogger(__name__)
 
 def create_tenant_schema(schema_name):
-    """Create a new tenant schema with all required tables"""
+    """Create a new tenant schema with all required tables - FIXED VERSION"""
     try:
         with engine.connect() as conn:
-            # Create schema if not exists
+            # ✅ Create schema if not exists
             conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema_name}"))
             conn.commit()
             
-            # Set search path to the new schema
+            # ✅ Set search path to the new schema BEFORE creating tables
             conn.execute(text(f"SET search_path TO {schema_name}"))
             
-            # Create all tables in the tenant schema
+            # ✅ Create all tables in the tenant schema
+            # This ensures tables are created in the correct schema
             TenantBase.metadata.create_all(bind=conn)
+            
+            # ✅ Verify tables were created in correct schema
+            result = conn.execute(text("""
+                SELECT table_name, table_schema
+                FROM information_schema.tables 
+                WHERE table_schema = :schema
+                ORDER BY table_name
+            """), {"schema": schema_name})
+            
+            created_tables = [row[0] for row in result]
+            logger.info(f"🔍 Tables created in {schema_name}: {created_tables}")
             
             # Reset search path
             conn.execute(text("SET search_path TO public"))
