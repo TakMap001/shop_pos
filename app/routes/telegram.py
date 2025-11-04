@@ -2289,7 +2289,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     # ✅ Create tenant schema immediately with create_tenant_schema
                     try:
                         schema_name = f"tenant_{chat_id}"
-                        from app.tenant_utils import create_tenant_schema
                         tenant_created = create_tenant_schema(schema_name)
             
                         if not tenant_created:
@@ -2443,7 +2442,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                         # -------------------- NEW: Use simplified tenant schema creation --------------------
                         try:
-                            from app.tenant_utils import create_tenant_schema
                             
                             schema_name = f"tenant_{chat_id}"
                             
