@@ -30,7 +30,8 @@ def create_tenant_db(chat_id: int) -> str:
     if not chat_id:
         raise ValueError("❌ Invalid chat_id for tenant schema creation")
 
-    base_url = os.getenv("DATABASE_URL")
+    database_url = os.getenv("DATABASE_URL")
+    base_url = database_url  # Use full URL including database name
     if not base_url:
         raise RuntimeError("❌ DATABASE_URL is missing")
 
@@ -130,13 +131,14 @@ def get_tenant_session(tenant_identifier: str, chat_id: int):
             schema_name = f"tenant_{chat_id}"
     else:
         schema_name = tenant_identifier
-        base_url = os.getenv("DATABASE_URL").rsplit('/', 1)[0]
+        # ✅ FIX: Use the FULL DATABASE_URL, don't remove the database name!
+        base_url = os.getenv("DATABASE_URL")
     
     logger.info(f"🔗 Creating tenant session → {schema_name}")
 
     # Create engine
     engine = create_engine(
-        base_url,
+        base_url,  # ✅ This now has the correct database name
         pool_pre_ping=True,
         connect_args={"options": f"-csearch_path={schema_name},public"}
     )
