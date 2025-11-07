@@ -30,7 +30,6 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import re
 import html
 from app.models.models import User
-from app.tenant_utils import create_tenant_schema
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -2233,8 +2232,18 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         try:
                             schema_name = f"tenant_{chat_id}"
 
-                            # ✅ Use create_tenant_schema from tenant_utils.py
-                            tenant_created = create_tenant_schema(schema_name)
+                            try:
+                                tenant_db_url = create_tenant_db(chat_id)  # This creates schema AND tables
+                                tenant_created = True
+                            except Exception as e:
+                                logger.error(f"❌ Tenant creation failed: {e}")
+                                tenant_created = False
+                            try:
+                                tenant_db_url = create_tenant_db(chat_id)
+                                tenant_created = True
+                            except Exception as e:
+                                logger.error(f"❌ Tenant creation failed: {e}")
+                                tenant_created = False
                 
                             if not tenant_created:
                                 logger.error(f"❌ Failed to create tenant schema for owner {user.username}")
@@ -2271,11 +2280,16 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     db.commit()
                     db.refresh(new_user)
 
-                    # ✅ Create tenant schema immediately with create_tenant_schema
+                    # ✅ Create tenant schema immediately 
                     try:
                         schema_name = f"tenant_{chat_id}"
-                        tenant_created = create_tenant_schema(schema_name)
-            
+                        try:
+                            tenant_db_url = create_tenant_db(chat_id)
+                            tenant_created = True
+                        except Exception as e:
+                            logger.error(f"❌ Tenant creation failed: {e}")
+                            tenant_created = False
+                                    
                         if not tenant_created:
                             logger.error(f"❌ Failed to create tenant schema for new owner {generated_username}")
                             send_message(chat_id, "❌ Could not initialize tenant database.")
@@ -2340,8 +2354,12 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             # For owners, ensure their tenant schema exists and is correct
                             schema_name = f"tenant_{chat_id}"
                 
-                            # ✅ Use create_tenant_schema from tenant_utils.py
-                            tenant_created = create_tenant_schema(schema_name)
+                            try:
+                                tenant_db_url = create_tenant_db(chat_id)
+                                tenant_created = True
+                            except Exception as e:
+                                logger.error(f"❌ Tenant creation failed: {e}")
+                                tenant_created = False
                 
                             if not tenant_created:
                                 logger.error(f"❌ Failed to create tenant schema for {user.username}")
@@ -2419,7 +2437,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             schema_name = f"tenant_{chat_id}"
                             
                             # Create tenant schema with all tables
-                            tenant_created = create_tenant_schema(schema_name)
+                            try:
+                                tenant_db_url = create_tenant_db(chat_id)
+                                tenant_created = True
+                            except Exception as e:
+                                logger.error(f"❌ Tenant creation failed: {e}")
+                                tenant_created = False
+                            
                             if not tenant_created:
                                 logger.error(f"❌ Failed to create tenant schema for owner {user.username}")
                                 send_message(chat_id, "❌ Could not initialize store database.")
