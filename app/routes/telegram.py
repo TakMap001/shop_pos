@@ -2509,7 +2509,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         user_states.pop(chat_id, None)
 
                 # -------------------- Shopkeeper Creation / Management --------------------
-                elif action == "create_shopkeeper" and user.role == "owner":  # ✅ FIXED ACTION NAME
+                elif action == "create_shopkeeper" and user.role == "owner":
                     if step == 1:  # Enter Shopkeeper Name
                         shopkeeper_name = text.strip()
                         if shopkeeper_name:
@@ -2532,12 +2532,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         password = generate_password()
                         password_hash = hash_password(password)
 
-                        # Validate tenant schema
-                        if not user.tenant_schema:
-                            send_message(chat_id, "⚠️ Owner tenant database missing. Please contact support.")
-                            return {"ok": True}
-
-                        # Save Shopkeeper
+                        # Save Shopkeeper (using tenant_schema for relationship inference)
                         new_sk = User(
                             name=data["name"],
                             username=username,
@@ -2545,8 +2540,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             email=contact if "@" in contact else None,
                             chat_id=None,  # will link on Telegram login
                             role="shopkeeper",
-                            owner_id=user.user_id,
-                            tenant_schema=user.tenant_schema  # ✅ Share owner's tenant schema
+                            tenant_schema=user.tenant_schema  # ✅ Shopkeepers share owner's tenant schema
                         )
                         db.add(new_sk)
                         db.commit()
@@ -2559,7 +2553,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             f"👤 Name: {data['name']}\n"
                             f"🔑 Username: {username}\n"
                             f"🔑 Password: {password}\n"
-                            f"📞 Contact: {contact}\n\n"
+                            f"📞 Contact: {contact}\n"
+                            f"🏪 Tenant Schema: {user.tenant_schema}\n\n"
                             f"Share these credentials with the shopkeeper for login."
                         )
 
@@ -2568,6 +2563,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         kb_dict = main_menu(user.role)
                         send_message(chat_id, "🏠 Main Menu:", kb_dict)
                         return {"ok": True}
+        
 
                 # -------------------- Add Product --------------------
                 elif action == "awaiting_product":
