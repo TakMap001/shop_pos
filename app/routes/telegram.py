@@ -1556,7 +1556,12 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "❌ Only owners can create shopkeepers.")
                     return {"ok": True}
 
-                user_states[chat_id] = {"action": "create_shopkeeper", "step": 1, "data": {}}    
+                user_states[chat_id] = {"action": "create_shopkeeper", "step": 1, "data": {}}
+    
+                # ADD DEBUG LOGGING
+                logger.info(f"🛠️ Shopkeeper creation started for chat_id={chat_id}")
+                logger.info(f"🛠️ User state set: {user_states.get(chat_id)}")
+    
                 send_message(chat_id, "👤 Enter a username for the new shopkeeper:")
                 return {"ok": True}
     
@@ -2563,7 +2568,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     kb_dict = main_menu(user.role)
                     send_message(chat_id, "🏠 Main Menu:", kb_dict)
                     return {"ok": True}
-        
+
                 # -------------------- Add Product --------------------
                 elif action == "awaiting_product":
                     # -------------------- Ensure tenant DB --------------------
