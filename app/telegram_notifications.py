@@ -166,3 +166,83 @@ def notify_owner_of_new_shopkeeper(shopkeeper: User, tenant_db: Session):
             f"• Role: {shopkeeper.role}\n\n"
             f"✅ Please review and confirm access."
         )
+
+def notify_owner_of_pending_approval(owner_chat_id: int, action_type: str, product_name: str, shopkeeper_name: str, approval_id: int):
+    """
+    Notify owner about pending approval with action buttons.
+    """
+    try:
+        # Create the notification message
+        message = f"🔄 *Pending Approval Required*\n\n"
+        message += f"👤 *Shopkeeper:* {escape_markdown_v2(shopkeeper_name)}\n"
+        message += f"📦 *Action:* {escape_markdown_v2(action_type.replace('_', ' ').title())}\n"
+        message += f"🛒 *Product:* {escape_markdown_v2(product_name)}\n\n"
+        message += f"⚠️ *Urgent action required\\!* Please approve or reject this request\\."
+
+        # Create approval buttons
+        keyboard = {
+            "inline_keyboard": [
+                [
+                    {"text": "✅ Approve", "callback_data": f"approve_action:{approval_id}"},
+                    {"text": "❌ Reject", "callback_data": f"reject_action:{approval_id}"}
+                ],
+                [{"text": "📋 View Details", "callback_data": f"view_approval:{approval_id}"}]
+            ]
+        }
+
+        send_message(owner_chat_id, message, keyboard)
+        return True
+
+    except Exception as e:
+        print(f"❌ Failed to send approval notification: {e}")
+        return False
+
+def notify_shopkeeper_of_approval_result(shopkeeper_chat_id: int, product_name: str, action: str, approved: bool):
+    """
+    Notify shopkeeper about approval result.
+    """
+    try:
+        if approved:
+            message = f"✅ *Approval Granted*\n\n"
+            message += f"Your product *{escape_markdown_v2(product_name)}* has been approved and {action} to inventory\\!"
+            message += f"\n\nYou can now view it in stock and sell it\\."
+        else:
+            message = f"❌ *Approval Denied*\n\n"
+            message += f"Your request for *{escape_markdown_v2(product_name)}* has been rejected\\."
+            message += f"\n\nPlease contact the owner for more details\\."
+
+        send_message(shopkeeper_chat_id, message)
+        return True
+
+    except Exception as e:
+        print(f"❌ Failed to send approval result notification: {e}")
+        return False
+
+def notify_owner_of_stock_update_request(shopkeeper_chat_id: int, product_name: str, old_stock: int, new_stock: int, shopkeeper_name: str, approval_id: int):
+    """
+    Notify owner about stock update request from shopkeeper.
+    """
+    try:
+        message = f"📈 *Stock Update Request*\n\n"
+        message += f"👤 *Shopkeeper:* {escape_markdown_v2(shopkeeper_name)}\n"
+        message += f"🛒 *Product:* {escape_markdown_v2(product_name)}\n"
+        message += f"📊 *Current Stock:* {old_stock}\n"
+        message += f"🆕 *Requested Stock:* {new_stock}\n"
+        message += f"📈 *Change:* \\+{new_stock - old_stock}\n\n"
+        message += f"⚠️ *Approval required\\!*"
+
+        keyboard = {
+            "inline_keyboard": [
+                [
+                    {"text": "✅ Approve", "callback_data": f"approve_stock:{approval_id}"},
+                    {"text": "❌ Reject", "callback_data": f"reject_stock:{approval_id}"}
+                ]
+            ]
+        }
+
+        send_message(shopkeeper_chat_id, message, keyboard)
+        return True
+
+    except Exception as e:
+        print(f"❌ Failed to send stock update notification: {e}")
+        return False

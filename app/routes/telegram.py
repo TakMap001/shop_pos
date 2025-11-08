@@ -4,13 +4,14 @@ from fastapi import APIRouter, Request, Depends
 import requests, os
 from sqlalchemy.orm import Session
 from decimal import Decimal
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy import func, text, extract
 from app.models.central_models import Tenant  # Central DB
 from app.models.models import Base as TenantBase
 from app.models.models import User, ProductORM, CustomerORM, SaleORM  # Tenant DB
 from app.database import get_db  # central DB session
-from app.telegram_notifications import notify_low_stock, notify_top_product, notify_high_value_sale, send_message
+from app.telegram_notifications import notify_low_stock, notify_top_product, notify_high_value_sale, send_message, notify_owner_of_pending_approval
+from app.telegram_notifications import notify_shopkeeper_of_approval_result
 from app.tenants import create_tenant_db, get_engine_for_tenant, get_session_for_tenant
 from config import DATABASE_URL
 from telebot import types
@@ -29,7 +30,9 @@ from telegram.helpers import escape_markdown
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import re
 import html
-from app.models.models import User
+import traceback
+from utils.security import hash_password
+
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -96,9 +99,6 @@ def get_user_by_chat(chat_id: int):
     return db.query(User).filter(User.chat_id == chat_id).first()
 
 def create_shopkeeper(tenant_session, username, password):
-    from app.models.models import User
-    from utils.security import hash_password
-
     new_user = User(
         username=username,
         password_hash=hash_password(password),
@@ -442,6 +442,134 @@ def add_product(db: Session, chat_id: int, data: dict):
     )
 
 
+# In your telegram.py, replace the notification functions with:
+
+def add_product_pending_approval(tenant_db, chat_id, data):
+    """Save product addition request for owner approval"""
+    try:
+        # Get shopkeeper info
+        central_db = SessionLocal()
+        shopkeeper = central_db.query(User).filter(User.chat_id == chat_id).first()
+        
+        if not shopkeeper:
+            logger.error(f"❌ Shopkeeper not found for chat_id: {chat_id}")
+            central_db.close()
+            return False
+
+        # Create pending approval record
+        pending_approval = PendingApprovalORM(
+            action_type='add_product',
+            shopkeeper_id=shopkeeper.user_id,
+            shopkeeper_name=shopkeeper.name,
+            product_data=json.dumps(data),
+            status='pending'
+        )
+        
+        tenant_db.add(pending_approval)
+        tenant_db.commit()
+        tenant_db.refresh(pending_approval)  # Get the approval_id
+        
+        # Find owner for this tenant
+        owner = central_db.query(User).filter(
+            User.tenant_schema == shopkeeper.tenant_schema,
+            User.role == 'owner'
+        ).first()
+        central_db.close()
+        
+        if owner:
+            # Use centralized notification system
+            notify_owner_of_pending_approval(
+                owner.chat_id, 
+                'add_product', 
+                data.get('name', 'Unknown Product'), 
+                shopkeeper.name, 
+                pending_approval.approval_id
+            )
+        
+        logger.info(f"✅ Product addition pending approval: {data.get('name', 'Unknown')}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to save pending approval: {e}")
+        tenant_db.rollback()
+        return False
+
+def handle_approval_action(owner_chat_id, approval_id, action):
+    """Handle approval or rejection of pending actions"""
+    try:
+        central_db = SessionLocal()
+        owner = central_db.query(User).filter(User.chat_id == owner_chat_id).first()
+        
+        if not owner or owner.role != 'owner':
+            logger.error(f"❌ Only owners can approve actions: {owner_chat_id}")
+            central_db.close()
+            return False
+        
+        tenant_db = get_tenant_session(owner.tenant_schema, owner_chat_id)
+        if not tenant_db:
+            central_db.close()
+            return False
+        
+        # Get pending approval
+        pending = tenant_db.query(PendingApprovalORM).filter(
+            PendingApprovalORM.approval_id == approval_id,
+            PendingApprovalORM.status == 'pending'
+        ).first()
+        
+        if not pending:
+            logger.error(f"❌ Pending approval not found: {approval_id}")
+            tenant_db.close()
+            central_db.close()
+            return False
+        
+        product_data = json.loads(pending.product_data)
+        product_name = product_data.get('name', 'Unknown Product')
+        
+        if action == "approved":
+            # Process the approved action
+            if pending.action_type == 'add_product':
+                # Add the product to the database
+                add_product(tenant_db, pending.shopkeeper_id, product_data)
+            
+            # Update approval status
+            pending.status = 'approved'
+            pending.resolved_at = func.now()
+            
+            # Notify shopkeeper using centralized system
+            shopkeeper = central_db.query(User).filter(User.user_id == pending.shopkeeper_id).first()
+            if shopkeeper and shopkeeper.chat_id:
+                notify_shopkeeper_of_approval_result(
+                    shopkeeper.chat_id, 
+                    product_name, 
+                    'added', 
+                    True
+                )
+            
+        else:  # rejected
+            pending.status = 'rejected'
+            pending.resolved_at = func.now()
+            
+            # Notify shopkeeper using centralized system
+            shopkeeper = central_db.query(User).filter(User.user_id == pending.shopkeeper_id).first()
+            if shopkeeper and shopkeeper.chat_id:
+                notify_shopkeeper_of_approval_result(
+                    shopkeeper.chat_id, 
+                    product_name, 
+                    'added', 
+                    False
+                )
+        
+        tenant_db.commit()
+        tenant_db.close()
+        central_db.close()
+        
+        logger.info(f"✅ Approval {action}: {approval_id}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to handle approval action: {e}")
+        return False
+        
 def update_product(db: Session, chat_id: int, product: ProductORM, data: dict):
     """
     Update a product in a tenant-aware way.
@@ -796,9 +924,7 @@ def generate_report(db: Session, report_type: str):
         return "\n".join(lines)
 
     # -------------------- Weekly Sales (Last 7 Days) --------------------
-    elif report_type == "report_weekly":
-        from datetime import datetime, timedelta
-        
+    elif report_type == "report_weekly":        
         # Calculate last 7 days
         today = datetime.utcnow().date()
         week_ago = today - timedelta(days=7)
@@ -872,9 +998,7 @@ def generate_report(db: Session, report_type: str):
         return "\n".join(lines)
         
     # -------------------- Monthly Sales (Current Month by Day) --------------------
-    elif report_type == "report_monthly":
-        from datetime import datetime
-        
+    elif report_type == "report_monthly":        
         today = datetime.utcnow().date()
         month_start = today.replace(day=1)
         
@@ -935,9 +1059,7 @@ def generate_report(db: Session, report_type: str):
         return "\n".join(lines)
 
     # -------------------- Payment Method Summary Report --------------------
-    elif report_type == "report_payment_summary":
-        from datetime import datetime, timedelta
-        
+    elif report_type == "report_payment_summary":        
         today = datetime.utcnow().date()
         month_start = today.replace(day=1)
         week_ago = today - timedelta(days=7)
@@ -1203,9 +1325,7 @@ def generate_report(db: Session, report_type: str):
         return "\n".join(lines)
 
     # -------------------- Weekly Sales (Last 7 Days) --------------------
-    elif report_type == "report_weekly":
-        from datetime import datetime, timedelta
-        
+    elif report_type == "report_weekly":        
         # Calculate last 7 days
         today = datetime.utcnow().date()
         week_ago = today - timedelta(days=7)
@@ -1250,9 +1370,7 @@ def generate_report(db: Session, report_type: str):
         return "\n".join(lines)
         
     # -------------------- Monthly Sales (Current Month by Day) --------------------
-    elif report_type == "report_monthly":
-        from datetime import datetime
-        
+    elif report_type == "report_monthly":        
         today = datetime.utcnow().date()
         month_start = today.replace(day=1)
         
@@ -1610,6 +1728,38 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 user_states[chat_id] = {"action": "awaiting_product", "step": 1, "data": {}}
                 return {"ok": True}
         
+            # -------------------- Approval Callbacks --------------------
+            elif text.startswith("approve_action:"):
+                try:
+                    approval_id = int(text.split(":")[1])
+                    # Handle approval logic
+                    if handle_approval_action(chat_id, approval_id, "approved"):
+                        send_message(chat_id, "✅ Action approved successfully!")
+                    else:
+                        send_message(chat_id, "❌ Failed to approve action.")
+                except (ValueError, IndexError):
+                    send_message(chat_id, "❌ Invalid approval action.")
+
+            elif text.startswith("reject_action:"):
+                try:
+                    approval_id = int(text.split(":")[1])
+                    # Handle rejection logic
+                    if handle_approval_action(chat_id, approval_id, "rejected"):
+                        send_message(chat_id, "❌ Action rejected.")
+                    else:
+                        send_message(chat_id, "❌ Failed to reject action.")
+                except (ValueError, IndexError):
+                    send_message(chat_id, "❌ Invalid rejection action.")
+
+            elif text.startswith("view_approval:"):
+                try:
+                    approval_id = int(text.split(":")[1])
+                    # Show approval details
+                    show_approval_details(chat_id, approval_id)
+                except (ValueError, IndexError):
+                    send_message(chat_id, "❌ Invalid approval ID.")
+        
+            
             # -------------------- Quick Stock Update --------------------
             elif text == "quick_stock_update":
                 user_states[chat_id] = {"action": "quick_stock_update", "step": 1, "data": {}}
@@ -1653,6 +1803,26 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                 return {"ok": True}
                     
+            elif text.startswith("approve_stock:"):
+                try:
+                    approval_id = int(text.split(":")[1])
+                    if handle_stock_approval_action(chat_id, approval_id, "approved"):
+                        send_message(chat_id, "✅ Stock update approved successfully!")
+                    else:
+                        send_message(chat_id, "❌ Failed to approve stock update.")
+                except (ValueError, IndexError):
+                    send_message(chat_id, "❌ Invalid stock approval action.")
+
+            elif text.startswith("reject_stock:"):
+                try:
+                    approval_id = int(text.split(":")[1])
+                    if handle_stock_approval_action(chat_id, approval_id, "rejected"):
+                        send_message(chat_id, "❌ Stock update rejected.")
+                    else:
+                        send_message(chat_id, "❌ Failed to reject stock update.")
+                except (ValueError, IndexError):
+                    send_message(chat_id, "❌ Invalid stock rejection action.")
+        
             # -------------------- Update Product --------------------
             elif text == "update_product":
                 tenant_db = get_tenant_session(user.tenant_schema, chat_id)
@@ -2509,7 +2679,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                 )
                             else:
                                 # Create new tenant record
-                                import uuid
                                 new_tenant = Tenant(
                                     tenant_id=str(uuid.uuid4()),
                                     telegram_owner_id=chat_id,
@@ -2646,16 +2815,20 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             send_message(chat_id, "❌ Unit type cannot be empty. Please enter a valid unit type:")
                             return {"ok": True}
                         data["unit_type"] = unit_type
+    
                         if user.role == "owner":
                             # Owner continues to set price and thresholds
                             user_states[chat_id] = {"action": action, "step": 4, "data": data}
                             send_message(chat_id, "💲 Enter product price:")
                         else:
-                            # Shopkeeper: send notification to owner for approval
-                            add_product_pending_approval(tenant_db, chat_id, data)
-                            tenant_db.commit()
-                            send_message(chat_id, f"✅ Product *{data['name']}* added for approval. Owner will review.")
-                            notify_owner_of_new_product(chat_id, data)
+                            # Shopkeeper: save for approval and notify owner
+                            if add_product_pending_approval(tenant_db, chat_id, data):
+                                send_message(chat_id, f"✅ Product *{data['name']}* added for approval. Owner will review shortly.")
+                                # Notify owner immediately
+                                notify_owner_of_pending_approval(chat_id, "add_product", data['name'], user.name)
+                            else:
+                                send_message(chat_id, "❌ Failed to submit product for approval. Please try again.")
+        
                             user_states.pop(chat_id, None)
                         return {"ok": True}
 
@@ -2778,7 +2951,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         return {"ok": True}
 
                     # STEP 2: Enter quantity to add
-                    elif step == 2:
+                    elif step == 2:  # Enter quantity to add
                         quantity_text = text.strip()
                         if not quantity_text:
                             send_message(chat_id, "❌ Quantity cannot be empty. Enter quantity to add:")
@@ -2791,38 +2964,106 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                 return {"ok": True}
 
                             product = data["selected_product"]
-                            
-                            # Update stock in database
-                            db_product = tenant_db.query(ProductORM).filter(
-                                ProductORM.product_id == product["product_id"]
-                            ).first()
-                            
-                            if db_product:
-                                old_stock = db_product.stock
-                                new_stock = old_stock + quantity_to_add
-                                db_product.stock = new_stock
-                                tenant_db.commit()
-                                
-                                # Success message
-                                success_msg = f"✅ Stock updated successfully!\n\n"
-                                success_msg += f"📦 Product: {product['name']}\n"
-                                success_msg += f"📊 Old Stock: {old_stock}\n"
-                                success_msg += f"📈 Added: +{quantity_to_add}\n"
-                                success_msg += f"🆕 New Stock: {new_stock}\n"
-                                
-                                send_message(chat_id, success_msg)
-                                
-                                # Return to main menu
-                                user_states.pop(chat_id, None)
-                                kb = main_menu(user.role)
-                                send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+            
+                            if user.role == "owner":
+                                # Owner can update directly
+                                db_product = tenant_db.query(ProductORM).filter(
+                                    ProductORM.product_id == product["product_id"]
+                                ).first()
+                
+                                if db_product:
+                                    old_stock = db_product.stock
+                                    new_stock = old_stock + quantity_to_add
+                                    db_product.stock = new_stock
+                                    tenant_db.commit()
+                    
+                                    # Success message for owner
+                                    success_msg = f"✅ Stock updated successfully!\n\n"
+                                    success_msg += f"📦 Product: {product['name']}\n"
+                                    success_msg += f"📊 Old Stock: {old_stock}\n"
+                                    success_msg += f"📈 Added: +{quantity_to_add}\n"
+                                    success_msg += f"🆕 New Stock: {new_stock}\n"
+                    
+                                    send_message(chat_id, success_msg)
+                    
+                                    # Return to main menu
+                                    user_states.pop(chat_id, None)
+                                    kb = main_menu(user.role)
+                                    send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+                                else:
+                                    send_message(chat_id, "❌ Product not found in database.")
+                                    user_states.pop(chat_id, None)
+                    
                             else:
-                                send_message(chat_id, "❌ Product not found in database.")
-                                user_states.pop(chat_id, None)
+                                # Shopkeeper: request approval for stock update
+                                db_product = tenant_db.query(ProductORM).filter(
+                                    ProductORM.product_id == product["product_id"]
+                                ).first()
+                
+                                if db_product:
+                                    old_stock = db_product.stock
+                                    new_stock = old_stock + quantity_to_add
+                    
+                                    # Save stock update for approval
+                                    stock_data = {
+                                        "product_id": product["product_id"],
+                                        "product_name": product["name"],
+                                        "old_stock": old_stock,
+                                        "new_stock": new_stock,
+                                        "quantity_added": quantity_to_add
+                                    }
+                    
+                                    # Create pending approval for stock update
+                                    from app.core import SessionLocal
+                                    central_db = SessionLocal()
+                                    shopkeeper_user = central_db.query(User).filter(User.chat_id == chat_id).first()
+                    
+                                    if shopkeeper_user:
+                                        pending_stock = PendingApprovalORM(
+                                            action_type='stock_update',
+                                            shopkeeper_id=shopkeeper_user.user_id,
+                                            shopkeeper_name=shopkeeper_user.name,
+                                            product_data=json.dumps(stock_data),
+                                            status='pending'
+                                        )
+                        
+                                        tenant_db.add(pending_stock)
+                                        tenant_db.commit()
+                                        tenant_db.refresh(pending_stock)
+                        
+                                        # Notify owner
+                                        owner = central_db.query(User).filter(
+                                            User.tenant_schema == shopkeeper_user.tenant_schema,
+                                            User.role == 'owner'
+                                        ).first()
+                        
+                                        if owner:
+                                            from app.telegram_notifications import notify_owner_of_stock_update_request
+                                            notify_owner_of_stock_update_request(
+                                                owner.chat_id,
+                                                product["name"],
+                                                old_stock,
+                                                new_stock,
+                                                shopkeeper_user.name,
+                                                pending_stock.approval_id
+                                            )
+                        
+                                        central_db.close()
+                        
+                                        send_message(chat_id, f"✅ Stock update request submitted for approval. Owner will review adding +{quantity_to_add} to {product['name']}.")
+                                    else:
+                                        send_message(chat_id, "❌ Failed to submit stock update request.")
+                                        central_db.close()
+                    
+                                    user_states.pop(chat_id, None)
+                                else:
+                                    send_message(chat_id, "❌ Product not found in database.")
+                                    user_states.pop(chat_id, None)
 
                         except ValueError:
                             send_message(chat_id, "❌ Invalid quantity. Enter a valid number:")
                         return {"ok": True}
+        
                         
                 # -------------------- Update Product (owner only, step-by-step) --------------------
                 elif action == "awaiting_update" and user.role == "owner":
@@ -3393,7 +3634,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
         return {"ok": True}
 
     except Exception as e:
-        import traceback
         print("❌ Webhook crashed with error:", str(e))
         traceback.print_exc()
         return {"status": "error", "detail": str(e)}

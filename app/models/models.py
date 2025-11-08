@@ -88,3 +88,15 @@ class SaleORM(TenantBase):
     product = relationship("ProductORM", back_populates="sales")
     customer = relationship("CustomerORM", back_populates="sales")
     
+
+class PendingApprovalORM(TenantBase):
+    __tablename__ = "pending_approvals"
+
+    approval_id = Column(Integer, primary_key=True, index=True)
+    action_type = Column(String(50), nullable=False)  # 'add_product', 'update_product', 'stock_update'
+    shopkeeper_id = Column(Integer, nullable=False)
+    shopkeeper_name = Column(String(150), nullable=False)
+    product_data = Column(Text)  # JSON string of product data
+    status = Column(String(20), default='pending')  # pending, approved, rejected
+    created_at = Column(TIMESTAMP, server_default=func.now())
+    resolved_at = Column(TIMESTAMP, nullable=True)
