@@ -31,7 +31,6 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import re
 import html
 import traceback
-from utils.security import hash_password
 
 
 logger = logging.getLogger(__name__)
@@ -99,6 +98,7 @@ def get_user_by_chat(chat_id: int):
     return db.query(User).filter(User.chat_id == chat_id).first()
 
 def create_shopkeeper(tenant_session, username, password):
+    from utils.security import hash_password
     new_user = User(
         username=username,
         password_hash=hash_password(password),
