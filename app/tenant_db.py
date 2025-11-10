@@ -6,6 +6,7 @@ from datetime import datetime
 from app.models.models import User
 from app.models.models import ProductORM, CustomerORM, SaleORM, PendingApprovalORM
 from app.models.central_models import Tenant
+from app.models.central_models import Base as CentralBase
 from app.models.tenant_base import TenantBase
 
 # -----------------------------------------------------
@@ -20,6 +21,23 @@ if not logger.handlers:
 logger.setLevel(logging.INFO)
 
 
+# ======================================================
+# 🔹 CREATE CENTRAL DATABASE TABLES  
+# ======================================================
+def create_central_db():
+    """
+    Ensures central DB tables exist at startup.
+    This creates users and tenants tables in the public schema.
+    """
+    
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("❌ DATABASE_URL is missing")
+    
+    engine = create_engine(database_url)
+    CentralBase.metadata.create_all(bind=engine)
+    logger.info("✅ Central DB tables (users, tenants) created in public schema")
+    
 # ======================================================
 # 🔹 CREATE TENANT SCHEMA
 # ======================================================

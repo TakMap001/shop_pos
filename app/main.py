@@ -3,15 +3,15 @@ from app.routes import products, views, sales, reports, users, whatsapp, telegra
 import uvicorn
 import os
 
-# ✅ Import central DB init function
-from app.tenants import create_central_db
+# ✅ FIX: Import from the NEW tenant_db.py instead of tenants.py
+from app.tenant_db import create_central_db  # ← CHANGED THIS LINE
 
 app = FastAPI(title="POS Backend API")
 
 # -------------------- Initialize Central DB Tables --------------------
 @app.on_event("startup")
 def startup_event():
-    create_central_db()  # creates central tables (Tenant)
+    create_central_db()  # This will now use the NEW function
     print("✅ Central database initialized successfully.")
 
 # -------------------- Include Routers --------------------
