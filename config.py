@@ -12,7 +12,7 @@ load_dotenv()
 
 # --- Telegram ---
 # Get from environment, with fallback for Railway issues
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "7266895714:AAGDz-vMwBGp8AGRgkB4FDF3Dl2Apw0r91s")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}" if TELEGRAM_BOT_TOKEN else None
 
 # --- Database ---
