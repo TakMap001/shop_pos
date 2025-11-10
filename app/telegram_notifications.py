@@ -1,10 +1,18 @@
 # app/telegram_notifications.py
 
+# TEMPORARY DEBUG - Add at the VERY TOP of telegram_notifications.py
+import os
+print("🟢 DEBUG: telegram_notifications.py is loading")
+print(f"🟢 DEBUG: TELEGRAM_BOT_TOKEN from os.getenv: {os.getenv('TELEGRAM_BOT_TOKEN')}")
+
+from config import TELEGRAM_BOT_TOKEN
+print(f"🟢 DEBUG: TELEGRAM_BOT_TOKEN from config import: {TELEGRAM_BOT_TOKEN}")
+
+# Then your existing code...
 from telebot import TeleBot, types
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from app.models.models import User, ProductORM, SaleORM
-from config import TELEGRAM_BOT_TOKEN
 import re
 
 LOW_STOCK_THRESHOLD = 10
