@@ -26,13 +26,18 @@ logger.setLevel(logging.INFO)
 def create_tenant_db(chat_id: int) -> str:
     """
     Create or verify tenant schema and link it to user + tenant records.
-    Returns full tenant DB URL: postgresql://.../railway#tenant_{chat_id}
     """
     if not chat_id:
         raise ValueError("❌ Invalid chat_id for tenant schema creation")
 
+    # ✅ MOVE THIS INSIDE THE FUNCTION - don't load at import time
     database_url = os.getenv("DATABASE_URL")
-    base_url = database_url  # Use full URL including database name
+    if not database_url:
+        raise RuntimeError("❌ DATABASE_URL is missing")
+    
+    base_url = database_url
+    schema_name = f"tenant_{chat_id}"
+
     if not base_url:
         raise RuntimeError("❌ DATABASE_URL is missing")
 
@@ -130,11 +135,13 @@ def get_tenant_session(tenant_identifier: str, chat_id: int):
         else:
             base_url = tenant_identifier
             schema_name = f"tenant_{chat_id}"
+
     else:
         schema_name = tenant_identifier
-        # ✅ FIX: Use the FULL DATABASE_URL, don't remove the database name!
-        base_url = os.getenv("DATABASE_URL")
-    
+        # ✅ FIX: Import from config instead of os.getenv
+        from config import DATABASE_URL
+        base_url = DATABASE_URL
+                
     logger.info(f"🔗 Creating tenant session → {schema_name}")
 
     # Create engine
