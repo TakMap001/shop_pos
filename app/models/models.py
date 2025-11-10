@@ -1,5 +1,6 @@
 # app/models/models.py
 from sqlalchemy import Column, Integer, String, Text, Numeric, DateTime, TIMESTAMP, ForeignKey, BigInteger
+from app.models.tenant_base import TenantBase  # tenant DB Base
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -36,9 +37,6 @@ class User(Base):
 
 
 # -------------------- Tenant DB Models --------------------
-from app.models.tenant_base import TenantBase  # tenant DB Base
-
-
 class ProductORM(TenantBase):
     __tablename__ = "products"
 
@@ -70,7 +68,7 @@ class SaleORM(TenantBase):
     __tablename__ = "sales"
 
     sale_id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, nullable=True)  # shopkeeper ID (from central DB)
+    user_id = Column(BigInteger, nullable=True) 
     product_id = Column(Integer, ForeignKey("products.product_id"))
     customer_id = Column(Integer, ForeignKey("customers.customer_id"), nullable=True)
 

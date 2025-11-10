@@ -195,15 +195,14 @@ def ensure_tenant_session(chat_id, db):
             # Already using schema name format
             return get_tenant_session(tenant_schema, chat_id)
     else:
-        # No tenant schema - create one
+        # No tenant schema - create one using the proper function
         schema_name = f"tenant_{chat_id}"
-        tenant_created = create_tenant_schema(schema_name)
-        
-        if tenant_created:
+        try:
+            tenant_db_url = create_tenant_db(chat_id)  # ✅ USE EXISTING FUNCTION
             user.tenant_schema = schema_name
             db.commit()
             logger.info(f"✅ Created and linked tenant schema: {schema_name}")
             return get_tenant_session(schema_name, chat_id)
-        else:
-            logger.error(f"❌ Failed to create tenant schema for {chat_id}")
+        except Exception as e:
+            logger.error(f"❌ Failed to create tenant schema for {chat_id}: {e}")
             return None

@@ -12,7 +12,6 @@ from app.models.models import User, ProductORM, CustomerORM, SaleORM  # Tenant D
 from app.database import get_db  # central DB session
 from app.telegram_notifications import notify_low_stock, notify_top_product, notify_high_value_sale, send_message, notify_owner_of_pending_approval
 from app.telegram_notifications import notify_shopkeeper_of_approval_result
-from app.tenants import create_tenant_db, get_engine_for_tenant, get_session_for_tenant
 from config import DATABASE_URL
 from telebot import types
 from app.telegram_notifications import notify_owner_of_new_shopkeeper
@@ -280,7 +279,7 @@ def save_user(user: User):
 
 def register_new_user(central_db: Session, chat_id: int, text: str, role="keeper"):
     """
-    Register a new user in a tenant-aware way.
+    Register a new user in a tenant-aware way - UPDATED for schema-based multi-tenancy.
     
     - central_db: SQLAlchemy session for central DB
     - chat_id: ID of the user sending the command (owner)
@@ -299,77 +298,77 @@ def register_new_user(central_db: Session, chat_id: int, text: str, role="keeper
         send_message(chat_id, f"❌ Invalid input: {str(e)}\nSend as: `user_id;name`")
         return
 
-    # -------------------- Check for Existing Tenant --------------------
-    tenant = central_db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
-    if role == "owner" and tenant:
-        send_message(chat_id, f"❌ You already have a tenant registered.")
+    # -------------------- Check for Existing User/Owner --------------------
+    existing_user = central_db.query(User).filter(User.chat_id == new_chat_id).first()
+    if existing_user:
+        send_message(chat_id, f"❌ User with ID {new_chat_id} already exists.")
         return
 
     # -------------------- Handle Owner Registration --------------------
     if role == "owner":
-        # Construct tenant DB URL
-        tenant_db_url = DATABASE_URL.rsplit("/", 1)[0] + f"/tenant_{new_chat_id}"
-
-        # Create tenant DB
-        create_tenant_db(tenant_db_url)
-        engine = get_engine_for_tenant(tenant_db_url)
-        TenantBase.metadata.create_all(bind=engine)
-
-        # Add to central Tenant table
-        new_tenant = Tenant(
-            tenant_id=str(new_chat_id),
-            store_name=f"{name}'s Store",
-            telegram_owner_id=new_chat_id,
-            database_url=tenant_db_url
+        # Create new owner user
+        new_user = User(
+            name=name,
+            username=f"owner{new_chat_id}",
+            email=f"{new_chat_id}@example.com",
+            password_hash=hash_password(generate_password()),  # Generate random password
+            chat_id=new_chat_id,
+            role="owner",
+            tenant_schema=f"tenant_{new_chat_id}"  # Will be set by create_tenant_db
         )
+        
         try:
-            central_db.add(new_tenant)
+            central_db.add(new_user)
             central_db.commit()
-            central_db.refresh(new_tenant)
+            central_db.refresh(new_user)
+            
+            # Create tenant schema and tables
+            tenant_db_url = create_tenant_db(new_chat_id)
+            
+            send_message(chat_id, f"✅ Owner '{name}' registered successfully.")
+            send_message(new_chat_id, f"👋 Hello {name}! Use /start to begin and set up your shop.")
+            
         except Exception as e:
             central_db.rollback()
-            send_message(chat_id, f"❌ Database error (central DB): {str(e)}")
+            send_message(chat_id, f"❌ Database error: {str(e)}")
             return
 
-        send_message(chat_id, f"✅ Owner '{name}' registered and tenant DB created.")
-
-    # -------------------- Handle Shopkeeper / Tenant Users --------------------
+    # -------------------- Handle Shopkeeper Registration --------------------
     else:
-        if not tenant:
-            send_message(chat_id, "❌ No tenant found. Please register as an owner first.")
+        # Find the owner who's creating this shopkeeper
+        owner = central_db.query(User).filter(User.chat_id == chat_id, User.role == "owner").first()
+        if not owner:
+            send_message(chat_id, "❌ Only owners can create shopkeepers.")
             return
 
-        # Connect to tenant DB
-        tenant_db = get_session_for_tenant(tenant.database_url)
-
-        # Check if user exists in tenant DB
-        existing_user = tenant_db.query(User).filter(User.user_id == new_chat_id).first()
-        if existing_user:
-            send_message(chat_id, f"❌ User with ID {new_chat_id} already exists in tenant DB.")
+        if not owner.tenant_schema:
+            send_message(chat_id, "❌ Owner doesn't have a tenant schema. Please set up your shop first.")
             return
 
-        # Add user to tenant DB
+        # Create shopkeeper user (shared owner's tenant schema)
         new_user = User(
-            user_id=new_chat_id,
             name=name,
+            username=f"sk{new_chat_id}",
             email=f"{new_chat_id}@example.com",
-            password_hash="",
-            role=role
+            password_hash=hash_password(generate_password()),  # Generate random password
+            chat_id=None,  # Will be set when shopkeeper logs in
+            role="shopkeeper",
+            tenant_schema=owner.tenant_schema  # Share owner's tenant schema
         )
+        
         try:
-            tenant_db.add(new_user)
-            tenant_db.commit()
-            tenant_db.refresh(new_user)
+            central_db.add(new_user)
+            central_db.commit()
+            central_db.refresh(new_user)
+            
+            send_message(chat_id, f"✅ Shopkeeper '{name}' registered successfully.")
+            send_message(new_chat_id, f"👋 Hello {name}! You've been added as a shopkeeper. Use /start to begin.")
+            
         except Exception as e:
-            tenant_db.rollback()
-            send_message(chat_id, f"❌ Database error (tenant DB): {str(e)}")
+            central_db.rollback()
+            send_message(chat_id, f"❌ Database error: {str(e)}")
             return
-
-        send_message(chat_id, f"✅ {role.title()} '{name}' added successfully to tenant DB.")
-
-    # -------------------- Welcome Message --------------------
-    send_message(new_chat_id, f"👋 Hello {name}! Use /start to begin.")
-
+            
 # -------------------- Products --------------------
 
 def get_stock_list(db: Session):
@@ -2517,27 +2516,22 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         send_message(chat_id, "❌ Incorrect password. Please try again:")
                         return {"ok": True}
 
-                    # ✅ Login successful
+                    # ✅ Login successful - NO schema changes for anyone
                     send_message(chat_id, f"✅ Login successful! Welcome, {user.name}.")
                     user_states.pop(chat_id, None)
 
-                    # Ensure tenant connection
+                    # Verify tenant connection using EXISTING schema
                     try:
-                        if user.role == "owner":
-                            # Ensure owner has tenant schema
-                            schema_name = f"tenant_{chat_id}"
-                            tenant_db_url = create_tenant_db(chat_id)
-                            user.tenant_schema = schema_name
-                            db.commit()
-                        # Shopkeepers already have tenant_schema from creation
-
-                        # Verify tenant connection
+                        if not user.tenant_schema:
+                            send_message(chat_id, "❌ User not properly linked to a store. Contact support.")
+                            return {"ok": True}
+            
                         tenant_db = get_tenant_session(user.tenant_schema, chat_id)
                         if tenant_db is None:
                             logger.error(f"❌ Tenant DB connection failed for {user.username}")
                             send_message(chat_id, "❌ Unable to access store database. Please contact support.")
                             return {"ok": True}
-            
+        
                         logger.info(f"✅ Tenant DB connection successful for {user.username}")
 
                     except Exception as e:
@@ -2549,7 +2543,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     kb = main_menu(user.role)
                     send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                     return {"ok": True}
-
+    
                 # ✅ SHOPKEEPER LOGIN (for new shopkeepers - first time linking chat_id)
                 elif action == "shopkeeper_login":
                     if step == 1:  # Enter Username
@@ -2571,48 +2565,52 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         user_states[chat_id] = {"action": "shopkeeper_login", "step": 2, "data": data}
                         send_message(chat_id, "🔐 Please enter your password:")
             
+                    # (password verification)
                     elif step == 2:  # Enter Password
                         password = text.strip()
                         if not password:
                             send_message(chat_id, "❌ Password cannot be empty. Please enter your password:")
                             return {"ok": True}
-            
+    
                         # Get the candidate user
                         candidate = db.query(User).filter(User.user_id == data["candidate_user_id"]).first()
-            
+    
                         if not candidate:
                             send_message(chat_id, "❌ User not found. Please start over with /start")
                             user_states.pop(chat_id, None)
                             return {"ok": True}
-            
+    
                         # Verify password
                         if not verify_password(password, candidate.password_hash):
                             send_message(chat_id, "❌ Incorrect password. Please try again:")
-                            # Stay on step 2 to re-enter password
                             return {"ok": True}
-            
-                        # ✅ Login successful - link chat_id to shopkeeper
+    
+                        # ✅ ONLY update chat_id - preserve everything else
                         candidate.chat_id = chat_id
                         db.commit()
-            
+    
                         send_message(chat_id, f"✅ Login successful! Welcome, {candidate.name}.")
                         user_states.pop(chat_id, None)
-            
-                        # Verify tenant connection
+    
+                        # Verify tenant connection using EXISTING tenant_schema
                         try:
+                            if not candidate.tenant_schema:
+                                send_message(chat_id, "❌ Shopkeeper not properly linked to a store. Contact the owner.")
+                                return {"ok": True}
+            
                             tenant_db = get_tenant_session(candidate.tenant_schema, chat_id)
                             if tenant_db is None:
                                 send_message(chat_id, "❌ Unable to access store database. Contact the store owner.")
                                 return {"ok": True}
                         except Exception as e:
-                            logger.error(f"❌ Tenant connection failed for shopkeeper {candidate.username}: {e}")
+                            logger.error(f"❌ Tenant connection failed: {e}")
                             send_message(chat_id, "❌ Database access failed. Contact the store owner.")
                             return {"ok": True}
-            
+    
                         # Show shopkeeper menu
                         kb = main_menu(candidate.role)
                         send_message(chat_id, "🏠 Shopkeeper Menu:", keyboard=kb)
-        
+            
                     return {"ok": True}
                 
                 # -------------------- Shop Setup (Owner only) --------------------
