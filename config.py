@@ -17,7 +17,7 @@ TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}" if TELEGR
 
 # --- Database ---
 # Use environment variable with Railway fallback
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:unAwubjufYzxonUSWZjdNvbWtuhwikQs@postgres.railway.internal:5432/railway")
+DATABASE_URL = os.getenv("DATABASE_URL",)
 
 # --- Twilio ---
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
