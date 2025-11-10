@@ -8,6 +8,7 @@ from app.models.models import ProductORM, CustomerORM, SaleORM, PendingApprovalO
 from app.models.central_models import Tenant
 from app.models.central_models import Base as CentralBase
 from app.models.tenant_base import TenantBase
+from config import DATABASE_URL
 
 # -----------------------------------------------------
 # Basic logger setup (since you don't have core.logger)
@@ -157,7 +158,6 @@ def get_tenant_session(tenant_identifier: str, chat_id: int):
     else:
         schema_name = tenant_identifier
         # ✅ FIX: Import from config instead of os.getenv
-        from config import DATABASE_URL
         base_url = DATABASE_URL
                 
     logger.info(f"🔗 Creating tenant session → {schema_name}")
