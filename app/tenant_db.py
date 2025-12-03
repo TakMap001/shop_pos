@@ -134,20 +134,35 @@ def create_tenant_db(chat_id: int, role: str = "owner") -> str:
 # 🔹 ENSURE TENANT TABLES
 # ======================================================
 def ensure_tenant_tables(base_url: str, schema_name: str):
-    """Ensure all tenant tables exist."""
+    """Ensure all tenant tables exist in the correct schema."""
     if not base_url or not schema_name:
         raise ValueError("Base URL or schema name missing")
 
+    logger.info(f"🔄 Ensuring tables in schema: {schema_name}")
+    
+    # Create engine with explicit schema setting
     engine = create_engine(
         base_url,
         future=True,
         pool_pre_ping=True,
+        # This sets the search_path for the connection
         connect_args={"options": f"-csearch_path={schema_name}"}
     )
-    TenantBase.metadata.create_all(bind=engine)
-    logger.info(f"✅ Tenant tables verified in '{schema_name}'.")
-
-
+    
+    try:
+        # First, explicitly set the schema
+        with engine.connect() as conn:
+            conn.execute(text(f"SET search_path TO {schema_name}"))
+            
+            # Now create tables in that schema
+            TenantBase.metadata.create_all(bind=conn)
+            
+            logger.info(f"✅ Tenant tables created in '{schema_name}'.")
+            
+    except Exception as e:
+        logger.error(f"❌ Failed to create tenant tables in {schema_name}: {e}")
+        raise
+        
 # ======================================================
 # 🔹 CREATE TENANT SESSION (Fixed Version - No Table Recreation)
 # ======================================================
