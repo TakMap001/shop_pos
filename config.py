@@ -1,4 +1,4 @@
-# config.py
+# config.py - CORRECTED VERSION
 import os
 from dotenv import load_dotenv
 from twilio.rest import Client
@@ -17,12 +17,14 @@ if not DATABASE_URL:
     DB_PORT = os.getenv("DB_PORT", "5432")
     DB_NAME = os.getenv("DB_NAME", "shopdb")
     DATABASE_URL = f"postgresql+psycopg2://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+    print("⚠️ Using local development database configuration")
 
-# Railway's actual connection string (for reference / override)
-RAILWAY_DATABASE_URL = "postgresql://postgres:unAwubjufYzxonUSWZjdNvbWtuhwikQs@postgres.railway.internal:5432/railway"
+# REMOVE THESE LINES - THEY'RE CAUSING THE PROBLEM!
+# RAILWAY_DATABASE_URL = "postgresql://postgres:unAwubjufYzxonUSWZjdNvbWtuhwikQs@postgres.railway.internal:5432/railway"
+# DATABASE_URL = DATABASE_URL or RAILWAY_DATABASE_URL  # ← DELETE THIS LINE!
 
-# Prefer Railway injected DATABASE_URL over fallback
-DATABASE_URL = DATABASE_URL or RAILWAY_DATABASE_URL
+# Debug output
+print(f"🔧 Final DATABASE_URL: {DATABASE_URL[:60]}..." if DATABASE_URL and len(DATABASE_URL) > 60 else f"🔧 Final DATABASE_URL: {DATABASE_URL}")
 
 # --- Twilio ---
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
@@ -41,4 +43,8 @@ FASTAPI_SECRET_KEY = os.getenv("FASTAPI_SECRET_KEY", "supersecret")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 # --- Tenant DB Base URL (used for schema-based tenants) ---
-BASE_TENANT_URL = DATABASE_URL.rsplit("/", 1)[0]
+if DATABASE_URL:
+    BASE_TENANT_URL = DATABASE_URL.rsplit("/", 1)[0]
+else:
+    BASE_TENANT_URL = None
+    print("⚠️ WARNING: No DATABASE_URL, BASE_TENANT_URL is None")

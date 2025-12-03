@@ -1615,31 +1615,36 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
         # 1. Get user from central DB
         user = db.query(User).filter(User.chat_id == chat_id).first()
 
-        # ✅ SECURITY: Fix schema assignment for EXISTING users
-        if user and user.tenant_schema:
+        # 🔍 DEBUG: Log user info
+        if user:
+            print(f"🔍 DEBUG: User found - ID: {user.user_id}, Username: {user.username}, Role: {user.role}, Tenant Schema: {user.tenant_schema}")
+        else:
+            print(f"🔍 DEBUG: No user found for chat_id: {chat_id}")
+
+        # ✅ SECURITY: Fix schema assignment ONLY for owners
+        if user and user.role == "owner" and user.tenant_schema:
             expected_schema = f"tenant_{chat_id}"
             if user.tenant_schema != expected_schema:
-                logger.error(f"🚨 SECURITY: User {user.username} has schema '{user.tenant_schema}' but should have '{expected_schema}'")
-    
-                # Force correction using create_tenant_db
-                try:
-                    tenant_db_url = create_tenant_db(chat_id)
-                    user.tenant_schema = expected_schema
-                    db.commit()
-                    logger.info(f"✅ Security fix: {user.username} → {expected_schema}")
+                logger.error(f"🚨 SECURITY: Owner {user.username} has schema '{user.tenant_schema}' but should have '{expected_schema}'")
         
-                    # Clean any existing data in the correct schema
-                    tenant_db = get_tenant_session(expected_schema, chat_id)
+                # Force correction ONLY for owners
+                try:
+                    # This should now handle shopkeepers correctly
+                    schema_name = create_tenant_db(chat_id, user.role)
+                    user.tenant_schema = schema_name
+                    db.commit()
+                    logger.info(f"✅ Security fix: {user.username} → {schema_name}")
+            
+                    # Verify connection
+                    tenant_db = get_tenant_session(schema_name, chat_id)
                     if tenant_db:
                         product_count = tenant_db.query(ProductORM).count()
                         if product_count > 0:
-                            tenant_db.query(ProductORM).delete()
-                            tenant_db.query(SaleORM).delete()
-                            tenant_db.commit()
-                            logger.info(f"✅ Cleared {product_count} products from corrected schema")
+                            logger.warning(f"⚠️ Found {product_count} products in corrected schema")
+                        tenant_db.close()
                 except Exception as e:
                     logger.error(f"❌ Security fix failed: {e}")
-
+                        
         # ✅ CRITICAL: Handle callbacks FIRST and RETURN immediately
         if update_type == "callback":
             logger.info(f"🎯 Processing callback: {text} from chat_id={chat_id}")
@@ -2325,16 +2330,26 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     
             # -------------------- View Stock --------------------
             elif text == "view_stock":
+                # 🔍 ADD DEBUG INFO
+                print(f"🔍 VIEW STOCK DEBUG: User {user.username} (role: {user.role})")
+                print(f"🔍 VIEW STOCK DEBUG: Tenant schema: {user.tenant_schema}")
+                print(f"🔍 VIEW STOCK DEBUG: Chat ID: {chat_id}")
+    
                 tenant_db = get_tenant_session(user.tenant_schema, chat_id)
                 if not tenant_db:
+                    print(f"❌ VIEW STOCK DEBUG: No tenant DB for schema: {user.tenant_schema}")
                     send_message(chat_id, "⚠️ Cannot view stock: tenant DB unavailable.")
                     return {"ok": True}
-
+    
+                # 🔍 Check if products exist
+                product_count = tenant_db.query(ProductORM).count()
+                print(f"🔍 VIEW STOCK DEBUG: Found {product_count} products in schema {user.tenant_schema}")
+    
                 stock_list = get_stock_list(tenant_db)
                 kb_dict = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
                 send_message(chat_id, stock_list, kb_dict)
                 return {"ok": True}
-
+    
             # -------------------- Reports Menu --------------------
             elif text == "report_menu":
                 kb_dict = report_menu_keyboard(role)
