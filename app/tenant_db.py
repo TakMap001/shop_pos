@@ -134,34 +134,90 @@ def create_tenant_db(chat_id: int, role: str = "owner") -> str:
 # 🔹 ENSURE TENANT TABLES
 # ======================================================
 def ensure_tenant_tables(base_url: str, schema_name: str):
-    """Ensure all tenant tables exist in the correct schema."""
-    if not base_url or not schema_name:
-        raise ValueError("Base URL or schema name missing")
-
+    """Ensure all tenant tables exist in the correct schema using raw SQL."""
     logger.info(f"🔄 Ensuring tables in schema: {schema_name}")
     
-    # Create engine with explicit schema setting
-    engine = create_engine(
-        base_url,
-        future=True,
-        pool_pre_ping=True,
-        # This sets the search_path for the connection
-        connect_args={"options": f"-csearch_path={schema_name}"}
-    )
+    engine = create_engine(base_url)
     
-    try:
-        # First, explicitly set the schema
-        with engine.connect() as conn:
-            conn.execute(text(f"SET search_path TO {schema_name}"))
-            
-            # Now create tables in that schema
-            TenantBase.metadata.create_all(bind=conn)
-            
-            logger.info(f"✅ Tenant tables created in '{schema_name}'.")
-            
-    except Exception as e:
-        logger.error(f"❌ Failed to create tenant tables in {schema_name}: {e}")
-        raise
+    with engine.connect() as conn:
+        # 1. Create schema if not exists
+        conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema_name}"))
+        conn.commit()
+        
+        # 2. Switch to the schema
+        conn.execute(text(f"SET search_path TO {schema_name}"))
+        conn.commit()
+        
+        # 3. Create tables with explicit schema qualification
+        tables = [
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema_name}.products (
+                product_id SERIAL PRIMARY KEY,
+                name VARCHAR(150) NOT NULL,
+                description TEXT,
+                price NUMERIC(10, 2) NOT NULL,
+                stock INTEGER,
+                min_stock_level INTEGER DEFAULT 0,
+                low_stock_threshold INTEGER DEFAULT 0,
+                unit_type VARCHAR(50) DEFAULT 'unit',
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+            """,
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema_name}.customers (
+                customer_id SERIAL PRIMARY KEY,
+                name VARCHAR(150),
+                contact VARCHAR(100),
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+            """,
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema_name}.sales (
+                sale_id SERIAL PRIMARY KEY,
+                user_id INTEGER,
+                product_id INTEGER,
+                customer_id INTEGER,
+                unit_type VARCHAR(50),
+                quantity INTEGER,
+                total_amount NUMERIC(10, 2),
+                sale_date TIMESTAMP DEFAULT NOW(),
+                payment_type VARCHAR(50),
+                payment_method VARCHAR(50) DEFAULT 'cash',
+                amount_paid NUMERIC(10, 2),
+                pending_amount NUMERIC(10, 2) DEFAULT 0,
+                change_left NUMERIC(10, 2) DEFAULT 0,
+                FOREIGN KEY (product_id) REFERENCES {schema_name}.products(product_id),
+                FOREIGN KEY (customer_id) REFERENCES {schema_name}.customers(customer_id)
+            )
+            """,
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema_name}.pending_approvals (
+                approval_id SERIAL PRIMARY KEY,
+                action_type VARCHAR(50),
+                shopkeeper_id INTEGER,
+                shopkeeper_name VARCHAR(150),
+                product_data TEXT,
+                status VARCHAR(50) DEFAULT 'pending',
+                created_at TIMESTAMP DEFAULT NOW(),
+                resolved_at TIMESTAMP
+            )
+            """
+        ]
+        
+        for sql in tables:
+            try:
+                conn.execute(text(sql))
+                conn.commit()
+                logger.info(f"✅ Created/verified table in {schema_name}")
+            except Exception as e:
+                # If table already exists, that's fine
+                if "already exists" in str(e) or "duplicate key" in str(e):
+                    logger.info(f"ℹ️ Table already exists in {schema_name}")
+                else:
+                    logger.error(f"❌ Error creating table: {e}")
+                    raise
+        
+        logger.info(f"✅ All tables verified in '{schema_name}'.")
         
 # ======================================================
 # 🔹 CREATE TENANT SESSION (Fixed Version - No Table Recreation)
