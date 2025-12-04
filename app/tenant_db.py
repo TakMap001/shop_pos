@@ -128,14 +128,14 @@ def create_tenant_db(chat_id: int, role: str = "owner") -> str:
         logger.info(f"✅ Tenant setup complete for chat_id={chat_id}")
         return schema_name  # Return schema name, not URL
         
-		try:
-			ensure_tenant_tables(base_url, schema_name)
-			logger.info(f"✅ Tenant setup complete for chat_id={chat_id}")
-			return schema_name
-		except Exception as e:
-			logger.error(f"❌ Table creation failed for {schema_name}: {e}")
-			# Return schema name anyway - tables might be created later
-			return schema_name
+        try:
+            ensure_tenant_tables(base_url, schema_name)
+            logger.info(f"✅ Tenant setup complete for chat_id={chat_id}")
+            return schema_name
+        except Exception as e:
+            logger.error(f"❌ Table creation failed for {schema_name}: {e}")
+            # Return schema name anyway - tables might be created later
+            return schema_name
         
 
 
