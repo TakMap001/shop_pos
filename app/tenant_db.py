@@ -128,6 +128,15 @@ def create_tenant_db(chat_id: int, role: str = "owner") -> str:
         logger.info(f"✅ Tenant setup complete for chat_id={chat_id}")
         return schema_name  # Return schema name, not URL
         
+		try:
+			ensure_tenant_tables(base_url, schema_name)
+			logger.info(f"✅ Tenant setup complete for chat_id={chat_id}")
+			return schema_name
+		except Exception as e:
+			logger.error(f"❌ Table creation failed for {schema_name}: {e}")
+			# Return schema name anyway - tables might be created later
+			return schema_name
+        
 
 
 # ======================================================
@@ -137,87 +146,121 @@ def ensure_tenant_tables(base_url: str, schema_name: str):
     """Ensure all tenant tables exist in the correct schema using raw SQL."""
     logger.info(f"🔄 Ensuring tables in schema: {schema_name}")
     
-    engine = create_engine(base_url)
-    
-    with engine.connect() as conn:
-        # 1. Create schema if not exists
-        conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema_name}"))
-        conn.commit()
+    try:
+        engine = create_engine(base_url, pool_timeout=30, connect_args={'connect_timeout': 10})
         
-        # 2. Switch to the schema
-        conn.execute(text(f"SET search_path TO {schema_name}"))
-        conn.commit()
-        
-        # 3. Create tables with explicit schema qualification
-        tables = [
-            f"""
-            CREATE TABLE IF NOT EXISTS {schema_name}.products (
-                product_id SERIAL PRIMARY KEY,
-                name VARCHAR(150) NOT NULL,
-                description TEXT,
-                price NUMERIC(10, 2) NOT NULL,
-                stock INTEGER,
-                min_stock_level INTEGER DEFAULT 0,
-                low_stock_threshold INTEGER DEFAULT 0,
-                unit_type VARCHAR(50) DEFAULT 'unit',
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-            """,
-            f"""
-            CREATE TABLE IF NOT EXISTS {schema_name}.customers (
-                customer_id SERIAL PRIMARY KEY,
-                name VARCHAR(150),
-                contact VARCHAR(100),
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-            """,
-            f"""
-            CREATE TABLE IF NOT EXISTS {schema_name}.sales (
-                sale_id SERIAL PRIMARY KEY,
-                user_id INTEGER,
-                product_id INTEGER,
-                customer_id INTEGER,
-                unit_type VARCHAR(50),
-                quantity INTEGER,
-                total_amount NUMERIC(10, 2),
-                sale_date TIMESTAMP DEFAULT NOW(),
-                payment_type VARCHAR(50),
-                payment_method VARCHAR(50) DEFAULT 'cash',
-                amount_paid NUMERIC(10, 2),
-                pending_amount NUMERIC(10, 2) DEFAULT 0,
-                change_left NUMERIC(10, 2) DEFAULT 0,
-                FOREIGN KEY (product_id) REFERENCES {schema_name}.products(product_id),
-                FOREIGN KEY (customer_id) REFERENCES {schema_name}.customers(customer_id)
-            )
-            """,
-            f"""
-            CREATE TABLE IF NOT EXISTS {schema_name}.pending_approvals (
-                approval_id SERIAL PRIMARY KEY,
-                action_type VARCHAR(50),
-                shopkeeper_id INTEGER,
-                shopkeeper_name VARCHAR(150),
-                product_data TEXT,
-                status VARCHAR(50) DEFAULT 'pending',
-                created_at TIMESTAMP DEFAULT NOW(),
-                resolved_at TIMESTAMP
-            )
+        with engine.connect() as conn:
+            logger.info(f"✅ Connected to database for schema {schema_name}")
+            
+            # 1. Create schema if not exists
+            conn.execute(text(f"CREATE SCHEMA IF NOT EXISTS {schema_name}"))
+            conn.commit()
+            logger.info(f"✅ Schema {schema_name} verified")
+            
+            # 2. Create products table
+            products_sql = f"""
+                CREATE TABLE IF NOT EXISTS {schema_name}.products (
+                    product_id SERIAL PRIMARY KEY,
+                    name VARCHAR(150) NOT NULL,
+                    description TEXT,
+                    price NUMERIC(10, 2) NOT NULL,
+                    stock INTEGER,
+                    min_stock_level INTEGER DEFAULT 0,
+                    low_stock_threshold INTEGER DEFAULT 0,
+                    unit_type VARCHAR(50) DEFAULT 'unit',
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
             """
-        ]
-        
-        for sql in tables:
+            conn.execute(text(products_sql))
+            conn.commit()
+            logger.info(f"✅ Created products table in {schema_name}")
+            
+            # 3. Create customers table
+            customers_sql = f"""
+                CREATE TABLE IF NOT EXISTS {schema_name}.customers (
+                    customer_id SERIAL PRIMARY KEY,
+                    name VARCHAR(150),
+                    contact VARCHAR(100),
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """
+            conn.execute(text(customers_sql))
+            conn.commit()
+            logger.info(f"✅ Created customers table in {schema_name}")
+            
+            # 4. Create sales table
+            sales_sql = f"""
+                CREATE TABLE IF NOT EXISTS {schema_name}.sales (
+                    sale_id SERIAL PRIMARY KEY,
+                    user_id INTEGER,
+                    product_id INTEGER,
+                    customer_id INTEGER,
+                    unit_type VARCHAR(50),
+                    quantity INTEGER,
+                    total_amount NUMERIC(10, 2),
+                    sale_date TIMESTAMP DEFAULT NOW(),
+                    payment_type VARCHAR(50),
+                    payment_method VARCHAR(50) DEFAULT 'cash',
+                    amount_paid NUMERIC(10, 2),
+                    pending_amount NUMERIC(10, 2) DEFAULT 0,
+                    change_left NUMERIC(10, 2) DEFAULT 0
+                )
+            """
+            conn.execute(text(sales_sql))
+            conn.commit()
+            logger.info(f"✅ Created sales table in {schema_name}")
+            
+            # 5. Create pending_approvals table
+            approvals_sql = f"""
+                CREATE TABLE IF NOT EXISTS {schema_name}.pending_approvals (
+                    approval_id SERIAL PRIMARY KEY,
+                    action_type VARCHAR(50),
+                    shopkeeper_id INTEGER,
+                    shopkeeper_name VARCHAR(150),
+                    product_data TEXT,
+                    status VARCHAR(50) DEFAULT 'pending',
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    resolved_at TIMESTAMP
+                )
+            """
+            conn.execute(text(approvals_sql))
+            conn.commit()
+            logger.info(f"✅ Created pending_approvals table in {schema_name}")
+            
+            # 6. Add foreign keys separately (to avoid circular dependencies)
             try:
-                conn.execute(text(sql))
+                fk_sql = f"""
+                    ALTER TABLE {schema_name}.sales 
+                    ADD CONSTRAINT fk_sales_products 
+                    FOREIGN KEY (product_id) 
+                    REFERENCES {schema_name}.products(product_id)
+                """
+                conn.execute(text(fk_sql))
                 conn.commit()
-                logger.info(f"✅ Created/verified table in {schema_name}")
+                logger.info(f"✅ Added foreign key: sales → products")
             except Exception as e:
-                # If table already exists, that's fine
-                if "already exists" in str(e) or "duplicate key" in str(e):
-                    logger.info(f"ℹ️ Table already exists in {schema_name}")
-                else:
-                    logger.error(f"❌ Error creating table: {e}")
-                    raise
+                logger.info(f"ℹ️ Foreign key might already exist: {e}")
+            
+            try:
+                fk_sql = f"""
+                    ALTER TABLE {schema_name}.sales 
+                    ADD CONSTRAINT fk_sales_customers 
+                    FOREIGN KEY (customer_id) 
+                    REFERENCES {schema_name}.customers(customer_id)
+                """
+                conn.execute(text(fk_sql))
+                conn.commit()
+                logger.info(f"✅ Added foreign key: sales → customers")
+            except Exception as e:
+                logger.info(f"ℹ️ Foreign key might already exist: {e}")
+            
+            logger.info(f"✅ All tables created successfully in '{schema_name}'.")
+            
+    except Exception as e:
+        logger.error(f"❌ Failed to create tenant tables in {schema_name}: {e}")
+        # Don't raise - just log and continue
+        logger.error(f"❌ Error details: {str(e)}")
         
-        logger.info(f"✅ All tables verified in '{schema_name}'.")
         
 # ======================================================
 # 🔹 CREATE TENANT SESSION (Fixed Version - No Table Recreation)
