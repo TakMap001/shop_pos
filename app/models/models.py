@@ -75,10 +75,11 @@ class SaleORM(TenantBase):
     unit_type = Column(String(50), default="unit")
     quantity = Column(Integer)
     total_amount = Column(Numeric(10, 2))
+    surcharge_amount = Column(Numeric(10, 2), default=0.0)  # ✅ NEW: Track ecocash surcharge
     sale_date = Column(DateTime, default=datetime.utcnow)
 
     payment_type = Column(String(50), default="full")
-    payment_method = Column(String(50), default="cash")  # ✅ ADD THIS FIELD
+    payment_method = Column(String(50), default="cash")
     amount_paid = Column(Numeric(10, 2), default=0.0)
     pending_amount = Column(Numeric(10, 2), default=0.0)
     change_left = Column(Numeric(10, 2), default=0.0)
@@ -86,7 +87,7 @@ class SaleORM(TenantBase):
     product = relationship("ProductORM", back_populates="sales")
     customer = relationship("CustomerORM", back_populates="sales")
     
-
+    
 class PendingApprovalORM(TenantBase):
     __tablename__ = "pending_approvals"
 

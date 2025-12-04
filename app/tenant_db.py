@@ -192,18 +192,19 @@ def ensure_tenant_tables(base_url: str, schema_name: str):
             sales_sql = f"""
                 CREATE TABLE IF NOT EXISTS {schema_name}.sales (
                     sale_id SERIAL PRIMARY KEY,
-                    user_id INTEGER,
+                    user_id BIGINT,
                     product_id INTEGER,
                     customer_id INTEGER,
-                    unit_type VARCHAR(50),
+                    unit_type VARCHAR(50) DEFAULT 'unit',
                     quantity INTEGER,
                     total_amount NUMERIC(10, 2),
+                    surcharge_amount NUMERIC(10, 2) DEFAULT 0.0,  -- ✅ NEW COLUMN
                     sale_date TIMESTAMP DEFAULT NOW(),
-                    payment_type VARCHAR(50),
+                    payment_type VARCHAR(50) DEFAULT 'full',
                     payment_method VARCHAR(50) DEFAULT 'cash',
-                    amount_paid NUMERIC(10, 2),
-                    pending_amount NUMERIC(10, 2) DEFAULT 0,
-                    change_left NUMERIC(10, 2) DEFAULT 0
+                    amount_paid NUMERIC(10, 2) DEFAULT 0.0,
+                    pending_amount NUMERIC(10, 2) DEFAULT 0.0,
+                    change_left NUMERIC(10, 2) DEFAULT 0.0
                 )
             """
             conn.execute(text(sales_sql))

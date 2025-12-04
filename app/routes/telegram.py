@@ -686,48 +686,34 @@ def ensure_payment_method_column(tenant_db, schema_name):
 def record_cart_sale(tenant_db, chat_id, data):
     """Record a sale from cart data with payment_method tracking and stock updates"""
     try:
-        # ✅ Ensure payment_method column exists
-        schema_name = f"tenant_{chat_id}"
-        column_ensured = ensure_payment_method_column(tenant_db, schema_name)
+        # ✅ Calculate surcharge for Ecocash
+        payment_method = data.get("payment_method", "cash")
+        surcharge = 0
         
-        # Handle CUSTOMER creation
-        customer_id = None
-        if data.get("customer_name"):
-            customer = tenant_db.query(CustomerORM).filter(
-                CustomerORM.name == data["customer_name"]
-            ).first()
-            
-            if not customer:
-                customer = CustomerORM(
-                    name=data["customer_name"],
-                    contact=data.get("customer_contact", "")
-                )
-                tenant_db.add(customer)
-                tenant_db.flush()
-                customer_id = customer.customer_id
+        if payment_method == "ecocash":
+            # Calculate 10% surcharge on cart total
+            cart_total = sum(item["subtotal"] for item in data["cart"])
+            surcharge = cart_total * 0.10
+            data["surcharge"] = surcharge  # Store for receipt
+            data["final_total"] = cart_total + surcharge
         
-        # ✅ FIRST: Update stock for each product
-        for item in data["cart"]:
-            product = tenant_db.query(ProductORM).filter(
-                ProductORM.product_id == item["product_id"]
-            ).first()
-            
-            if product:
-                new_stock = max(product.stock - item["quantity"], 0)
-                product.stock = new_stock
-                logger.info(f"📦 Stock updated: {product.name} from {product.stock + item['quantity']} to {new_stock}")
-            else:
-                logger.error(f"❌ Product not found for stock update: {item['product_id']}")
+        # ... rest of your existing code for customer creation and stock updates ...
         
         # THEN: Record each item as separate sale
         for item in data["cart"]:
+            # Calculate item's share of surcharge (proportional)
+            item_share = (item["subtotal"] / cart_total * surcharge) if cart_total > 0 else 0
+            item_total = item["subtotal"] + item_share
+            
             stmt = text("""
                 INSERT INTO sales 
                 (user_id, product_id, customer_id, unit_type, quantity, total_amount, 
-                 sale_date, payment_type, payment_method, amount_paid, pending_amount, change_left)
+                 surcharge_amount, sale_date, payment_type, payment_method, amount_paid, 
+                 pending_amount, change_left)
                 VALUES 
                 (:user_id, :product_id, :customer_id, :unit_type, :quantity, :total_amount,
-                 :sale_date, :payment_type, :payment_method, :amount_paid, :pending_amount, :change_left)
+                 :surcharge_amount, :sale_date, :payment_type, :payment_method, :amount_paid, 
+                 :pending_amount, :change_left)
             """)
             
             params = {
@@ -736,17 +722,18 @@ def record_cart_sale(tenant_db, chat_id, data):
                 "customer_id": customer_id,
                 "unit_type": item["unit_type"],
                 "quantity": item["quantity"],
-                "total_amount": item["subtotal"],
+                "total_amount": item_total,  # Includes surcharge share
+                "surcharge_amount": item_share,  # Item's share of surcharge
                 "sale_date": datetime.utcnow(),
                 "payment_type": data.get("payment_type", "full"),
-                "payment_method": data.get("payment_method", "cash"),
+                "payment_method": payment_method,
                 "amount_paid": data.get("amount_paid", 0),
                 "pending_amount": data.get("pending_amount", 0),
                 "change_left": data.get("change_left", 0)
             }
             
             tenant_db.execute(stmt, params)
-            logger.info(f"✅ Sale recorded: {item['name']} x {item['quantity']}")
+            logger.info(f"✅ Sale recorded: {item['name']} x {item['quantity']}, Surcharge: ${item_share:.2f}")        
         
         tenant_db.commit()
         logger.info(f"✅ All sales recorded and stock updated for chat_id: {chat_id}")
@@ -1303,37 +1290,104 @@ def generate_report(db: Session, report_type: str):
     - db: SQLAlchemy session (already tenant-specific)
     - report_type: report_daily, report_weekly, report_monthly, etc.
     """
-
     # -------------------- Daily Sales --------------------
     if report_type == "report_daily":
-        results = (
+        # Get daily totals with surcharge breakdown
+        daily_totals = (
             db.query(
                 func.date(SaleORM.sale_date).label("day"),
-                func.sum(SaleORM.quantity).label("total_qty"),
-                func.sum(SaleORM.total_amount).label("total_revenue")
+                func.sum(SaleORM.total_amount).label("total_revenue"),
+                func.sum(SaleORM.surcharge_amount).label("total_surcharge"),
+                func.count(SaleORM.sale_id).label("total_orders")
             )
             .group_by(func.date(SaleORM.sale_date))
-            .order_by(func.date(SaleORM.sale_date))
+            .order_by(func.date(SaleORM.sale_date).desc())
+            .limit(1)
+            .first()
+        )
+        
+        if not daily_totals:
+            return "No sales data for today."
+        
+        # Calculate net revenue (without surcharge)
+        net_revenue = daily_totals.total_revenue - (daily_totals.total_surcharge or 0)
+        
+        lines = ["📅 *Daily Sales Report*"]
+        lines.append(f"📊 Date: {daily_totals.day}")
+        lines.append(f"💰 Gross Revenue: ${float(daily_totals.total_revenue or 0):.2f}")
+        
+        if daily_totals.total_surcharge and daily_totals.total_surcharge > 0:
+            lines.append(f"⚡ Ecocash Surcharge: ${float(daily_totals.total_surcharge or 0):.2f}")
+            lines.append(f"💵 Net Revenue (goods): ${float(net_revenue):.2f}")
+        
+        lines.append(f"🛒 Total Orders: {daily_totals.total_orders}")
+        
+        # Payment method breakdown WITH surcharge
+        payment_breakdown = (
+            db.query(
+                SaleORM.payment_method,
+                func.sum(SaleORM.total_amount).label("amount"),
+                func.sum(SaleORM.surcharge_amount).label("surcharge"),
+                func.count(SaleORM.sale_id).label("count")
+            )
+            .filter(func.date(SaleORM.sale_date) == daily_totals.day)
+            .group_by(SaleORM.payment_method)
             .all()
         )
-        if not results:
-            return "No sales data."
-        lines = ["📅 *Daily Sales*"]
-        for r in results:
-            lines.append(f"{r.day}: {r.total_qty} items, ${float(r.total_revenue or 0):.2f}")
+        
+        if payment_breakdown:
+            lines.append(f"\n💳 Payment Methods:")
+            for payment in payment_breakdown:
+                method = payment.payment_method or "Cash"
+                percentage = (payment.amount / daily_totals.total_revenue * 100) if daily_totals.total_revenue > 0 else 0
+                surcharge_msg = f" (+${float(payment.surcharge or 0):.2f} surcharge)" if payment.surcharge and payment.surcharge > 0 else ""
+                lines.append(f"• {method}: ${float(payment.amount or 0):.2f}{surcharge_msg} ({payment.count} orders, {percentage:.1f}%)")
+        
         return "\n".join(lines)
 
     # -------------------- Weekly Sales (Last 7 Days) --------------------
-    elif report_type == "report_weekly":        
+    elif report_type == "report_weekly":
         # Calculate last 7 days
         today = datetime.utcnow().date()
         week_ago = today - timedelta(days=7)
         
-        results = (
+        # Get weekly totals WITH surcharge
+        weekly_totals = (
+            db.query(
+                func.sum(SaleORM.total_amount).label("total_revenue"),
+                func.sum(SaleORM.surcharge_amount).label("total_surcharge"),
+                func.count(SaleORM.sale_id).label("total_orders")
+            )
+            .filter(SaleORM.sale_date >= week_ago)
+            .first()
+        )
+        
+        if not weekly_totals or not weekly_totals.total_revenue:
+            return "No sales data for the past week."
+        
+        # Calculate net revenue
+        net_revenue = weekly_totals.total_revenue - (weekly_totals.total_surcharge or 0)
+        
+        # Get payment method breakdown WITH surcharge
+        payment_breakdown = (
+            db.query(
+                SaleORM.payment_method,
+                func.sum(SaleORM.total_amount).label("amount"),
+                func.sum(SaleORM.surcharge_amount).label("surcharge"),
+                func.count(SaleORM.sale_id).label("count")
+            )
+            .filter(SaleORM.sale_date >= week_ago)
+            .group_by(SaleORM.payment_method)
+            .all()
+        )
+        
+        # Get daily breakdown WITH surcharge
+        daily_results = (
             db.query(
                 func.date(SaleORM.sale_date).label("day"),
-                func.sum(SaleORM.quantity).label("total_qty"),
-                func.sum(SaleORM.total_amount).label("total_revenue")
+                func.sum(SaleORM.total_amount).label("daily_revenue"),
+                func.sum(SaleORM.surcharge_amount).label("daily_surcharge"),
+                func.count(SaleORM.sale_id).label("daily_orders")
             )
             .filter(SaleORM.sale_date >= week_ago)
             .group_by(func.date(SaleORM.sale_date))
@@ -1341,43 +1395,86 @@ def generate_report(db: Session, report_type: str):
             .all()
         )
         
-        if not results:
-            return "No sales data for the past week."
+        lines = [f"📆 *Weekly Sales Report - Last 7 Days*"]
+        lines.append(f"📅 Period: {week_ago} to {today}")
+        lines.append(f"💰 Gross Revenue: ${float(weekly_totals.total_revenue):.2f}")
         
-        # Calculate weekly totals
-        weekly_qty = sum(r.total_qty or 0 for r in results)
-        weekly_revenue = sum(r.total_revenue or 0 for r in results)
+        if weekly_totals.total_surcharge and weekly_totals.total_surcharge > 0:
+            lines.append(f"⚡ Ecocash Surcharge: ${float(weekly_totals.total_surcharge):.2f}")
+            lines.append(f"💵 Net Revenue (goods): ${float(net_revenue):.2f}")
         
-        lines = [f"📆 *Weekly Sales - Last 7 Days ({week_ago} to {today})*"]
-        lines.append(f"💰 Weekly Total: ${weekly_revenue:.2f}")
-        lines.append(f"🛒 Total Items: {weekly_qty}")
+        lines.append(f"🛒 Total Orders: {weekly_totals.total_orders}")
+        
+        # Payment method breakdown
+        if payment_breakdown:
+            lines.append(f"\n💳 Payment Methods:")
+            for payment in payment_breakdown:
+                method = payment.payment_method or "Cash"
+                percentage = (payment.amount / weekly_totals.total_revenue * 100) if weekly_totals.total_revenue > 0 else 0
+                surcharge_msg = f" (+${float(payment.surcharge or 0):.2f} surcharge)" if payment.surcharge and payment.surcharge > 0 else ""
+                lines.append(f"• {method}: ${float(payment.amount):.2f}{surcharge_msg} ({payment.count} orders, {percentage:.1f}%)")
+        
+        # Daily breakdown WITH surcharge
         lines.append(f"\n📊 Daily Breakdown:")
-
-        # Fill in missing days with zero sales
+        
         current_date = week_ago
         while current_date <= today:
             # Find sales for this date
-            day_sales = next((r for r in results if r.day == current_date), None)
+            day_sales = next((r for r in daily_results if r.day == current_date), None)
             
             if day_sales:
-                lines.append(f"• {current_date}: {day_sales.total_qty} items, ${float(day_sales.total_revenue or 0):.2f}")
+                net_daily = day_sales.daily_revenue - (day_sales.daily_surcharge or 0)
+                surcharge_msg = f" (+${float(day_sales.daily_surcharge or 0):.2f} surcharge)" if day_sales.daily_surcharge and day_sales.daily_surcharge > 0 else ""
+                lines.append(f"• {current_date}: ${float(day_sales.daily_revenue or 0):.2f}{surcharge_msg} ({day_sales.daily_orders} orders)")
             else:
-                lines.append(f"• {current_date}: 0 items, $0.00")
+                lines.append(f"• {current_date}: $0.00 (0 orders)")
             
             current_date += timedelta(days=1)
         
         return "\n".join(lines)
         
-    # -------------------- Monthly Sales (Current Month by Day) --------------------
-    elif report_type == "report_monthly":        
+    # -------------------- Monthly Sales (Current Month) --------------------
+    elif report_type == "report_monthly":
         today = datetime.utcnow().date()
         month_start = today.replace(day=1)
         
-        results = (
+        # Get monthly totals WITH surcharge
+        monthly_totals = (
+            db.query(
+                func.sum(SaleORM.total_amount).label("total_revenue"),
+                func.sum(SaleORM.surcharge_amount).label("total_surcharge"),
+                func.count(SaleORM.sale_id).label("total_orders")
+            )
+            .filter(SaleORM.sale_date >= month_start)
+            .first()
+        )
+        
+        if not monthly_totals or not monthly_totals.total_revenue:
+            return f"No sales data for {today.strftime('%B %Y')}."
+        
+        # Calculate net revenue
+        net_revenue = monthly_totals.total_revenue - (monthly_totals.total_surcharge or 0)
+        
+        # Get payment method breakdown WITH surcharge
+        payment_breakdown = (
+            db.query(
+                SaleORM.payment_method,
+                func.sum(SaleORM.total_amount).label("amount"),
+                func.sum(SaleORM.surcharge_amount).label("surcharge"),
+                func.count(SaleORM.sale_id).label("count")
+            )
+            .filter(SaleORM.sale_date >= month_start)
+            .group_by(SaleORM.payment_method)
+            .all()
+        )
+        
+        # Get daily results WITH surcharge
+        daily_results = (
             db.query(
                 func.date(SaleORM.sale_date).label("day"),
-                func.sum(SaleORM.quantity).label("total_qty"),
-                func.sum(SaleORM.total_amount).label("total_revenue")
+                func.sum(SaleORM.total_amount).label("daily_revenue"),
+                func.sum(SaleORM.surcharge_amount).label("daily_surcharge"),
+                func.count(SaleORM.sale_id).label("daily_orders")
             )
             .filter(SaleORM.sale_date >= month_start)
             .group_by(func.date(SaleORM.sale_date))
@@ -1385,22 +1482,108 @@ def generate_report(db: Session, report_type: str):
             .all()
         )
         
-        if not results:
-            return f"No sales data for {today.strftime('%B %Y')}."
+        lines = [f"📊 *Monthly Sales Report - {today.strftime('%B %Y')}*"]
+        lines.append(f"💰 Gross Revenue: ${float(monthly_totals.total_revenue):.2f}")
         
-        # Calculate monthly totals
-        monthly_qty = sum(r.total_qty or 0 for r in results)
-        monthly_revenue = sum(r.total_revenue or 0 for r in results)
+        if monthly_totals.total_surcharge and monthly_totals.total_surcharge > 0:
+            lines.append(f"⚡ Ecocash Surcharge: ${float(monthly_totals.total_surcharge):.2f}")
+            lines.append(f"💵 Net Revenue (goods): ${float(net_revenue):.2f}")
         
-        lines = [f"📊 *Monthly Sales - {today.strftime('%B %Y')}*"]
-        lines.append(f"💰 Monthly Total: ${monthly_revenue:.2f}")
-        lines.append(f"🛒 Total Items: {monthly_qty}")
+        lines.append(f"🛒 Total Orders: {monthly_totals.total_orders}")
+        
+        # Payment method breakdown
+        if payment_breakdown:
+            lines.append(f"\n💳 Payment Methods:")
+            for payment in payment_breakdown:
+                method = payment.payment_method or "Cash"
+                percentage = (payment.amount / monthly_totals.total_revenue * 100) if monthly_totals.total_revenue > 0 else 0
+                surcharge_msg = f" (+${float(payment.surcharge or 0):.2f} surcharge)" if payment.surcharge and payment.surcharge > 0 else ""
+                lines.append(f"• {method}: ${float(payment.amount or 0):.2f}{surcharge_msg} ({payment.count} orders, {percentage:.1f}%)")
+        
         lines.append(f"\n📅 Daily Breakdown:")
         
-        for r in results:
-            lines.append(f"• {r.day}: {r.total_qty} items, ${float(r.total_revenue or 0):.2f}")
+        for r in daily_results:
+            net_daily = r.daily_revenue - (r.daily_surcharge or 0)
+            surcharge_msg = f" (+${float(r.daily_surcharge or 0):.2f} surcharge)" if r.daily_surcharge and r.daily_surcharge > 0 else ""
+            lines.append(f"• {r.day}: ${float(r.daily_revenue or 0):.2f}{surcharge_msg} ({r.daily_orders} orders)")
         
         return "\n".join(lines)
+    
+    # -------------------- Payment Method Summary Report --------------------
+    elif report_type == "report_payment_summary":
+        today = datetime.utcnow().date()
+        month_start = today.replace(day=1)
+        week_ago = today - timedelta(days=7)
+        
+        # Today's payment breakdown WITH surcharge
+        today_breakdown = (
+            db.query(
+                SaleORM.payment_method,
+                func.sum(SaleORM.total_amount).label("amount"),
+                func.sum(SaleORM.surcharge_amount).label("surcharge"),
+                func.count(SaleORM.sale_id).label("count")
+            )
+            .filter(func.date(SaleORM.sale_date) == today)
+            .group_by(SaleORM.payment_method)
+            .all()
+        )
+        
+        # Weekly payment breakdown WITH surcharge
+        weekly_breakdown = (
+            db.query(
+                SaleORM.payment_method,
+                func.sum(SaleORM.total_amount).label("amount"),
+                func.sum(SaleORM.surcharge_amount).label("surcharge"),
+                func.count(SaleORM.sale_id).label("count")
+            )
+            .filter(SaleORM.sale_date >= week_ago)
+            .group_by(SaleORM.payment_method)
+            .all()
+        )
+        
+        # Monthly payment breakdown WITH surcharge
+        monthly_breakdown = (
+            db.query(
+                SaleORM.payment_method,
+                func.sum(SaleORM.total_amount).label("amount"),
+                func.sum(SaleORM.surcharge_amount).label("surcharge"),
+                func.count(SaleORM.sale_id).label("count")
+            )
+            .filter(SaleORM.sale_date >= month_start)
+            .group_by(SaleORM.payment_method)
+            .all()
+        )
+        
+        lines = ["💳 *Payment Method Summary*"]
+        
+        # Today's summary
+        lines.append(f"\n📅 Today ({today}):")
+        if today_breakdown:
+            for payment in today_breakdown:
+                method = payment.payment_method or "Cash"
+                surcharge_msg = f" (+${float(payment.surcharge or 0):.2f} surcharge)" if payment.surcharge and payment.surcharge > 0 else ""
+                lines.append(f"• {method}: ${float(payment.amount):.2f}{surcharge_msg} ({payment.count} orders)")
+        else:
+            lines.append("• No sales today")
+        
+        # Weekly summary
+        lines.append(f"\n📆 Last 7 Days:")
+        if weekly_breakdown:
+            for payment in weekly_breakdown:
+                method = payment.payment_method or "Cash"
+                surcharge_msg = f" (+${float(payment.surcharge or 0):.2f} surcharge)" if payment.surcharge and payment.surcharge > 0 else ""
+                lines.append(f"• {method}: ${float(payment.amount):.2f}{surcharge_msg} ({payment.count} orders)")
+        
+        # Monthly summary
+        lines.append(f"\n📊 This Month ({today.strftime('%B')}):")
+        if monthly_breakdown:
+            for payment in monthly_breakdown:
+                method = payment.payment_method or "Cash"
+                surcharge_msg = f" (+${float(payment.surcharge or 0):.2f} surcharge)" if payment.surcharge and payment.surcharge > 0 else ""
+                lines.append(f"• {method}: ${float(payment.amount):.2f}{surcharge_msg} ({payment.count} orders)")
+        
+        return "\n".join(lines)
+    
         
     # -------------------- Low Stock Products --------------------
     elif report_type == "report_low_stock":
@@ -2823,15 +3006,42 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         return {"ok": True}
 
                     elif step == 3:  # Unit Type
-                        unit_type = text.strip()
+                        unit_type = text.strip().lower()
                         if not unit_type:
-                            send_message(chat_id, "❌ Unit type cannot be empty. Please enter a valid unit type:")
+                            send_message(chat_id, "❌ Unit type cannot be empty. Please enter a valid unit type (e.g., piece, box, carton, kg, liter, pack):")
                             return {"ok": True}
-                        data["unit_type"] = unit_type
     
+                        # Validate unit type is not a number
+                        try:
+                            float(unit_type)  # If this works, it's a number (wrong!)
+                            send_message(chat_id, "❌ Unit type must be text, not a number. Please enter like: piece, box, carton, kg, liter, pack:")
+                            return {"ok": True}
+                        except ValueError:
+                            # Good, it's not a number
+                            pass
+    
+                        # Common valid unit types
+                        valid_units = ['piece', 'pieces', 'box', 'boxes', 'carton', 'cartons', 'kg', 'kgs', 'kilogram', 'kilograms', 'liter', 'liters', 'pack', 'packs', 'bottle', 'bottles', 'bag', 'bags']
+    
+                        # Allow any text but warn if not in common list
+                        if unit_type not in valid_units:
+                            send_message(chat_id, f"⚠️ '{unit_type}' is not a common unit type. Common types: piece, box, carton, kg, liter, pack. Continue anyway? (yes/no)")
+                            user_states[chat_id] = {"action": "awaiting_product", "step": 3.5, "data": data}
+                            return {"ok": True}
+    
+                        data["unit_type"] = unit_type
+                        # ... continue with flow
+
+                    elif step == 3.5:  # Confirm unusual unit type
+                        confirmation = text.strip().lower()
+                        if confirmation != "yes":
+                            send_message(chat_id, "❌ Unit type rejected. Please enter a valid unit type (e.g., piece, box, carton):")
+                            user_states[chat_id] = {"action": "awaiting_product", "step": 3, "data": data}
+                            return {"ok": True}
+    
+                        data["unit_type"] = data.get("unit_type", "")
+                        user_states[chat_id] = {"action": "awaiting_product", "step": 4, "data": data}
                         if user.role == "owner":
-                            # Owner continues to set price and thresholds
-                            user_states[chat_id] = {"action": action, "step": 4, "data": data}
                             send_message(chat_id, "💲 Enter product price:")
                         else:
                             # Shopkeeper: save for approval and notify owner
