@@ -1,42 +1,29 @@
 # app/models/models.py
-from sqlalchemy import Column, Integer, String, Text, Numeric, DateTime, TIMESTAMP, ForeignKey, BigInteger
+from sqlalchemy import Column, Integer, String, Text, Numeric, DateTime, TIMESTAMP, ForeignKey, BigInteger, Boolean, UniqueConstraint
 from app.models.tenant_base import TenantBase  # tenant DB Base
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
-# ✅ Import central DB Base
-from app.core import Base  
-
-# -------------------- Central DB Models --------------------
-
-class User(Base):
-    __tablename__ = "users"
-
-    user_id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(255))
-    username = Column(String(255), unique=True, index=True)
-    email = Column(String(255))
-    password_hash = Column(String(255))
-    chat_id = Column(BigInteger, unique=True, nullable=True) 
-    role = Column(String(50))
-
-    # Store only tenant schema name (e.g., 'tenant_782962404')
-    tenant_schema = Column(String(255), nullable=True)
-
-    created_at = Column(TIMESTAMP, server_default=func.now())
-
-    def get_tenant_db_url(self, base_url: str):
-        """
-        Returns full SQLAlchemy DB URL for this tenant.
-        base_url should be DATABASE_URL without DB name (e.g., postgresql://user:pass@host:port)
-        """
-        if not self.tenant_schema:
-            return None
-        return f"{base_url}/{self.tenant_schema}"
-
 
 # -------------------- Tenant DB Models --------------------
+
+class ShopORM(TenantBase):
+    __tablename__ = "shops"
+    
+    shop_id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(150), nullable=False)
+    location = Column(String(255))
+    contact = Column(String(100))
+    is_main = Column(Boolean, default=False)  # Main/headquarters shop
+    created_at = Column(TIMESTAMP, server_default=func.now())
+    
+    # Relationships
+    product_stocks = relationship("ProductShopStockORM", back_populates="shop", cascade="all, delete-orphan")
+    sales = relationship("SaleORM", back_populates="shop")
+    users = relationship("User", backref="assigned_shop", primaryjoin="remote(User.shop_id) == foreign(ShopORM.shop_id)")
+
+
 class ProductORM(TenantBase):
     __tablename__ = "products"
 
@@ -44,13 +31,41 @@ class ProductORM(TenantBase):
     name = Column(String(150), nullable=False, index=True)
     description = Column(Text)
     price = Column(Numeric(10, 2), nullable=False)
-    stock = Column(Integer, default=0)
-    min_stock_level = Column(Integer, default=0)
-    low_stock_threshold = Column(Integer, default=10)
     unit_type = Column(String(50), default="unit")
     created_at = Column(TIMESTAMP, server_default=func.now())
 
+    # Relationships
+    shop_stocks = relationship("ProductShopStockORM", back_populates="product", cascade="all, delete-orphan")
     sales = relationship("SaleORM", back_populates="product")
+
+
+class ProductShopStockORM(TenantBase):
+    __tablename__ = "product_shop_stock"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(Integer, ForeignKey("products.product_id"), nullable=False)
+    shop_id = Column(Integer, ForeignKey("shops.shop_id"), nullable=False)
+    
+    # ✅ Stock fields PER SHOP (each shop has its own stock levels)
+    stock = Column(Integer, default=0)
+    min_stock_level = Column(Integer, default=0)
+    low_stock_threshold = Column(Integer, default=10)
+    reorder_quantity = Column(Integer, default=0)
+    
+    # Relationships
+    product = relationship("ProductORM", back_populates="shop_stocks")
+    shop = relationship("ShopORM", back_populates="product_stocks")
+    
+    # Unique constraint - one stock record per product per shop
+    __table_args__ = (UniqueConstraint('product_id', 'shop_id', name='unique_product_shop'),)
+    
+    # Helper method to check if stock is low for THIS shop
+    def is_low_stock(self):
+        return self.stock <= self.low_stock_threshold
+    
+    # Helper method to check if stock is at or below minimum for THIS shop
+    def is_at_minimum(self):
+        return self.stock <= self.min_stock_level
 
 
 class CustomerORM(TenantBase):
@@ -70,12 +85,13 @@ class SaleORM(TenantBase):
     sale_id = Column(Integer, primary_key=True, index=True)
     user_id = Column(BigInteger, nullable=True) 
     product_id = Column(Integer, ForeignKey("products.product_id"))
+    shop_id = Column(Integer, ForeignKey("shops.shop_id"), nullable=False)  # ✅ REQUIRED: Which shop made the sale
     customer_id = Column(Integer, ForeignKey("customers.customer_id"), nullable=True)
 
     unit_type = Column(String(50), default="unit")
     quantity = Column(Integer)
     total_amount = Column(Numeric(10, 2))
-    surcharge_amount = Column(Numeric(10, 2), default=0.0)  # ✅ NEW: Track ecocash surcharge
+    surcharge_amount = Column(Numeric(10, 2), default=0.0)  # Track ecocash surcharge
     sale_date = Column(DateTime, default=datetime.utcnow)
 
     payment_type = Column(String(50), default="full")
@@ -84,7 +100,9 @@ class SaleORM(TenantBase):
     pending_amount = Column(Numeric(10, 2), default=0.0)
     change_left = Column(Numeric(10, 2), default=0.0)
 
+    # Relationships
     product = relationship("ProductORM", back_populates="sales")
+    shop = relationship("ShopORM", back_populates="sales")  # ✅ NEW
     customer = relationship("CustomerORM", back_populates="sales")
     
     

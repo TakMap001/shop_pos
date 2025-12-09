@@ -3,7 +3,7 @@ import logging
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
-from app.models.models import User
+from app.models.central_models import User
 from app.models.models import ProductORM, CustomerORM, SaleORM, PendingApprovalORM
 from app.models.central_models import Tenant
 from app.models.central_models import Base as CentralBase
@@ -157,16 +157,28 @@ def ensure_tenant_tables(base_url: str, schema_name: str):
             conn.commit()
             logger.info(f"✅ Schema {schema_name} verified")
             
-            # 2. Create products table
+            # 2. Create shops table (NEW)
+            shops_sql = f"""
+                CREATE TABLE IF NOT EXISTS {schema_name}.shops (
+                    shop_id SERIAL PRIMARY KEY,
+                    name VARCHAR(150) NOT NULL,
+                    location VARCHAR(255),
+                    contact VARCHAR(100),
+                    is_main BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """
+            conn.execute(text(shops_sql))
+            conn.commit()
+            logger.info(f"✅ Created shops table in {schema_name}")
+            
+            # 3. Create products table (UPDATED - removed stock columns)
             products_sql = f"""
                 CREATE TABLE IF NOT EXISTS {schema_name}.products (
                     product_id SERIAL PRIMARY KEY,
                     name VARCHAR(150) NOT NULL,
                     description TEXT,
                     price NUMERIC(10, 2) NOT NULL,
-                    stock INTEGER,
-                    min_stock_level INTEGER DEFAULT 0,
-                    low_stock_threshold INTEGER DEFAULT 0,
                     unit_type VARCHAR(50) DEFAULT 'unit',
                     created_at TIMESTAMP DEFAULT NOW()
                 )
@@ -175,7 +187,24 @@ def ensure_tenant_tables(base_url: str, schema_name: str):
             conn.commit()
             logger.info(f"✅ Created products table in {schema_name}")
             
-            # 3. Create customers table
+            # 4. Create product_shop_stock table (NEW)
+            product_shop_stock_sql = f"""
+                CREATE TABLE IF NOT EXISTS {schema_name}.product_shop_stock (
+                    id SERIAL PRIMARY KEY,
+                    product_id INTEGER NOT NULL,
+                    shop_id INTEGER NOT NULL,
+                    stock INTEGER DEFAULT 0,
+                    min_stock_level INTEGER DEFAULT 0,
+                    low_stock_threshold INTEGER DEFAULT 10,
+                    reorder_quantity INTEGER DEFAULT 0,
+                    UNIQUE(product_id, shop_id)
+                )
+            """
+            conn.execute(text(product_shop_stock_sql))
+            conn.commit()
+            logger.info(f"✅ Created product_shop_stock table in {schema_name}")
+            
+            # 5. Create customers table
             customers_sql = f"""
                 CREATE TABLE IF NOT EXISTS {schema_name}.customers (
                     customer_id SERIAL PRIMARY KEY,
@@ -188,17 +217,18 @@ def ensure_tenant_tables(base_url: str, schema_name: str):
             conn.commit()
             logger.info(f"✅ Created customers table in {schema_name}")
             
-            # 4. Create sales table
+            # 6. Create sales table (UPDATED - added shop_id)
             sales_sql = f"""
                 CREATE TABLE IF NOT EXISTS {schema_name}.sales (
                     sale_id SERIAL PRIMARY KEY,
                     user_id BIGINT,
                     product_id INTEGER,
+                    shop_id INTEGER NOT NULL,  -- ✅ REQUIRED now
                     customer_id INTEGER,
                     unit_type VARCHAR(50) DEFAULT 'unit',
                     quantity INTEGER,
                     total_amount NUMERIC(10, 2),
-                    surcharge_amount NUMERIC(10, 2) DEFAULT 0.0,  -- ✅ NEW COLUMN
+                    surcharge_amount NUMERIC(10, 2) DEFAULT 0.0,
                     sale_date TIMESTAMP DEFAULT NOW(),
                     payment_type VARCHAR(50) DEFAULT 'full',
                     payment_method VARCHAR(50) DEFAULT 'cash',
@@ -211,7 +241,7 @@ def ensure_tenant_tables(base_url: str, schema_name: str):
             conn.commit()
             logger.info(f"✅ Created sales table in {schema_name}")
             
-            # 5. Create pending_approvals table
+            # 7. Create pending_approvals table
             approvals_sql = f"""
                 CREATE TABLE IF NOT EXISTS {schema_name}.pending_approvals (
                     approval_id SERIAL PRIMARY KEY,
@@ -228,8 +258,9 @@ def ensure_tenant_tables(base_url: str, schema_name: str):
             conn.commit()
             logger.info(f"✅ Created pending_approvals table in {schema_name}")
             
-            # 6. Add foreign keys separately (to avoid circular dependencies)
+            # 8. Add foreign keys
             try:
+                # Sales -> Products
                 fk_sql = f"""
                     ALTER TABLE {schema_name}.sales 
                     ADD CONSTRAINT fk_sales_products 
@@ -243,6 +274,7 @@ def ensure_tenant_tables(base_url: str, schema_name: str):
                 logger.info(f"ℹ️ Foreign key might already exist: {e}")
             
             try:
+                # Sales -> Customers
                 fk_sql = f"""
                     ALTER TABLE {schema_name}.sales 
                     ADD CONSTRAINT fk_sales_customers 
@@ -255,13 +287,72 @@ def ensure_tenant_tables(base_url: str, schema_name: str):
             except Exception as e:
                 logger.info(f"ℹ️ Foreign key might already exist: {e}")
             
+            try:
+                # Sales -> Shops
+                fk_sql = f"""
+                    ALTER TABLE {schema_name}.sales 
+                    ADD CONSTRAINT fk_sales_shops 
+                    FOREIGN KEY (shop_id) 
+                    REFERENCES {schema_name}.shops(shop_id)
+                """
+                conn.execute(text(fk_sql))
+                conn.commit()
+                logger.info(f"✅ Added foreign key: sales → shops")
+            except Exception as e:
+                logger.info(f"ℹ️ Foreign key might already exist: {e}")
+            
+            try:
+                # Product_shop_stock -> Products
+                fk_sql = f"""
+                    ALTER TABLE {schema_name}.product_shop_stock 
+                    ADD CONSTRAINT fk_stock_products 
+                    FOREIGN KEY (product_id) 
+                    REFERENCES {schema_name}.products(product_id)
+                """
+                conn.execute(text(fk_sql))
+                conn.commit()
+                logger.info(f"✅ Added foreign key: product_shop_stock → products")
+            except Exception as e:
+                logger.info(f"ℹ️ Foreign key might already exist: {e}")
+            
+            try:
+                # Product_shop_stock -> Shops
+                fk_sql = f"""
+                    ALTER TABLE {schema_name}.product_shop_stock 
+                    ADD CONSTRAINT fk_stock_shops 
+                    FOREIGN KEY (shop_id) 
+                    REFERENCES {schema_name}.shops(shop_id)
+                """
+                conn.execute(text(fk_sql))
+                conn.commit()
+                logger.info(f"✅ Added foreign key: product_shop_stock → shops")
+            except Exception as e:
+                logger.info(f"ℹ️ Foreign key might already exist: {e}")
+            
+            # 9. Create default main shop
+            try:
+                # Check if any shop exists
+                result = conn.execute(
+                    text(f"SELECT COUNT(*) FROM {schema_name}.shops")
+                ).scalar()
+                
+                if result == 0:
+                    # Create default main shop
+                    conn.execute(text(f"""
+                        INSERT INTO {schema_name}.shops (name, location, is_main, created_at)
+                        VALUES ('Main Store', 'Headquarters', TRUE, NOW())
+                    """))
+                    conn.commit()
+                    logger.info(f"✅ Created default main shop in {schema_name}")
+            except Exception as e:
+                logger.info(f"ℹ️ Could not create default shop: {e}")
+            
             logger.info(f"✅ All tables created successfully in '{schema_name}'.")
             
     except Exception as e:
         logger.error(f"❌ Failed to create tenant tables in {schema_name}: {e}")
         # Don't raise - just log and continue
         logger.error(f"❌ Error details: {str(e)}")
-        
         
 # ======================================================
 # 🔹 CREATE TENANT SESSION (Fixed Version - No Table Recreation)

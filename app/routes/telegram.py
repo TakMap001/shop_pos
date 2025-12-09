@@ -1,5 +1,6 @@
 # app/routes/telegram.py
 
+import json 
 from fastapi import APIRouter, Request, Depends
 import requests, os
 from sqlalchemy.orm import Session
@@ -7,8 +8,8 @@ from decimal import Decimal
 from datetime import datetime, timedelta
 from sqlalchemy import func, text, extract
 from app.models.central_models import Tenant  # Central DB
-from app.models.models import Base as TenantBase
-from app.models.models import User, ProductORM, CustomerORM, SaleORM  # Tenant DB
+from app.models.models import Base as User, TenantBase
+from app.models.models import ProductORM, CustomerORM, SaleORM, PendingApprovalORM, ShopORM, ProductShopStockORM  # Tenant DB
 from app.database import get_db  # central DB session
 from app.telegram_notifications import notify_low_stock, notify_top_product, notify_high_value_sale, send_message, notify_owner_of_pending_approval
 from app.telegram_notifications import notify_shopkeeper_of_approval_result
@@ -123,11 +124,11 @@ def main_menu(role: str):
             "inline_keyboard": [
                 [{"text": "➕ Add Product", "callback_data": "add_product"}],
                 [{"text": "✏️ Update Product", "callback_data": "update_product"}],
-                [{"text": "📈 Quick Stock Update", "callback_data": "quick_stock_update"}],  # ✅ NEW
+                [{"text": "📈 Quick Stock Update", "callback_data": "quick_stock_update"}],
                 [{"text": "📦 View Stock", "callback_data": "view_stock"}],
                 [{"text": "💰 Record Sale", "callback_data": "record_sale"}],
                 [{"text": "📊 Reports", "callback_data": "report_menu"}],
-                [{"text": "🏪 Update Shop Info", "callback_data": "setup_shop"}],
+                [{"text": "🏪 Manage Shops", "callback_data": "manage_shops"}],  # ✅ CHANGED from "setup_shop" to "manage_shops"
                 [{"text": "👤 Create Shopkeeper", "callback_data": "create_shopkeeper"}],
                 [{"text": "❓ Help", "callback_data": "help"}]
             ]
@@ -137,7 +138,7 @@ def main_menu(role: str):
             "inline_keyboard": [
                 [{"text": "➕ Add Product", "callback_data": "add_product"}],
                 [{"text": "✏️ Update Product", "callback_data": "update_product"}],
-                [{"text": "📈 Quick Stock Update", "callback_data": "quick_stock_update"}],  # ✅ NEW
+                [{"text": "📈 Quick Stock Update", "callback_data": "quick_stock_update"}],
                 [{"text": "📦 View Stock", "callback_data": "view_stock"}],
                 [{"text": "💰 Record Sale", "callback_data": "record_sale"}],
                 [{"text": "📊 Reports", "callback_data": "report_menu"}],
@@ -149,6 +150,7 @@ def main_menu(role: str):
 
     return kb_dict
     
+            
 def build_keyboard(kb_dict):
     """Convert our menu dict into a Telebot InlineKeyboardMarkup."""
     keyboard = types.InlineKeyboardMarkup()
@@ -569,6 +571,189 @@ def handle_approval_action(owner_chat_id, approval_id, action):
         logger.error(f"❌ Failed to handle approval action: {e}")
         return False
         
+def handle_stock_approval_action(owner_chat_id, approval_id, action):
+    """Handle approval or rejection of stock update requests"""
+    try:
+        central_db = SessionLocal()
+        owner = central_db.query(User).filter(User.chat_id == owner_chat_id).first()
+        
+        if not owner or owner.role != 'owner':
+            logger.error(f"❌ Only owners can approve stock updates: {owner_chat_id}")
+            central_db.close()
+            return False
+        
+        tenant_db = get_tenant_session(owner.tenant_schema, owner_chat_id)
+        if not tenant_db:
+            central_db.close()
+            return False
+        
+        # Get pending stock approval
+        pending = tenant_db.query(PendingApprovalORM).filter(
+            PendingApprovalORM.approval_id == approval_id,
+            PendingApprovalORM.action_type == 'stock_update',
+            PendingApprovalORM.status == 'pending'
+        ).first()
+        
+        if not pending:
+            logger.error(f"❌ Pending stock approval not found: {approval_id}")
+            tenant_db.close()
+            central_db.close()
+            return False
+        
+        stock_data = json.loads(pending.product_data)
+        product_id = stock_data.get('product_id')
+        product_name = stock_data.get('product_name', 'Unknown Product')
+        old_stock = stock_data.get('old_stock', 0)
+        new_stock = stock_data.get('new_stock', 0)
+        quantity_added = stock_data.get('quantity_added', 0)
+        
+        if action == "approved":
+            # Update the product stock
+            product = tenant_db.query(ProductORM).filter(
+                ProductORM.product_id == product_id
+            ).first()
+            
+            if product:
+                product.stock = new_stock
+                logger.info(f"✅ Stock updated: {product_name} from {old_stock} to {new_stock}")
+            
+            # Update approval status
+            pending.status = 'approved'
+            pending.resolved_at = func.now()
+            
+            # Notify shopkeeper
+            shopkeeper = central_db.query(User).filter(
+                User.user_id == pending.shopkeeper_id
+            ).first()
+            
+            if shopkeeper and shopkeeper.chat_id:
+                # Use the existing notification function
+                notify_shopkeeper_of_approval_result(
+                    shopkeeper.chat_id,
+                    product_name,
+                    'stock updated',
+                    True
+                )
+            
+        else:  # rejected
+            pending.status = 'rejected'
+            pending.resolved_at = func.now()
+            
+            # Notify shopkeeper
+            shopkeeper = central_db.query(User).filter(
+                User.user_id == pending.shopkeeper_id
+            ).first()
+            
+            if shopkeeper and shopkeeper.chat_id:
+                notify_shopkeeper_of_approval_result(
+                    shopkeeper.chat_id,
+                    product_name,
+                    'stock updated',
+                    False
+                )
+        
+        tenant_db.commit()
+        tenant_db.close()
+        central_db.close()
+        
+        logger.info(f"✅ Stock update {action}: {approval_id}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to handle stock approval action: {e}")
+        return False
+        
+def show_approval_details(chat_id, approval_id):
+    """Show details of a specific approval request"""
+    try:
+        central_db = SessionLocal()
+        user = central_db.query(User).filter(User.chat_id == chat_id).first()
+        
+        if not user:
+            send_message(chat_id, "❌ User not found.")
+            central_db.close()
+            return False
+        
+        tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+        if not tenant_db:
+            send_message(chat_id, "❌ Unable to access store database.")
+            central_db.close()
+            return False
+        
+        # Get pending approval
+        pending = tenant_db.query(PendingApprovalORM).filter(
+            PendingApprovalORM.approval_id == approval_id
+        ).first()
+        
+        if not pending:
+            send_message(chat_id, "❌ Approval request not found.")
+            tenant_db.close()
+            central_db.close()
+            return False
+        
+        # Parse product data
+        product_data = json.loads(pending.product_data)
+        
+        # Build message based on action type
+        if pending.action_type == 'add_product':
+            message = f"📋 *Product Addition Request*\n\n"
+            message += f"👤 Requested by: {pending.shopkeeper_name}\n"
+            message += f"🕐 Date: {pending.created_at.strftime('%Y-%m-%d %H:%M')}\n\n"
+            message += f"📦 *Product Details:*\n"
+            message += f"• Name: {product_data.get('name', 'N/A')}\n"
+            message += f"• Price: ${product_data.get('price', 0):.2f}\n"
+            message += f"• Quantity: {product_data.get('quantity', 0)}\n"
+            message += f"• Unit Type: {product_data.get('unit_type', 'N/A')}\n"
+            
+        elif pending.action_type == 'stock_update':
+            message = f"📋 *Stock Update Request*\n\n"
+            message += f"👤 Requested by: {pending.shopkeeper_name}\n"
+            message += f"🕐 Date: {pending.created_at.strftime('%Y-%m-%d %H:%M')}\n\n"
+            message += f"📦 *Stock Details:*\n"
+            message += f"• Product: {product_data.get('product_name', 'N/A')}\n"
+            message += f"• Old Stock: {product_data.get('old_stock', 0)}\n"
+            message += f"• New Stock: {product_data.get('new_stock', 0)}\n"
+            message += f"• Quantity Added: {product_data.get('quantity_added', 0)}\n"
+        
+        else:
+            message = f"📋 *Approval Request*\n\n"
+            message += f"Type: {pending.action_type}\n"
+            message += f"Requested by: {pending.shopkeeper_name}\n"
+            message += f"Status: {pending.status}\n"
+        
+        # Add action buttons if pending
+        if pending.status == 'pending':
+            if pending.action_type == 'stock_update':
+                approve_cb = f"approve_stock:{approval_id}"
+                reject_cb = f"reject_stock:{approval_id}"
+            else:
+                approve_cb = f"approve_action:{approval_id}"
+                reject_cb = f"reject_action:{approval_id}"
+                
+            kb_rows = [
+                [
+                    {"text": "✅ Approve", "callback_data": approve_cb},
+                    {"text": "❌ Reject", "callback_data": reject_cb}
+                ],
+                [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
+            ]
+        else:
+            kb_rows = [
+                [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
+            ]
+        
+        send_message(chat_id, message, {"inline_keyboard": kb_rows})
+        
+        tenant_db.close()
+        central_db.close()
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to show approval details: {e}")
+        send_message(chat_id, "❌ Error loading approval details.")
+        return False
+        
+        
 def update_product(db: Session, chat_id: int, product: ProductORM, data: dict):
     """
     Update a product in a tenant-aware way.
@@ -684,7 +869,7 @@ def ensure_payment_method_column(tenant_db, schema_name):
         return False
         
 def record_cart_sale(tenant_db, chat_id, data):
-    """Record a sale from cart data with payment_method tracking and stock updates"""
+    """Record a sale from cart data with payment_method tracking and stock updates - UPDATED FOR MULTI-SHOP"""
     try:
         # ✅ Calculate surcharge for Ecocash
         payment_method = data.get("payment_method", "cash")
@@ -696,22 +881,95 @@ def record_cart_sale(tenant_db, chat_id, data):
             surcharge = cart_total * 0.10
             data["surcharge"] = surcharge  # Store for receipt
             data["final_total"] = cart_total + surcharge
+            data["original_total"] = cart_total  # Store original total for receipt
         
-        # ... rest of your existing code for customer creation and stock updates ...
+        # ✅ Get selected shop ID (default to main shop if not specified)
+        shop_id = data.get("selected_shop_id")
         
-        # THEN: Record each item as separate sale
+        # If no shop specified, find main shop
+        if not shop_id:
+            main_shop = tenant_db.query(ShopORM).filter(ShopORM.is_main == True).first()
+            if not main_shop:
+                # If no main shop, use first shop
+                main_shop = tenant_db.query(ShopORM).first()
+            if main_shop:
+                shop_id = main_shop.shop_id
+                shop_name = main_shop.name
+            else:
+                logger.error("❌ No shops found in database")
+                send_message(chat_id, "❌ No shops configured. Please set up shops first.")
+                return False
+        else:
+            # Get shop name for selected shop
+            shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
+            shop_name = shop.name if shop else "Selected Shop"
+        
+        # ✅ Get or create customer
+        customer_id = None
+        if data.get("customer_name"):
+            # Check if customer exists
+            existing_customer = tenant_db.query(CustomerORM).filter(
+                CustomerORM.name.ilike(data["customer_name"])
+            ).first()
+            
+            if existing_customer:
+                customer_id = existing_customer.customer_id
+            else:
+                # Create new customer
+                new_customer = CustomerORM(
+                    name=data["customer_name"],
+                    contact=data.get("customer_contact", "")
+                )
+                tenant_db.add(new_customer)
+                tenant_db.flush()  # Get the customer_id
+                customer_id = new_customer.customer_id
+        
+        # ✅ Check stock availability for each item in the selected shop
+        for item in data["cart"]:
+            # Check shop-specific stock
+            shop_stock = tenant_db.query(ProductShopStockORM).filter(
+                ProductShopStockORM.product_id == item["product_id"],
+                ProductShopStockORM.shop_id == shop_id
+            ).first()
+
+            if not shop_stock:
+                # Get product name for error message
+                product = tenant_db.query(ProductORM).filter(
+                    ProductORM.product_id == item["product_id"]
+                ).first()
+                product_name = product.name if product else f"ID:{item['product_id']}"
+                
+                logger.error(f"❌ Product {product_name} not available in selected shop")
+                send_message(chat_id, f"❌ {product_name} not available in shop '{shop_name}'.")
+                return False
+
+            if shop_stock.stock < item["quantity"]:
+                # Get product name for error message
+                product = tenant_db.query(ProductORM).filter(
+                    ProductORM.product_id == item["product_id"]
+                ).first()
+                product_name = product.name if product else f"ID:{item['product_id']}"
+                
+                logger.error(f"❌ Insufficient stock for {product_name} in selected shop")
+                send_message(chat_id, f"❌ Insufficient stock for {product_name} in shop '{shop_name}'. Available: {shop_stock.stock}")
+                return False
+        
+        # ✅ THEN: Record each item as separate sale WITH SHOP ID
+        cart_total = sum(item["subtotal"] for item in data["cart"])
+        
         for item in data["cart"]:
             # Calculate item's share of surcharge (proportional)
             item_share = (item["subtotal"] / cart_total * surcharge) if cart_total > 0 else 0
             item_total = item["subtotal"] + item_share
             
+            # ✅ UPDATED: Include shop_id in sale record
             stmt = text("""
                 INSERT INTO sales 
-                (user_id, product_id, customer_id, unit_type, quantity, total_amount, 
+                (user_id, product_id, shop_id, customer_id, unit_type, quantity, total_amount, 
                  surcharge_amount, sale_date, payment_type, payment_method, amount_paid, 
                  pending_amount, change_left)
                 VALUES 
-                (:user_id, :product_id, :customer_id, :unit_type, :quantity, :total_amount,
+                (:user_id, :product_id, :shop_id, :customer_id, :unit_type, :quantity, :total_amount,
                  :surcharge_amount, :sale_date, :payment_type, :payment_method, :amount_paid, 
                  :pending_amount, :change_left)
             """)
@@ -719,6 +977,7 @@ def record_cart_sale(tenant_db, chat_id, data):
             params = {
                 "user_id": chat_id,
                 "product_id": item["product_id"],
+                "shop_id": shop_id,  # ✅ ADDED: Store which shop made the sale
                 "customer_id": customer_id,
                 "unit_type": item["unit_type"],
                 "quantity": item["quantity"],
@@ -733,13 +992,29 @@ def record_cart_sale(tenant_db, chat_id, data):
             }
             
             tenant_db.execute(stmt, params)
-            logger.info(f"✅ Sale recorded: {item['name']} x {item['quantity']}, Surcharge: ${item_share:.2f}")        
+            
+            # ✅ Update shop-specific stock
+            shop_stock = tenant_db.query(ProductShopStockORM).filter(
+                ProductShopStockORM.product_id == item["product_id"],
+                ProductShopStockORM.shop_id == shop_id
+            ).first()
+            
+            if shop_stock:
+                shop_stock.stock -= item["quantity"]
+                logger.info(f"✅ Stock updated for shop {shop_id}: {item['name']} -{item['quantity']}")
+            
+            logger.info(f"✅ Sale recorded: {item['name']} x {item['quantity']}, Shop: {shop_id}, Surcharge: ${item_share:.2f}")        
         
         tenant_db.commit()
-        logger.info(f"✅ All sales recorded and stock updated for chat_id: {chat_id}")
+        logger.info(f"✅ All sales recorded and stock updated for chat_id: {chat_id}, shop_id: {shop_id}")
         
-        # Show final receipt
+        # ✅ Show final receipt with shop information
         receipt = f"✅ *Sale Completed Successfully!*\n\n"
+        receipt += f"🏪 Shop: {shop_name}\n"
+        receipt += f"📅 Date: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        receipt += f"---\n"
+        
+        # Add cart items to receipt
         receipt += get_cart_summary(data["cart"])
         
         if data.get("payment_method") == "ecocash" and data.get("surcharge", 0) > 0:
@@ -758,8 +1033,15 @@ def record_cart_sale(tenant_db, chat_id, data):
             receipt += f"📋 Pending: ${data['pending_amount']:.2f}\n"
         if data.get("customer_name"):
             receipt += f"👤 Customer: {data['customer_name']}\n"
+            if data.get("customer_contact"):
+                receipt += f"📞 Contact: {data['customer_contact']}\n"
             
         send_message(chat_id, receipt)
+        
+        # ✅ Check for low stock alerts for this shop
+        for item in data["cart"]:
+            check_low_stock_alerts(tenant_db, item["product_id"], shop_id)
+        
         return True
         
     except Exception as e:
@@ -767,6 +1049,144 @@ def record_cart_sale(tenant_db, chat_id, data):
         tenant_db.rollback()
         send_message(chat_id, f"❌ Failed to record sale: {str(e)}")
         return False
+
+def check_low_stock_alerts(tenant_db, product_id, shop_id):
+    """Check and notify about low stock for specific shop"""
+    
+    shop_stock = tenant_db.query(ProductShopStockORM).filter(
+        ProductShopStockORM.product_id == product_id,
+        ProductShopStockORM.shop_id == shop_id
+    ).first()
+    
+    if shop_stock and shop_stock.is_low_stock():
+        # Get shop info
+        shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
+        product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
+        
+        if shop and product:
+            # Notify owner (find owner in central DB)
+            from app.core import SessionLocal
+            central_db = SessionLocal()
+            
+            try:
+                # Get current schema name from tenant_db
+                result = tenant_db.execute(text("SELECT current_schema()")).fetchone()
+                schema_name = result[0] if result else None
+                
+                if schema_name:
+                    owner = central_db.query(User).filter(
+                        User.tenant_schema == schema_name,
+                        User.role == "owner"
+                    ).first()
+                    
+                    if owner and owner.chat_id:
+                        alert_msg = f"⚠️ *LOW STOCK ALERT* ⚠️\n\n"
+                        alert_msg += f"🏪 Shop: {shop.name}\n"
+                        alert_msg += f"📦 Product: {product.name}\n"
+                        alert_msg += f"📊 Current Stock: {shop_stock.stock}\n"
+                        alert_msg += f"⚡ Low Threshold: {shop_stock.low_stock_threshold}\n"
+                        if shop_stock.stock <= shop_stock.min_stock_level:
+                            alert_msg += f"🚨 *CRITICAL: Below minimum stock level!*\n"
+                        else:
+                            alert_msg += f"⚠️ *Running low!*\n"
+                        
+                        send_message(owner.chat_id, alert_msg)
+            
+            except Exception as e:
+                logger.error(f"❌ Error sending low stock alert: {e}")
+            finally:
+                central_db.close()
+
+def show_approval_details(chat_id, approval_id):
+    """Show details of a specific approval request"""
+    try:
+        central_db = SessionLocal()
+        user = central_db.query(User).filter(User.chat_id == chat_id).first()
+        
+        if not user:
+            send_message(chat_id, "❌ User not found.")
+            central_db.close()
+            return False
+        
+        tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+        if not tenant_db:
+            send_message(chat_id, "❌ Unable to access store database.")
+            central_db.close()
+            return False
+        
+        # Get pending approval
+        pending = tenant_db.query(PendingApprovalORM).filter(
+            PendingApprovalORM.approval_id == approval_id
+        ).first()
+        
+        if not pending:
+            send_message(chat_id, "❌ Approval request not found.")
+            tenant_db.close()
+            central_db.close()
+            return False
+        
+        # Parse product data
+        product_data = json.loads(pending.product_data)
+        
+        # Build message based on action type
+        if pending.action_type == 'add_product':
+            message = f"📋 *Product Addition Request*\n\n"
+            message += f"👤 Requested by: {pending.shopkeeper_name}\n"
+            message += f"🕐 Date: {pending.created_at.strftime('%Y-%m-%d %H:%M')}\n\n"
+            message += f"📦 *Product Details:*\n"
+            message += f"• Name: {product_data.get('name', 'N/A')}\n"
+            message += f"• Price: ${product_data.get('price', 0):.2f}\n"
+            message += f"• Quantity: {product_data.get('quantity', 0)}\n"
+            message += f"• Unit Type: {product_data.get('unit_type', 'N/A')}\n"
+            
+        elif pending.action_type == 'stock_update':
+            message = f"📋 *Stock Update Request*\n\n"
+            message += f"👤 Requested by: {pending.shopkeeper_name}\n"
+            message += f"🕐 Date: {pending.created_at.strftime('%Y-%m-%d %H:%M')}\n\n"
+            message += f"📦 *Stock Details:*\n"
+            message += f"• Product: {product_data.get('product_name', 'N/A')}\n"
+            message += f"• Old Stock: {product_data.get('old_stock', 0)}\n"
+            message += f"• New Stock: {product_data.get('new_stock', 0)}\n"
+            message += f"• Quantity Added: {product_data.get('quantity_added', 0)}\n"
+        
+        else:
+            message = f"📋 *Approval Request*\n\n"
+            message += f"Type: {pending.action_type}\n"
+            message += f"Requested by: {pending.shopkeeper_name}\n"
+            message += f"Status: {pending.status}\n"
+        
+        # Add action buttons if pending
+        if pending.status == 'pending':
+            if pending.action_type == 'stock_update':
+                approve_cb = f"approve_stock:{approval_id}"
+                reject_cb = f"reject_stock:{approval_id}"
+            else:
+                approve_cb = f"approve_action:{approval_id}"
+                reject_cb = f"reject_action:{approval_id}"
+                
+            kb_rows = [
+                [
+                    {"text": "✅ Approve", "callback_data": approve_cb},
+                    {"text": "❌ Reject", "callback_data": reject_cb}
+                ],
+                [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
+            ]
+        else:
+            kb_rows = [
+                [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
+            ]
+        
+        send_message(chat_id, message, {"inline_keyboard": kb_rows})
+        
+        tenant_db.close()
+        central_db.close()
+        return True
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to show approval details: {e}")
+        send_message(chat_id, "❌ Error loading approval details.")
+        return False
+        
         
 def record_sale(db: Session, chat_id: int, data: dict):
     """
@@ -1893,12 +2313,85 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 send_message(chat_id, "🏠 Main Menu:", kb_dict)
                 return {"ok": True}
 
-            # -------------------- Shop Setup (Owner only) --------------------
-            elif text == "setup_shop" and role == "owner":
-                send_message(chat_id, "🏪 Please enter your shop name:")
-                user_states[chat_id] = {"action": "setup_shop", "step": 1, "data": {}}
+            # -------------------- Unified Shop Management (Owner only) --------------------
+            elif text == "manage_shops" and role == "owner":
+                tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                if not tenant_db:
+                    send_message(chat_id, "❌ Unable to access store database.")
+                    return {"ok": True}
+
+                # Get current shops to show status
+                shops = tenant_db.query(ShopORM).all()
+                has_shops = len(shops) > 0
+    
+                # Create dynamic menu based on whether shops exist
+                if not has_shops:
+                    # No shops yet - setup first shop
+                    kb_rows = [
+                        [{"text": "🏪 Setup First Shop", "callback_data": "setup_first_shop"}],
+                        [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
+                    ]
+                    message = "🏪 *Shop Management*\n\nNo shops configured yet. Set up your first shop!"
+                else:
+                    # Shops exist - show full management menu
+                    kb_rows = [
+                        [{"text": "🏪 Update Main Shop", "callback_data": "update_main_shop"}],
+                        [{"text": "➕ Add New Shop", "callback_data": "add_new_shop"}],
+                        [{"text": "📋 View All Shops", "callback_data": "view_all_shops"}],
+                        [{"text": "📊 Manage Shop Stock", "callback_data": "manage_shop_stock"}],
+                        [{"text": "🔄 Set Default Shop", "callback_data": "set_default_shop"}],
+                        [{"text": "📈 Shop Reports", "callback_data": "shop_reports"}],
+                        [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
+                    ]
+        
+                    # Count shops and show status
+                    main_shop = tenant_db.query(ShopORM).filter(ShopORM.is_main == True).first()
+                    message = f"🏪 *Shop Management*\n\n"
+                    message += f"📊 **Status:** {len(shops)} shop(s) configured\n"
+                    if main_shop:
+                        message += f"⭐ **Main Shop:** {main_shop.name}\n"
+                    message += "\nSelect an option below:"
+
+                send_message(chat_id, message, {"inline_keyboard": kb_rows})
                 return {"ok": True}
 
+            # -------------------- Setup First Shop (when no shops exist) --------------------
+            elif text == "setup_first_shop" and role == "owner":
+                send_message(chat_id, "🏪 Let's set up your first shop!\n\nEnter shop name:")
+                user_states[chat_id] = {"action": "setup_shop", "step": 1, "data": {"is_first_shop": True}}
+                return {"ok": True}
+
+            # -------------------- Update Main Shop (when shops exist) --------------------
+            elif text == "update_main_shop" and role == "owner":
+                tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                if not tenant_db:
+                    send_message(chat_id, "❌ Unable to access store database.")
+                    return {"ok": True}
+    
+                # Get main shop
+                main_shop = tenant_db.query(ShopORM).filter(ShopORM.is_main == True).first()
+                if not main_shop:
+                    # If no main shop, get first shop
+                    main_shop = tenant_db.query(ShopORM).first()
+    
+                if main_shop:
+                    # Pre-fill with existing data
+                    user_states[chat_id] = {
+                        "action": "update_existing_shop", 
+                        "step": 1, 
+                        "data": {
+                            "shop_id": main_shop.shop_id,
+                            "current_name": main_shop.name,
+                            "current_location": main_shop.location or "",
+                            "current_contact": main_shop.contact or ""
+                        }
+                    }
+                    send_message(chat_id, f"✏️ Updating Main Shop: {main_shop.name}\n\nEnter NEW shop name (or '-' to keep current):")
+                else:
+                    send_message(chat_id, "❌ No shops found. Please set up your first shop.")
+    
+                return {"ok": True}
+    
             # -------------------- Create Shopkeeper --------------------
             elif text == "create_shopkeeper":
                 if role != "owner":
@@ -1945,7 +2438,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     show_approval_details(chat_id, approval_id)
                 except (ValueError, IndexError):
                     send_message(chat_id, "❌ Invalid approval ID.")
-        
+                return {"ok": True}  # ← ADD THIS LINE
+                
             
             # -------------------- Quick Stock Update --------------------
             elif text == "quick_stock_update":
@@ -2010,6 +2504,156 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 except (ValueError, IndexError):
                     send_message(chat_id, "❌ Invalid stock rejection action.")
         
+            elif text == "add_new_shop":
+                if user.role != "owner":
+                    send_message(chat_id, "❌ Only store owners can add shops.")
+                    return {"ok": True}
+
+                user_states[chat_id] = {"action": "add_shop", "step": 1, "data": {}}
+                send_message(chat_id, "🏪 Enter name for new shop:")
+                return {"ok": True}
+
+            elif text == "view_all_shops":
+                tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                if not tenant_db:
+                    send_message(chat_id, "❌ Unable to access store database.")
+                    return {"ok": True}
+
+                shops = tenant_db.query(ShopORM).all()
+                if not shops:
+                    send_message(chat_id, "🏪 No shops found. Use 'Add New Shop' to create your first shop.")
+                    return {"ok": True}
+
+                shop_list = "🏪 *Your Shops:*\n\n"
+                for shop in shops:
+                    shop_list += f"• *{shop.name}*\n"
+                    shop_list += f"  📍 {shop.location or 'No location'}\n"
+                    shop_list += f"  📞 {shop.contact or 'No contact'}\n"
+                    shop_list += f"  {'⭐ MAIN SHOP' if shop.is_main else ''}\n"
+                    shop_list += f"  ID: {shop.shop_id}\n\n"
+
+                # Add management buttons
+                kb_rows = [
+                    [{"text": "➕ Add Stock to Shop", "callback_data": "add_shop_stock"}],
+                    [{"text": "📊 View Shop Stock", "callback_data": "view_shop_stock"}],
+                    [{"text": "⬅️ Back", "callback_data": "manage_shops"}]
+                ]
+                send_message(chat_id, shop_list, {"inline_keyboard": kb_rows})
+                return {"ok": True}
+
+            # -------------------- Shop Stock Management --------------------
+            elif text == "add_shop_stock":
+                user_states[chat_id] = {"action": "add_shop_stock", "step": 1, "data": {}}
+    
+                # First, show shops to select
+                tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                if not tenant_db:
+                    send_message(chat_id, "❌ Unable to access store database.")
+                    return {"ok": True}
+
+                shops = tenant_db.query(ShopORM).all()
+                if not shops:
+                    send_message(chat_id, "❌ No shops found. Please add a shop first.")
+                    return {"ok": True}
+
+                kb_rows = []
+                for shop in shops:
+                    kb_rows.append([{"text": f"🏪 {shop.name}", "callback_data": f"select_shop_for_stock:{shop.shop_id}"}])
+                kb_rows.append([{"text": "⬅️ Cancel", "callback_data": "view_all_shops"}])
+    
+                send_message(chat_id, "🏪 Select a shop to add stock:", {"inline_keyboard": kb_rows})
+                return {"ok": True}
+
+            elif text.startswith("select_shop_for_stock:"):
+                try:
+                    shop_id = int(text.split(":")[1])
+        
+                    current_state = user_states.get(chat_id, {})
+                    current_data = current_state.get("data", {})
+                    current_data["selected_shop_id"] = shop_id
+        
+                    user_states[chat_id] = {"action": "add_shop_stock", "step": 2, "data": current_data}
+                    send_message(chat_id, "📦 Enter product name to search:")
+        
+                except (ValueError, IndexError):
+                    send_message(chat_id, "❌ Invalid shop selection.")
+    
+                return {"ok": True}
+
+            elif text == "view_shop_stock":
+                tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                if not tenant_db:
+                    send_message(chat_id, "❌ Unable to access store database.")
+                    return {"ok": True}
+
+                # Show shops to select
+                shops = tenant_db.query(ShopORM).all()
+                if not shops:
+                    send_message(chat_id, "❌ No shops found.")
+                    return {"ok": True}
+
+                kb_rows = []
+                for shop in shops:
+                    kb_rows.append([{"text": f"📊 {shop.name} Stock", "callback_data": f"view_stock_for_shop:{shop.shop_id}"}])
+                kb_rows.append([{"text": "⬅️ Back", "callback_data": "view_all_shops"}])
+    
+                send_message(chat_id, "🏪 Select a shop to view stock:", {"inline_keyboard": kb_rows})
+                return {"ok": True}
+
+            elif text.startswith("view_stock_for_shop:"):
+                try:
+                    shop_id = int(text.split(":")[1])
+        
+                    tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                    if not tenant_db:
+                        send_message(chat_id, "❌ Unable to access store database.")
+                        return {"ok": True}
+
+                    # Get shop info
+                    shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
+                    if not shop:
+                        send_message(chat_id, "❌ Shop not found.")
+                        return {"ok": True}
+
+                    # Get stock for this shop
+                    stock_items = tenant_db.query(ProductShopStockORM).filter(
+                        ProductShopStockORM.shop_id == shop_id
+                    ).all()
+
+                    if not stock_items:
+                        message = f"🏪 *{shop.name}*\n\n"
+                        message += "📦 No stock assigned to this shop yet.\n"
+                        message += "Use 'Add Stock to Shop' to assign products."
+                    else:
+                        message = f"🏪 *{shop.name} - Stock Report*\n\n"
+                        for item in stock_items:
+                            product = tenant_db.query(ProductORM).filter(
+                                ProductORM.product_id == item.product_id
+                            ).first()
+                
+                            if product:
+                                status = "🟢" if item.stock > item.low_stock_threshold else "🔴" if item.stock == 0 else "🟡"
+                                message += f"{status} *{product.name}*\n"
+                                message += f"  📊 Stock: {item.stock} {product.unit_type}\n"
+                                message += f"  ⚠️ Low Stock Alert: {item.low_stock_threshold}\n"
+                                message += f"  📦 Min Stock: {item.min_stock_level}\n"
+                                if item.stock <= item.low_stock_threshold:
+                                    message += f"  ⚠️ *LOW STOCK!*\n"
+                                message += "\n"
+
+                    kb_rows = [
+                        [{"text": "➕ Add More Stock", "callback_data": f"add_stock_to_existing_shop:{shop_id}"}],
+                        [{"text": "📈 Update Stock", "callback_data": f"update_shop_stock:{shop_id}"}],
+                        [{"text": "⬅️ Back to Shops", "callback_data": "view_all_shops"}]
+                    ]
+        
+                    send_message(chat_id, message, {"inline_keyboard": kb_rows})
+        
+                except (ValueError, IndexError):
+                    send_message(chat_id, "❌ Invalid shop selection.")
+    
+                return {"ok": True}
+
             # -------------------- Update Product --------------------
             elif text == "update_product":
                 tenant_db = get_tenant_session(user.tenant_schema, chat_id)
@@ -2087,10 +2731,56 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "⚠️ Cannot record sale: tenant DB unavailable.")
                     return {"ok": True}
 
-                send_message(chat_id, "💰 Record a new sale!\nEnter product name:")
-                user_states[chat_id] = {"action": "awaiting_sale", "step": 1, "data": {}}
+                # Get available shops
+                shops = tenant_db.query(ShopORM).all()
+    
+                if not shops:
+                    send_message(chat_id, "❌ No shops found. Please set up shops first in 'Manage Shops'.")
+                    return {"ok": True}
+    
+                if len(shops) == 1:
+                    # Only one shop - use it automatically
+                    user_states[chat_id] = {
+                        "action": "awaiting_sale", 
+                        "step": 1, 
+                        "data": {"selected_shop_id": shops[0].shop_id}
+                    }
+                    send_message(chat_id, f"🏪 Shop: {shops[0].name}\n💰 Record a new sale!\nEnter product name:")
+                else:
+                    # Multiple shops - ask user to select
+                    kb_rows = []
+                    for shop in shops:
+                        kb_rows.append([{
+                            "text": f"🏪 {shop.name} {'⭐' if shop.is_main else ''}",
+                            "callback_data": f"select_shop_for_sale:{shop.shop_id}"
+                        }])
+        
+                    send_message(chat_id, "🏪 Select shop for sale:", {"inline_keyboard": kb_rows})
                 return {"ok": True}
 
+            # -------------------- Shop Selection for Sale --------------------
+            elif text.startswith("select_shop_for_sale:"):
+                try:
+                    shop_id = int(text.split(":")[1])
+        
+                    tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                    if not tenant_db:
+                        send_message(chat_id, "❌ Unable to access store database.")
+                        return {"ok": True}
+
+                    shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
+                    if not shop:
+                        send_message(chat_id, "❌ Shop not found.")
+                        return {"ok": True}
+
+                    user_states[chat_id] = {"action": "awaiting_sale", "step": 1, "data": {"selected_shop_id": shop_id}}
+                    send_message(chat_id, f"🏪 Shop: {shop.name}\n💰 Record a new sale!\nEnter product name:")
+        
+                except (ValueError, IndexError):
+                    send_message(chat_id, "❌ Invalid shop selection.")
+    
+                return {"ok": True}
+    
             # -------------------- Product Selection for Sale --------------------
             elif text.startswith("select_sale:"):
                 try:
@@ -2811,105 +3501,131 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             
                     return {"ok": True}
                 
-                # -------------------- Shop Setup (Owner only) --------------------
+                # -------------------- Unified Shop Setup/Update (Owner only) --------------------
                 elif action == "setup_shop" and user.role == "owner":
                     if step == 1:  # Shop Name
                         shop_name = text.strip()
-                        if shop_name:
-                            data["name"] = shop_name
-                            user_states[chat_id] = {"action": action, "step": 2, "data": data}
-                            send_message(chat_id, "📍 Now enter the shop location:")
-                        else:
+                        if not shop_name:
                             send_message(chat_id, "❌ Shop name cannot be empty. Please enter your shop name:")
+                            return {"ok": True}
+                        data["name"] = shop_name
+                        user_states[chat_id] = {"action": action, "step": 2, "data": data}
+                        send_message(chat_id, "📍 Now enter the shop location:")
 
                     elif step == 2:  # Shop Location
                         location = text.strip()
                         if location:
                             data["location"] = location
-                            user_states[chat_id] = {"action": action, "step": 3, "data": data}
-                            send_message(chat_id, "📞 Finally, enter the shop contact number:")
-                        else:
-                            send_message(chat_id, "❌ Location cannot be empty. Please enter your shop location:")
+                        user_states[chat_id] = {"action": action, "step": 3, "data": data}
+                        send_message(chat_id, "📞 Enter the shop contact number (optional):")
 
-                    elif step == 3:  # Shop Contact
+                    elif step == 3:  # Shop Contact (optional)
                         contact = text.strip()
-                        if not contact:
-                            send_message(chat_id, "❌ Contact cannot be empty. Enter shop contact number:")
-                            return {"ok": False}
+                        if contact:
+                            data["contact"] = contact
 
-                        data["contact"] = contact
-
-                        # -------------------- NEW: Use simplified tenant schema creation --------------------
-                        try:
-                            
-                            schema_name = f"tenant_{chat_id}"
-                            
-                            # Create tenant schema with all tables
-                            try:
-                                tenant_db_url = create_tenant_db(chat_id)
-                                tenant_created = True
-                            except Exception as e:
-                                logger.error(f"❌ Tenant creation failed: {e}")
-                                tenant_created = False
-                            
-                            if not tenant_created:
-                                logger.error(f"❌ Failed to create tenant schema for owner {user.username}")
-                                send_message(chat_id, "❌ Could not initialize store database.")
-                                return {"ok": True}
-
-                            # -------------------- Check if tenant already exists --------------------
-                            existing_tenant = db.query(Tenant).filter(Tenant.telegram_owner_id == chat_id).first()
-
-                            if existing_tenant:
-                                # Update existing tenant info
-                                existing_tenant.store_name = data["name"]
-                                existing_tenant.location = data["location"]
-                                existing_tenant.contact = contact
-                                existing_tenant.database_url = schema_name  # Update to schema name
-                                db.commit()
-
-                                send_message(
-                                    chat_id,
-                                    f"✅ Your existing shop info has been updated!\n\n"
-                                    f"🏪 {data['name']}\n📍 {data['location']}\n📞 {contact}"
-                                )
-                            else:
-                                # Create new tenant record
-                                new_tenant = Tenant(
-                                    tenant_id=str(uuid.uuid4()),
-                                    telegram_owner_id=chat_id,
-                                    store_name=data["name"],
-                                    database_url=schema_name,  # Store schema name only
-                                    location=data["location"],
-                                    contact=contact,
-                                )
-                                db.add(new_tenant)
-                                db.commit()
-
-                                send_message(
-                                    chat_id,
-                                    f"✅ Shop info saved!\n\n"
-                                    f"🏪 {data['name']}\n📍 {data['location']}\n📞 {contact}"
-                                )
-
-                            # -------------------- Link owner to tenant schema --------------------
-                            user.tenant_schema = schema_name
-                            db.commit()
-
-                            logger.info(f"✅ Shop setup completed for {user.username} with schema '{schema_name}'")
-
-                        except Exception as e:
-                            logger.error(f"❌ Shop setup failed for {user.username}: {e}")
-                            send_message(chat_id, "❌ Could not complete shop setup. Please contact support.")
+                        # Save the shop
+                        tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                        if not tenant_db:
+                            send_message(chat_id, "❌ Unable to access database.")
+                            user_states.pop(chat_id, None)
                             return {"ok": True}
 
-                        # -------------------- Show Owner Main Menu --------------------
-                        kb_dict = main_menu(user.role)
-                        send_message(chat_id, "🏠 Main Menu:", kb_dict)
+                        try:
+                            # Check if this is the first shop
+                            existing_shops = tenant_db.query(ShopORM).count()
+                            is_main = existing_shops == 0 or data.get("is_first_shop", False)
 
-                        # Clear user state
+                            new_shop = ShopORM(
+                                name=data["name"],
+                                location=data.get("location", ""),
+                                contact=data.get("contact", ""),
+                                is_main=is_main
+                            )
+                            tenant_db.add(new_shop)
+                            tenant_db.commit()
+                            tenant_db.refresh(new_shop)
+
+                            success_msg = f"✅ Shop {'created' if is_main else 'added'} successfully!\n\n"
+                            success_msg += f"🏪 *{new_shop.name}*\n"
+                            if data.get("location"):
+                                success_msg += f"📍 {data['location']}\n"
+                            if data.get("contact"):
+                                success_msg += f"📞 {data['contact']}\n"
+                            if new_shop.is_main:
+                                success_msg += f"⭐ *Set as Main Store*\n"
+
+                            send_message(chat_id, success_msg)
+
+                        except Exception as e:
+                            logger.error(f"❌ Error saving shop: {e}")
+                            send_message(chat_id, "❌ Failed to save shop. Please try again.")
+
+                        # Clear state and return to menu
                         user_states.pop(chat_id, None)
+                        kb = main_menu(user.role)
+                        send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
 
+                    return {"ok": True}
+
+                # -------------------- Update Existing Shop --------------------
+                elif action == "update_existing_shop" and user.role == "owner":
+                    tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                    if not tenant_db:
+                        send_message(chat_id, "❌ Unable to access database.")
+                        user_states.pop(chat_id, None)
+                        return {"ok": True}
+
+                    shop_id = data.get("shop_id")
+                    if not shop_id:
+                        send_message(chat_id, "❌ Shop ID not found.")
+                        user_states.pop(chat_id, None)
+                        return {"ok": True}
+
+                    shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
+                    if not shop:
+                        send_message(chat_id, "❌ Shop not found.")
+                        user_states.pop(chat_id, None)
+                        return {"ok": True}
+
+                    if step == 1:  # New Name
+                        new_name = text.strip()
+                        if new_name != "-":
+                            shop.name = new_name
+                        user_states[chat_id] = {"action": action, "step": 2, "data": data}
+
+                    if step == 2:  # New Location
+                        new_location = text.strip()
+                        if new_location != "-":
+                            shop.location = new_location
+                        user_states[chat_id] = {"action": action, "step": 3, "data": data}
+
+                    if step == 3:  # New Contact
+                        new_contact = text.strip()
+                        if new_contact != "-":
+                            shop.contact = new_contact
+
+                        # Save changes
+                        tenant_db.commit()
+        
+                        success_msg = f"✅ Shop updated successfully!\n\n"
+                        success_msg += f"🏪 *{shop.name}*\n"
+                        if shop.location:
+                            success_msg += f"📍 {shop.location}\n"
+                        if shop.contact:
+                            success_msg += f"📞 {shop.contact}\n"
+                        if shop.is_main:
+                            success_msg += f"⭐ Main Store\n"
+
+                        send_message(chat_id, success_msg)
+        
+                        # Clear state and return to menu
+                        user_states.pop(chat_id, None)
+                        kb = main_menu(user.role)
+                        send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+
+                    return {"ok": True}
+    
                 # -------------------- Shopkeeper Creation / Management --------------------
                 elif action == "create_shopkeeper" and user.role == "owner":
                     if step == 1:  # Enter Shopkeeper Name
@@ -2966,6 +3682,75 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         send_message(chat_id, "🏠 Main Menu:", kb_dict)
                         return {"ok": True}
         
+
+                # -------------------- Add Shop Flow --------------------
+                elif action == "add_shop" and user.role == "owner":
+                    if step == 1:  # Shop Name
+                        shop_name = text.strip()
+                        if not shop_name:
+                            send_message(chat_id, "❌ Shop name cannot be empty. Please enter shop name:")
+                            return {"ok": True}
+                        data["name"] = shop_name
+                        user_states[chat_id] = {"action": action, "step": 2, "data": data}
+                        send_message(chat_id, "📍 Enter shop location:")
+
+                    elif step == 2:  # Shop Location
+                        location = text.strip()
+                        if not location:
+                            send_message(chat_id, "❌ Location cannot be empty. Please enter shop location:")
+                            return {"ok": True}
+                        data["location"] = location
+                        user_states[chat_id] = {"action": action, "step": 3, "data": data}
+                        send_message(chat_id, "📞 Enter shop contact number:")
+
+                    elif step == 3:  # Shop Contact
+                        contact = text.strip()
+                        if not contact:
+                            send_message(chat_id, "❌ Contact cannot be empty. Please enter contact number:")
+                            return {"ok": True}
+                        data["contact"] = contact
+
+                        # Save the shop
+                        tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                        if not tenant_db:
+                            send_message(chat_id, "❌ Unable to access database.")
+                            user_states.pop(chat_id, None)
+                            return {"ok": True}
+
+                        try:
+                            # Check if this is the first shop (make it main)
+                            existing_shops = tenant_db.query(ShopORM).count()
+                            is_main = existing_shops == 0
+
+                            new_shop = ShopORM(
+                                name=data["name"],
+                                location=data["location"],
+                                contact=data["contact"],
+                                is_main=is_main
+                            )
+                            tenant_db.add(new_shop)
+                            tenant_db.commit()
+                            tenant_db.refresh(new_shop)
+
+                            success_msg = f"✅ Shop added successfully!\n\n"
+                            success_msg += f"🏪 *{new_shop.name}*\n"
+                            success_msg += f"📍 {new_shop.location}\n"
+                            success_msg += f"📞 {new_shop.contact}\n"
+                            if new_shop.is_main:
+                                success_msg += f"⭐ *Main Store*\n"
+
+                            send_message(chat_id, success_msg)
+
+                        except Exception as e:
+                            logger.error(f"❌ Error adding shop: {e}")
+                            send_message(chat_id, "❌ Failed to add shop. Please try again.")
+
+                        # Clear state and return to menu
+                        user_states.pop(chat_id, None)
+                        kb = main_menu(user.role)
+                        send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+
+                    return {"ok": True}
 
                 # -------------------- Add Product --------------------
                 elif action == "awaiting_product":
@@ -3288,6 +4073,122 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         return {"ok": True}
         
                         
+                # -------------------- Add Shop Stock Flow --------------------
+                elif action == "add_shop_stock":
+                    tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                    if not tenant_db:
+                        send_message(chat_id, "❌ Unable to access store database.")
+                        return {"ok": True}
+
+                    data = state.get("data", {})
+
+                    if step == 2:  # Search product
+                        product_name = text.strip()
+                        if not product_name:
+                            send_message(chat_id, "❌ Product name cannot be empty. Please enter product name:")
+                            return {"ok": True}
+
+                        # Search for products
+                        matches = tenant_db.query(ProductORM).filter(
+                            ProductORM.name.ilike(f"%{product_name}%")
+                        ).all()
+
+                        if not matches:
+                            send_message(chat_id, "❌ No products found. Please try again:")
+                            return {"ok": True}
+
+                        if len(matches) == 1:
+                            product = matches[0]
+                            data["selected_product_id"] = product.product_id
+                            user_states[chat_id] = {"action": "add_shop_stock", "step": 3, "data": data}
+                            send_message(chat_id, f"📦 Selected: {product.name}\nEnter initial stock quantity:")
+                        else:
+                            data["search_results"] = [
+                                {
+                                    "product_id": p.product_id,
+                                    "name": p.name,
+                                    "price": p.price
+                                } for p in matches
+                            ]
+                            user_states[chat_id] = {"action": "add_shop_stock", "step": 2.5, "data": data}
+            
+                            kb_rows = []
+                            for product in matches:
+                                kb_rows.append([{
+                                    "text": f"{product.name} (${product.price})",
+                                    "callback_data": f"select_product_for_shop_stock:{product.product_id}"
+                                }])
+                            kb_rows.append([{"text": "❌ Cancel", "callback_data": "view_all_shops"}])
+            
+                            send_message(chat_id, "🔍 Multiple products found. Select one:", {"inline_keyboard": kb_rows})
+
+                    elif step == 3:  # Enter stock quantity
+                        quantity_text = text.strip()
+                        if not quantity_text:
+                            send_message(chat_id, "❌ Quantity cannot be empty. Enter initial stock quantity:")
+                            return {"ok": True}
+
+                        try:
+                            quantity = int(quantity_text)
+                            if quantity < 0:
+                                send_message(chat_id, "❌ Quantity cannot be negative. Enter a positive number:")
+                                return {"ok": True}
+
+                            shop_id = data.get("selected_shop_id")
+                            product_id = data.get("selected_product_id")
+
+                            if not shop_id or not product_id:
+                                send_message(chat_id, "❌ Missing shop or product selection. Please start over.")
+                                user_states.pop(chat_id, None)
+                                return {"ok": True}
+
+                            # Check if stock record already exists
+                            existing_stock = tenant_db.query(ProductShopStockORM).filter(
+                                ProductShopStockORM.shop_id == shop_id,
+                                ProductShopStockORM.product_id == product_id
+                            ).first()
+
+                            if existing_stock:
+                                # Update existing stock
+                                existing_stock.stock += quantity
+                                message = f"✅ Stock updated!\nAdded {quantity} to existing stock."
+                            else:
+                                # Create new stock record
+                                new_stock = ProductShopStockORM(
+                                    shop_id=shop_id,
+                                    product_id=product_id,
+                                    stock=quantity,
+                                    min_stock_level=0,
+                                    low_stock_threshold=10,
+                                    reorder_quantity=0
+                                )
+                                tenant_db.add(new_stock)
+                                message = f"✅ Stock added!\nInitial stock: {quantity}"
+
+                            tenant_db.commit()
+
+                            # Get product and shop names for confirmation
+                            product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
+                            shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
+
+                            if product and shop:
+                                message += f"\n\n🏪 *{shop.name}*\n"
+                                message += f"📦 *{product.name}*\n"
+                                message += f"📊 New stock level: {quantity}"
+
+                            send_message(chat_id, message)
+
+                        except ValueError:
+                            send_message(chat_id, "❌ Invalid quantity. Enter a valid number:")
+                            return {"ok": True}
+
+                        # Clear state and return to menu
+                        user_states.pop(chat_id, None)
+                        kb = main_menu(user.role)
+                        send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+
+                    return {"ok": True}
+
                 # -------------------- Update Product (owner only, step-by-step) --------------------
                 elif action == "awaiting_update" and user.role == "owner":
                     # ✅ Use the SAME method as callback

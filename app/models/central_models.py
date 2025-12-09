@@ -1,6 +1,7 @@
 # app/models/central_models.py
-from sqlalchemy import Column, String, BigInteger, DateTime
+from sqlalchemy import Column, String, BigInteger, DateTime, Integer, TIMESTAMP
 from datetime import datetime
+from sqlalchemy.sql import func
 
 # ✅ Import the shared Base from core
 from app.core import Base
@@ -19,3 +20,18 @@ class Tenant(Base):
     contact = Column(String, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    user_id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(255))
+    username = Column(String(255), unique=True, index=True)
+    email = Column(String(255))
+    password_hash = Column(String(255))
+    chat_id = Column(BigInteger, unique=True, nullable=True) 
+    role = Column(String(50))
+    shop_id = Column(Integer, nullable=True)  # ✅ Link user to specific shop
+    tenant_schema = Column(String(255), nullable=True)
+    created_at = Column(TIMESTAMP, server_default=func.now())
