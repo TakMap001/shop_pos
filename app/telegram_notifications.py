@@ -12,7 +12,9 @@ print(f"🟢 DEBUG: TELEGRAM_BOT_TOKEN from config import: {TELEGRAM_BOT_TOKEN}"
 from telebot import TeleBot, types
 from sqlalchemy.orm import Session
 from sqlalchemy import func
-from app.models.models import User, ProductORM, SaleORM
+from app.models.central_models import User
+from app.models.models import ProductORM, CustomerORM, SaleORM, PendingApprovalORM, ShopORM, ProductShopStockORM
+
 import re
 
 LOW_STOCK_THRESHOLD = 10
