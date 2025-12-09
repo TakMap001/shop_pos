@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from decimal import Decimal
 from app.database import get_db
-from app.models.models import SaleORM, ProductORM, User
+from app.models.models import ProductORM, CustomerORM, SaleORM, PendingApprovalORM, ShopORM, ProductShopStockORM
+from app.models.central_models import User
 from app.schemas.schemas import SaleCreate, Sale
 
 router = APIRouter(

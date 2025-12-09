@@ -5,7 +5,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func, extract
 from datetime import datetime
 from app.database import get_db
-from app.models.models import SaleORM, ProductORM, User
+from app.models.central_models import User
+from app.models.models import ProductORM, CustomerORM, SaleORM, PendingApprovalORM, ShopORM, ProductShopStockORM
 
 router = APIRouter(
     prefix="/reports",
