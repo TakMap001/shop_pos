@@ -7,10 +7,10 @@ from sqlalchemy.orm import Session
 from decimal import Decimal
 from datetime import datetime, timedelta
 from sqlalchemy import func, text, extract
-from app.models.central_models import Tenant  # Central DB
-from app.models.models import Base as User, TenantBase
+from app.models.central_models import Tenant, User  # ✅ ADD User here
+from app.models.models import TenantBase  # ✅ FIXED: Remove "Base as User"
 from app.models.models import ProductORM, CustomerORM, SaleORM, PendingApprovalORM, ShopORM, ProductShopStockORM  # Tenant DB
-from app.database import get_db  # central DB session
+from app.database import get_db  # central DB session - KEEP THIS ONE
 from app.telegram_notifications import notify_low_stock, notify_top_product, notify_high_value_sale, send_message, notify_owner_of_pending_approval
 from app.telegram_notifications import notify_shopkeeper_of_approval_result
 from config import DATABASE_URL
@@ -22,7 +22,7 @@ import random
 import string
 import bcrypt
 import time
-from app.core import SessionLocal, get_db
+from app.core import SessionLocal  # ✅ REMOVE duplicate get_db
 from sqlalchemy.exc import SQLAlchemyError
 import uuid
 import logging
@@ -31,7 +31,6 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import re
 import html
 import traceback
-
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
