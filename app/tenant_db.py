@@ -4,7 +4,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
 from app.models.central_models import User
-from app.models.models import ProductORM, CustomerORM, SaleORM, PendingApprovalORM
+from app.models.models import ProductORM, CustomerORM, SaleORM, PendingApprovalORM, ShopORM, ProductShopStockORM
 from app.models.central_models import Tenant
 from app.models.central_models import Base as CentralBase
 from app.models.tenant_base import TenantBase
@@ -77,67 +77,64 @@ def create_tenant_db(chat_id: int, role: str = "owner") -> str:
     
     logger.info(f"📌 Preparing tenant schema: {schema_name}")
 
-    with engine.connect() as conn:
-        # Create schema if needed (only for owners)
-        if not user_result or user_result[0] == "owner":
-            result = conn.execute(
-                text("SELECT schema_name FROM information_schema.schemata WHERE schema_name=:s"),
-                {"s": schema_name},
-            ).fetchone()
-            if not result:
-                conn.execute(text(f'CREATE SCHEMA "{schema_name}"'))
-                logger.info(f"✅ Tenant schema '{schema_name}' created.")
-            else:
-                logger.info(f"ℹ️ Tenant schema '{schema_name}' already exists.")
+    try:
+        with engine.connect() as conn:
+            # Create schema if needed (only for owners)
+            if not user_result or user_result[0] == "owner":
+                result = conn.execute(
+                    text("SELECT schema_name FROM information_schema.schemata WHERE schema_name=:s"),
+                    {"s": schema_name},
+                ).fetchone()
+                if not result:
+                    conn.execute(text(f'CREATE SCHEMA "{schema_name}"'))
+                    logger.info(f"✅ Tenant schema '{schema_name}' created.")
+                else:
+                    logger.info(f"ℹ️ Tenant schema '{schema_name}' already exists.")
 
-            # Ensure tenant record exists
-            existing = conn.execute(
-                text("SELECT tenant_id FROM tenants WHERE telegram_owner_id = :oid"),
-                {"oid": chat_id},
-            ).fetchone()
+                # Ensure tenant record exists
+                existing = conn.execute(
+                    text("SELECT tenant_id FROM tenants WHERE telegram_owner_id = :oid"),
+                    {"oid": chat_id},
+                ).fetchone()
 
-            if not existing:
+                if not existing:
+                    conn.execute(
+                        text("""
+                            INSERT INTO tenants (tenant_id, store_name, telegram_owner_id, database_url, created_at)
+                            VALUES (gen_random_uuid(), :store, :oid, :url, :created)
+                        """),
+                        {
+                            "store": f"Store_{chat_id}",
+                            "oid": chat_id,
+                            "url": tenant_db_url,
+                            "created": datetime.utcnow(),
+                        },
+                    )
+                    logger.info(f"✅ Tenant record created for {chat_id}")
+                else:
+                    conn.execute(
+                        text("UPDATE tenants SET database_url = :url WHERE telegram_owner_id = :oid"),
+                        {"url": tenant_db_url, "oid": chat_id},
+                    )
+                    logger.info(f"ℹ️ Tenant record updated for {chat_id}")
+
+                # Link user to tenant schema
                 conn.execute(
-                    text("""
-                        INSERT INTO tenants (tenant_id, store_name, telegram_owner_id, database_url, created_at)
-                        VALUES (gen_random_uuid(), :store, :oid, :url, :created)
-                    """),
-                    {
-                        "store": f"Store_{chat_id}",
-                        "oid": chat_id,
-                        "url": tenant_db_url,
-                        "created": datetime.utcnow(),
-                    },
+                    text("UPDATE users SET tenant_schema = :schema WHERE chat_id = :cid"),
+                    {"schema": schema_name, "cid": chat_id},
                 )
-                logger.info(f"✅ Tenant record created for {chat_id}")
-            else:
-                conn.execute(
-                    text("UPDATE tenants SET database_url = :url WHERE telegram_owner_id = :oid"),
-                    {"url": tenant_db_url, "oid": chat_id},
-                )
-                logger.info(f"ℹ️ Tenant record updated for {chat_id}")
+                logger.info(f"✅ Linked user {chat_id} → {schema_name}")
 
-            # Link user to tenant schema
-            conn.execute(
-                text("UPDATE users SET tenant_schema = :schema WHERE chat_id = :cid"),
-                {"schema": schema_name, "cid": chat_id},
-            )
-            logger.info(f"✅ Linked user {chat_id} → {schema_name}")
-
+        # Create tables in the schema
         ensure_tenant_tables(database_url, schema_name)
         logger.info(f"✅ Tenant setup complete for chat_id={chat_id}")
         return schema_name  # Return schema name, not URL
         
-        try:
-            ensure_tenant_tables(base_url, schema_name)
-            logger.info(f"✅ Tenant setup complete for chat_id={chat_id}")
-            return schema_name
-        except Exception as e:
-            logger.error(f"❌ Table creation failed for {schema_name}: {e}")
-            # Return schema name anyway - tables might be created later
-            return schema_name
+    except Exception as e:
+        logger.error(f"❌ Tenant creation failed for {schema_name}: {e}")
+        # Still return schema name if possible, but log the error
+        return schema_name
         
-
 
 # ======================================================
 # 🔹 ENSURE TENANT TABLES
