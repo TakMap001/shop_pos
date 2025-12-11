@@ -21,7 +21,13 @@ LOW_STOCK_THRESHOLD = 10
 TOP_PRODUCT_THRESHOLD = 50
 HIGH_VALUE_SALE_THRESHOLD = 100
 
+# DEBUG: Bot initialization
+print(f"🟢 [telegram_notifications] Initializing bot...")
+print(f"🟢 [telegram_notifications] TELEGRAM_BOT_TOKEN length: {len(TELEGRAM_BOT_TOKEN)}")
+print(f"🟢 [telegram_notifications] TELEGRAM_BOT_TOKEN first 10 chars: {TELEGRAM_BOT_TOKEN[:10]}...")
+
 bot = TeleBot(TELEGRAM_BOT_TOKEN)
+print(f"🟢 [telegram_notifications] Bot initialized: {bot}")
 
 def escape_markdown_v2(text: str) -> str:
     """
@@ -36,19 +42,24 @@ def send_message(user_id, text, keyboard=None):
     Send Telegram message with optional inline keyboard (dict or InlineKeyboardMarkup).
     Escapes text safely for MarkdownV2.
     """
+    print(f"🟢 [send_message] START: user_id={user_id}, text={text[:50]}...")
+    
     try:
         markup = None
 
         # Escape the text for MarkdownV2
         safe_text = escape_markdown_v2(text)
+        print(f"🟢 [send_message] Text escaped: {safe_text[:50]}...")
 
         # Case 1: Already a valid InlineKeyboardMarkup
         if isinstance(keyboard, types.InlineKeyboardMarkup):
             markup = keyboard
+            print(f"🟢 [send_message] Using InlineKeyboardMarkup")
 
         # Case 2: Dict → Convert to InlineKeyboardMarkup
         elif isinstance(keyboard, dict) and "inline_keyboard" in keyboard:
             markup = types.InlineKeyboardMarkup()
+            print(f"🟢 [send_message] Converting dict to keyboard")
             for row in keyboard["inline_keyboard"]:
                 buttons = []
                 for btn in row:
@@ -63,13 +74,21 @@ def send_message(user_id, text, keyboard=None):
                     )
                 if buttons:
                     markup.add(*buttons)
+            print(f"🟢 [send_message] Keyboard created with {len(keyboard['inline_keyboard'])} rows")
 
         # Send safely using MarkdownV2
-        bot.send_message(user_id, safe_text, reply_markup=markup, parse_mode="MarkdownV2")
+        print(f"🟢 [send_message] Calling bot.send_message...")
+        result = bot.send_message(user_id, safe_text, reply_markup=markup, parse_mode="MarkdownV2")
+        print(f"✅ [send_message] SUCCESS: Message sent to {user_id}, message_id: {result.message_id}")
+        return True
 
     except Exception as e:
-        print("❌ Failed to send Telegram message:", e)
+        print(f"❌ [send_message] ERROR: {e}")
         print("➡️ Keyboard passed in:", keyboard)
+        import traceback
+        traceback.print_exc()
+        return False
+        
 # -------------------- Stock / Sales Notifications --------------------
 def notify_low_stock(tenant_db: Session, product: ProductORM):
     """

@@ -2256,10 +2256,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 user_type = text.split(":")[1]
         
                 if user_type == "owner":
+                    print(f"🔍 DEBUG [user_type:owner]: Starting owner creation for chat_id={chat_id}")
+                    
                     # Create new owner with generated credentials
                     generated_username = create_username(f"Owner{chat_id}")
                     generated_password = generate_password()
                     generated_email = f"{chat_id}_{int(time.time())}@example.com"
+                    print(f"🔍 DEBUG: Generated username: {generated_username}")
 
                     new_user = User(
                         name=f"Owner{chat_id}",
@@ -2272,24 +2275,44 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     db.add(new_user)
                     db.commit()
                     db.refresh(new_user)
+                    print(f"🔍 DEBUG: User created with ID: {new_user.user_id}")
 
                     # Create tenant schema
                     try:
                         schema_name = f"tenant_{chat_id}"
+                        print(f"🔍 DEBUG: Creating tenant schema: {schema_name}")
                         tenant_db_url = create_tenant_db(chat_id)
                         new_user.tenant_schema = schema_name
                         db.commit()
                         logger.info(f"✅ New owner created: {generated_username} with schema '{schema_name}'")
+                        print(f"🔍 DEBUG: Tenant schema created and linked")
                     except Exception as e:
                         logger.error(f"❌ Failed to create tenant schema: {e}")
                         send_message(chat_id, "❌ Could not initialize store database.")
                         return {"ok": True}
 
-                    # Send credentials and start shop setup
-                    send_owner_credentials(chat_id, generated_username, generated_password)
-                    send_message(chat_id, "🏪 Let's set up your shop! Please enter the shop name:")
-                    user_states[chat_id] = {"action": "setup_shop", "step": 1, "data": {}}
+                    # DEBUG: Test send_message directly
+                    print(f"🔍 DEBUG: Testing send_message...")
+                    try:
+                        send_message(chat_id, "🔍 DEBUG: Test message from bot")
+                        print(f"🔍 DEBUG: Test message sent successfully")
+                    except Exception as e:
+                        print(f"❌ ERROR in send_message test: {e}")
+                        import traceback
+                        traceback.print_exc()
 
+                    # Send credentials and start shop setup
+                    print(f"🔍 DEBUG: Calling send_owner_credentials...")
+                    send_owner_credentials(chat_id, generated_username, generated_password)
+                    print(f"🔍 DEBUG: Credentials function called")
+                    
+                    print(f"🔍 DEBUG: Sending shop setup prompt...")
+                    send_message(chat_id, "🏪 Let's set up your shop! Please enter the shop name:")
+                    print(f"🔍 DEBUG: Shop setup prompt sent")
+                    
+                    user_states[chat_id] = {"action": "setup_shop", "step": 1, "data": {}}
+                    print(f"🔍 DEBUG: user_state set: setup_shop")
+                    
                 else:  # shopkeeper
                     # Step-by-step shopkeeper login
                     send_message(chat_id, "👤 Please enter your username:")
