@@ -1,5 +1,5 @@
 # app/models/central_models.py
-from sqlalchemy import Column, String, BigInteger, DateTime, Integer, TIMESTAMP
+from sqlalchemy import Column, String, BigInteger, DateTime, Integer, TIMESTAMP, Boolean
 from datetime import datetime
 from sqlalchemy.sql import func
 
