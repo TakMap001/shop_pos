@@ -530,3 +530,26 @@ def notify_user_assigned_to_shop(user_chat_id: int, shop_name: str, role: str):
     )
     
     send_message(user_chat_id, message)
+    
+def notify_owner_of_new_shopkeeper(owner_chat_id: int, shopkeeper_username: str, shop_name: str, created_by: str = None):
+    """
+    Notify owner when a new shopkeeper is created (by admin).
+    """
+    try:
+        message = f"👤 *New Shopkeeper Added*\n\n"
+        message += f"🏪 *Shop:* {escape_markdown_v2(shop_name)}\n"
+        message += f"📛 *Username:* `{escape_markdown_v2(shopkeeper_username)}`\n"
+        
+        if created_by:
+            message += f"👨‍💼 *Created by:* {escape_markdown_v2(created_by)}\n"
+        
+        message += f"\n✅ Shopkeeper account has been created successfully.\n"
+        message += f"Share credentials with the shopkeeper to link their Telegram."
+
+        send_message(owner_chat_id, message)
+        return True
+
+    except Exception as e:
+        print(f"❌ Failed to send new shopkeeper notification: {e}")
+        return False
+    
