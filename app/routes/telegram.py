@@ -31,7 +31,6 @@ from telegram.helpers import escape_markdown
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import re
 import html
-from app.user_management import generate_password, create_username, hash_password, verify_password
 from app.shop_utils import (
     create_shop_user,
     get_shop_users,
