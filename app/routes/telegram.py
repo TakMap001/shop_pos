@@ -3819,7 +3819,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 data = state.get("data", {})
 
                 # ✅ SHOP USER LOGIN (for admin/shopkeeper users - first time linking chat_id)
-                elif action == "shop_user_login":
+                if action == "shop_user_login":
                     if step == 1:  # Enter Username
                         username = text.strip()
                         if not username:
