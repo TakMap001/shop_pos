@@ -1,6 +1,7 @@
 # app/routes/telegram.py
 
 import json 
+import traceback
 from fastapi import APIRouter, Request, Depends
 import requests, os
 from sqlalchemy.orm import Session
@@ -30,7 +31,7 @@ from telegram.helpers import escape_markdown
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import re
 import html
-import traceback
+from app.user_management import generate_password, create_username, hash_password, verify_password
 from app.shop_utils import (
     create_shop_user,
     get_shop_users,
@@ -45,12 +46,17 @@ from app.user_management import (
     get_users_for_shop,           # For user management
     delete_user,                  # For user deletion
     reset_user_password,          # For password reset
+    generate_username,            # For username generation
+    generate_password,            # For password generation
     update_user_role,             # For role changes
     get_role_based_menu,          # For role-based menus
     hash_password,                # Password hashing
     verify_password,              # Password verification
     format_user_credentials_message,  # For displaying credentials
-    create_custom_user            # For custom user creation
+    create_custom_user,            # For custom user creation
+    is_user_allowed_for_action,    # For checking user actions
+    get_user_by_username,          # For user search
+    get_user_by_chat_id            # For user search
 )
 
 logger = logging.getLogger(__name__)
