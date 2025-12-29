@@ -1,5 +1,6 @@
-app/user_management.py
+
 """
+app/user_management.py
 Multi-level user management for shops
 Handles: owner, admin, and shopkeeper users
 """
