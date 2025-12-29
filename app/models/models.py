@@ -8,6 +8,9 @@ from datetime import datetime
 
 # -------------------- Tenant DB Models --------------------
 
+# Shop-User mapping table (in tenant schema) - REMOVED
+# We'll handle user assignments in central DB instead
+
 class ShopORM(TenantBase):
     __tablename__ = "shops"
     
@@ -18,10 +21,13 @@ class ShopORM(TenantBase):
     is_main = Column(Boolean, default=False)  # Main/headquarters shop
     created_at = Column(TIMESTAMP, server_default=func.now())
     
-    # Relationships
+    # ✅ Relationships within tenant schema only
     product_stocks = relationship("ProductShopStockORM", back_populates="shop", cascade="all, delete-orphan")
     sales = relationship("SaleORM", back_populates="shop")
-    users = relationship("User", backref="assigned_shop", primaryjoin="remote(User.shop_id) == foreign(ShopORM.shop_id)")
+    
+    # ❌ REMOVED: Cross-schema relationship to User
+    # users = relationship("User", backref="assigned_shop", primaryjoin="remote(User.shop_id) == foreign(ShopORM.shop_id)")
+    # ❌ REMOVED: shop_users relationship since we're handling in central DB
 
 
 class ProductORM(TenantBase):
@@ -32,12 +38,14 @@ class ProductORM(TenantBase):
     description = Column(Text)
     price = Column(Numeric(10, 2), nullable=False)
     unit_type = Column(String(50), default="unit")
+    shop_id = Column(Integer, ForeignKey("shops.shop_id"), nullable=True)  # ✅ ADD: NULL for global products
     created_at = Column(TIMESTAMP, server_default=func.now())
 
     # Relationships
+    shop = relationship("ShopORM", backref="products")  # ✅ ADD
     shop_stocks = relationship("ProductShopStockORM", back_populates="product", cascade="all, delete-orphan")
     sales = relationship("SaleORM", back_populates="product")
-
+    
 
 class ProductShopStockORM(TenantBase):
     __tablename__ = "product_shop_stock"
@@ -106,14 +114,17 @@ class SaleORM(TenantBase):
     customer = relationship("CustomerORM", back_populates="sales")
     
     
+# In app/models/models.py - PendingApprovalORM
 class PendingApprovalORM(TenantBase):
     __tablename__ = "pending_approvals"
 
     approval_id = Column(Integer, primary_key=True, index=True)
-    action_type = Column(String(50), nullable=False)  # 'add_product', 'update_product', 'stock_update'
+    action_type = Column(String(50), nullable=False)
     shopkeeper_id = Column(Integer, nullable=False)
     shopkeeper_name = Column(String(150), nullable=False)
-    product_data = Column(Text)  # JSON string of product data
-    status = Column(String(20), default='pending')  # pending, approved, rejected
+    shop_id = Column(Integer, nullable=False)  # ✅ ADD: Which shop this approval is for
+    product_data = Column(Text)
+    status = Column(String(20), default='pending')
     created_at = Column(TIMESTAMP, server_default=func.now())
     resolved_at = Column(TIMESTAMP, nullable=True)
+    

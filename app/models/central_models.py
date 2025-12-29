@@ -24,14 +24,18 @@ class Tenant(Base):
 
 class User(Base):
     __tablename__ = "users"
-
+    
     user_id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(255))
     username = Column(String(255), unique=True, index=True)
     email = Column(String(255))
     password_hash = Column(String(255))
     chat_id = Column(BigInteger, unique=True, nullable=True) 
-    role = Column(String(50))
-    shop_id = Column(Integer, nullable=True)  # ✅ Link user to specific shop
+    role = Column(String(50))  # 'owner', 'admin', 'shopkeeper'
+    shop_id = Column(Integer, nullable=True)  # Which shop this account is for
+    shop_name = Column(String(255), nullable=True)  # ✅ ADD THIS: Shop name for display
     tenant_schema = Column(String(255), nullable=True)
     created_at = Column(TIMESTAMP, server_default=func.now())
+    
+    
+    # No relationships to tenant models (different schemas)

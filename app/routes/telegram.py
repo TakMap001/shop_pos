@@ -31,6 +31,27 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 import re
 import html
 import traceback
+from app.shop_utils import (
+    create_shop_user,
+    get_shop_users,
+    delete_shop_user,
+    reset_shop_user_password,
+    hash_password,
+    verify_password
+)
+# Add these imports
+from app.user_management import (
+    create_default_users,          # For default user creation
+    get_users_for_shop,           # For user management
+    delete_user,                  # For user deletion
+    reset_user_password,          # For password reset
+    update_user_role,             # For role changes
+    get_role_based_menu,          # For role-based menus
+    hash_password,                # Password hashing
+    verify_password,              # Password verification
+    format_user_credentials_message,  # For displaying credentials
+    create_custom_user            # For custom user creation
+)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -118,37 +139,66 @@ def role_menu(chat_id):
     send_message(chat_id, "👋 Welcome! Please choose your role:", keyboard)
 
 def main_menu(role: str):
-    if role == "owner":
-        kb_dict = {
-            "inline_keyboard": [
-                [{"text": "➕ Add Product", "callback_data": "add_product"}],
-                [{"text": "✏️ Update Product", "callback_data": "update_product"}],
-                [{"text": "📈 Quick Stock Update", "callback_data": "quick_stock_update"}],
-                [{"text": "📦 View Stock", "callback_data": "view_stock"}],
-                [{"text": "💰 Record Sale", "callback_data": "record_sale"}],
-                [{"text": "📊 Reports", "callback_data": "report_menu"}],
-                [{"text": "🏪 Manage Shops", "callback_data": "manage_shops"}],  # ✅ CHANGED from "setup_shop" to "manage_shops"
-                [{"text": "👤 Create Shopkeeper", "callback_data": "create_shopkeeper"}],
-                [{"text": "❓ Help", "callback_data": "help"}]
-            ]
-        }
-    elif role == "shopkeeper":
-        kb_dict = {
-            "inline_keyboard": [
-                [{"text": "➕ Add Product", "callback_data": "add_product"}],
-                [{"text": "✏️ Update Product", "callback_data": "update_product"}],
-                [{"text": "📈 Quick Stock Update", "callback_data": "quick_stock_update"}],
-                [{"text": "📦 View Stock", "callback_data": "view_stock"}],
-                [{"text": "💰 Record Sale", "callback_data": "record_sale"}],
-                [{"text": "📊 Reports", "callback_data": "report_menu"}],
-                [{"text": "❓ Help", "callback_data": "help"}]
-            ]
-        }
-    else:
-        kb_dict = {"inline_keyboard": []}
-
-    return kb_dict
+    """Generate main menu based on user role (Owner/Admin/Shopkeeper)."""
     
+    # Base menu for all shop users (admin + shopkeeper)
+    shop_user_menu = [
+        ("📦 View Stock", "view_stock"),
+        ("💰 Record Sale", "record_sale"),
+        ("📊 Reports", "report_menu"),
+        ("➕ Add Product", "add_product"),
+        ("✏️ Update Product", "update_product"),
+        ("📈 Quick Stock Update", "quick_stock_update")
+    ]
+    
+    # Admin-specific additions (on top of shop_user_menu)
+    admin_additions = [
+        ("👥 Manage Users", "manage_users_admin"),
+        ("📋 View All Products", "view_all_products_admin")
+    ]
+    
+    # Owner menu (full access)
+    owner_menu = [
+        ("👑 Owner Dashboard", "owner_dashboard"),
+        ("🏪 Manage Shops", "manage_shops"),
+        ("👥 Manage Users", "manage_users"),
+        ("➕ Add Product", "add_product"),
+        ("✏️ Update Product", "update_product"),
+        ("📈 Quick Stock Update", "quick_stock_update"),
+        ("📦 View Stock", "view_stock"),
+        ("💰 Record Sale", "record_sale"),
+        ("📊 Reports", "report_menu"),
+        ("⚙️ Settings", "shop_settings")
+    ]
+    
+    # Build keyboard based on role
+    if role == "owner":
+        menu_items = owner_menu
+    elif role == "admin":
+        menu_items = shop_user_menu + admin_additions
+    elif role == "shopkeeper":
+        menu_items = shop_user_menu
+    else:
+        return {"inline_keyboard": []}
+    
+    # Create keyboard with 2 buttons per row
+    keyboard = []
+    for i in range(0, len(menu_items), 2):
+        row = []
+        if i < len(menu_items):
+            text1, callback1 = menu_items[i]
+            row.append({"text": text1, "callback_data": callback1})
+        if i + 1 < len(menu_items):
+            text2, callback2 = menu_items[i + 1]
+            row.append({"text": text2, "callback_data": callback2})
+        if row:
+            keyboard.append(row)
+    
+    # Add help button at the bottom
+    keyboard.append([{"text": "❓ Help", "callback_data": "help"}])
+    
+    return {"inline_keyboard": keyboard}
+        
             
 def build_keyboard(kb_dict):
     """Convert our menu dict into a Telebot InlineKeyboardMarkup."""
@@ -324,7 +374,7 @@ def register_new_user(central_db: Session, chat_id: int, text: str, role="keeper
             central_db.refresh(new_user)
             
             # Create tenant schema and tables
-            tenant_db_url = create_tenant_db(new_chat_id)
+            schema_name, _ = create_tenant_db(chat_id)
             
             send_message(chat_id, f"✅ Owner '{name}' registered successfully.")
             send_message(new_chat_id, f"👋 Hello {name}! Use /start to begin and set up your shop.")
@@ -882,26 +932,60 @@ def record_cart_sale(tenant_db, chat_id, data):
             data["final_total"] = cart_total + surcharge
             data["original_total"] = cart_total  # Store original total for receipt
         
-        # ✅ Get selected shop ID (default to main shop if not specified)
-        shop_id = data.get("selected_shop_id")
+        # ✅ UPDATED: Get current user to check shop assignment
+        from app.core import SessionLocal
+        central_db = SessionLocal()
+        current_user = central_db.query(User).filter(User.chat_id == chat_id).first()
+        central_db.close()
         
-        # If no shop specified, find main shop
-        if not shop_id:
-            main_shop = tenant_db.query(ShopORM).filter(ShopORM.is_main == True).first()
-            if not main_shop:
-                # If no main shop, use first shop
-                main_shop = tenant_db.query(ShopORM).first()
-            if main_shop:
-                shop_id = main_shop.shop_id
-                shop_name = main_shop.name
+        if not current_user:
+            logger.error(f"❌ User not found for chat_id: {chat_id}")
+            send_message(chat_id, "❌ User not found. Please login again.")
+            return False
+        
+        # ✅ UPDATED: Determine shop ID based on user role and selection
+        shop_id = None
+        shop_name = "Unknown Shop"
+        
+        if current_user.role in ["admin", "shopkeeper"]:
+            # Admin/Shopkeeper MUST use their assigned shop
+            shop_id = current_user.shop_id
+            shop_name = current_user.shop_name or f"Shop {shop_id}"
+            
+            logger.info(f"🛒 Non-owner sale: User {current_user.username} recording sale for shop {shop_id}")
+            
+        elif current_user.role == "owner":
+            # Owner can choose which shop
+            shop_id = data.get("selected_shop_id")
+            
+            if not shop_id:
+                # If no shop specified, find main shop
+                main_shop = tenant_db.query(ShopORM).filter(ShopORM.is_main == True).first()
+                if not main_shop:
+                    # If no main shop, use first shop
+                    main_shop = tenant_db.query(ShopORM).first()
+                if main_shop:
+                    shop_id = main_shop.shop_id
+                    shop_name = main_shop.name
+                else:
+                    logger.error("❌ No shops found in database")
+                    send_message(chat_id, "❌ No shops configured. Please set up shops first.")
+                    return False
             else:
-                logger.error("❌ No shops found in database")
-                send_message(chat_id, "❌ No shops configured. Please set up shops first.")
-                return False
+                # Get shop name for selected shop
+                shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
+                shop_name = shop.name if shop else "Selected Shop"
+        
         else:
-            # Get shop name for selected shop
-            shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
-            shop_name = shop.name if shop else "Selected Shop"
+            logger.error(f"❌ Invalid user role: {current_user.role}")
+            send_message(chat_id, "❌ Invalid user role.")
+            return False
+        
+        # ✅ Validate shop assignment for non-owner users
+        if current_user.role in ["admin", "shopkeeper"] and current_user.shop_id != shop_id:
+            logger.error(f"❌ Security violation: User {current_user.username} tried to record sale for shop {shop_id} but is assigned to shop {current_user.shop_id}")
+            send_message(chat_id, "❌ You can only record sales for your assigned shop.")
+            return False
         
         # ✅ Get or create customer
         customer_id = None
@@ -1037,18 +1121,34 @@ def record_cart_sale(tenant_db, chat_id, data):
             
         send_message(chat_id, receipt)
         
-        # ✅ Check for low stock alerts for this shop
+        # ✅ Check for low stock alerts for this specific shop
         for item in data["cart"]:
-            check_low_stock_alerts(tenant_db, item["product_id"], shop_id)
+            product = tenant_db.query(ProductORM).filter(
+                ProductORM.product_id == item["product_id"]
+            ).first()
+            
+            if product:
+                # Get shop-specific stock
+                shop_stock = tenant_db.query(ProductShopStockORM).filter(
+                    ProductShopStockORM.product_id == item["product_id"],
+                    ProductShopStockORM.shop_id == shop_id
+                ).first()
+                
+                if shop_stock and shop_stock.stock <= shop_stock.low_stock_threshold:
+                    # Send low stock alert for this specific shop
+                    from app.telegram_notifications import notify_low_stock
+                    notify_low_stock(tenant_db, product, shop_id)
         
         return True
         
     except Exception as e:
         logger.error(f"❌ Cart sale recording failed: {e}")
+        import traceback
+        traceback.print_exc()
         tenant_db.rollback()
         send_message(chat_id, f"❌ Failed to record sale: {str(e)}")
         return False
-
+        
 def check_low_stock_alerts(tenant_db, product_id, shop_id):
     """Check and notify about low stock for specific shop"""
     
@@ -1095,643 +1195,59 @@ def check_low_stock_alerts(tenant_db, product_id, shop_id):
                 logger.error(f"❌ Error sending low stock alert: {e}")
             finally:
                 central_db.close()
-
-def show_approval_details(chat_id, approval_id):
-    """Show details of a specific approval request"""
-    try:
-        central_db = SessionLocal()
-        user = central_db.query(User).filter(User.chat_id == chat_id).first()
-        
-        if not user:
-            send_message(chat_id, "❌ User not found.")
-            central_db.close()
-            return False
-        
-        tenant_db = get_tenant_session(user.tenant_schema, chat_id)
-        if not tenant_db:
-            send_message(chat_id, "❌ Unable to access store database.")
-            central_db.close()
-            return False
-        
-        # Get pending approval
-        pending = tenant_db.query(PendingApprovalORM).filter(
-            PendingApprovalORM.approval_id == approval_id
-        ).first()
-        
-        if not pending:
-            send_message(chat_id, "❌ Approval request not found.")
-            tenant_db.close()
-            central_db.close()
-            return False
-        
-        # Parse product data
-        product_data = json.loads(pending.product_data)
-        
-        # Build message based on action type
-        if pending.action_type == 'add_product':
-            message = f"📋 *Product Addition Request*\n\n"
-            message += f"👤 Requested by: {pending.shopkeeper_name}\n"
-            message += f"🕐 Date: {pending.created_at.strftime('%Y-%m-%d %H:%M')}\n\n"
-            message += f"📦 *Product Details:*\n"
-            message += f"• Name: {product_data.get('name', 'N/A')}\n"
-            message += f"• Price: ${product_data.get('price', 0):.2f}\n"
-            message += f"• Quantity: {product_data.get('quantity', 0)}\n"
-            message += f"• Unit Type: {product_data.get('unit_type', 'N/A')}\n"
-            
-        elif pending.action_type == 'stock_update':
-            message = f"📋 *Stock Update Request*\n\n"
-            message += f"👤 Requested by: {pending.shopkeeper_name}\n"
-            message += f"🕐 Date: {pending.created_at.strftime('%Y-%m-%d %H:%M')}\n\n"
-            message += f"📦 *Stock Details:*\n"
-            message += f"• Product: {product_data.get('product_name', 'N/A')}\n"
-            message += f"• Old Stock: {product_data.get('old_stock', 0)}\n"
-            message += f"• New Stock: {product_data.get('new_stock', 0)}\n"
-            message += f"• Quantity Added: {product_data.get('quantity_added', 0)}\n"
-        
-        else:
-            message = f"📋 *Approval Request*\n\n"
-            message += f"Type: {pending.action_type}\n"
-            message += f"Requested by: {pending.shopkeeper_name}\n"
-            message += f"Status: {pending.status}\n"
-        
-        # Add action buttons if pending
-        if pending.status == 'pending':
-            if pending.action_type == 'stock_update':
-                approve_cb = f"approve_stock:{approval_id}"
-                reject_cb = f"reject_stock:{approval_id}"
-            else:
-                approve_cb = f"approve_action:{approval_id}"
-                reject_cb = f"reject_action:{approval_id}"
                 
-            kb_rows = [
-                [
-                    {"text": "✅ Approve", "callback_data": approve_cb},
-                    {"text": "❌ Reject", "callback_data": reject_cb}
-                ],
-                [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
-            ]
-        else:
-            kb_rows = [
-                [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
-            ]
-        
-        send_message(chat_id, message, {"inline_keyboard": kb_rows})
-        
-        tenant_db.close()
-        central_db.close()
-        return True
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to show approval details: {e}")
-        send_message(chat_id, "❌ Error loading approval details.")
-        return False
-        
-        
-def record_sale(db: Session, chat_id: int, data: dict):
+
+# -------------------- Clean Tenant-Aware Reports --------------------      
+def generate_report(db: Session, report_type: str, shop_id: int = None, shop_name: str = None):
     """
-    Record a sale in tenant DB step-by-step.
-    Expects `data` dict with keys:
-    - product_id
-    - unit_type (optional, defaults to product.unit_type)
-    - quantity
-    - payment_type (full/partial/credit)
-    - amount_paid (optional if full)
-    - customer_name (optional)
-    - customer_contact (optional)
+    Generate tenant-aware reports with shop filtering.
+    
+    Args:
+        db: SQLAlchemy session (already tenant-specific)
+        report_type: report_daily, report_weekly, report_monthly, etc.
+        shop_id: Optional shop ID to filter by (for non-owner users)
+        shop_name: Optional shop name for display
     """
-    try:
-        # -------------------- Fetch Product --------------------
-        product = db.query(ProductORM).filter(ProductORM.product_id == data["product_id"]).first()
-        if not product:
-            send_message(chat_id, "❌ Product not found.")
-            return
-
-        qty = int(data.get("quantity", 0))
-        if qty <= 0:
-            send_message(chat_id, "❌ Quantity must be > 0")
-            return
-        if product.stock < qty:
-            send_message(chat_id, f"❌ Insufficient stock. Available: {product.stock}")
-            return
-
-        # -------------------- Fetch User --------------------
-        user = db.query(User).filter(User.user_id == chat_id).first()
-        if not user:
-            send_message(chat_id, "❌ User not found.")
-            return
-
-        # -------------------- Payment Calculations --------------------
-        payment_type = data.get("payment_type", "full")
-        amount_paid = float(data.get("amount_paid", 0.0)) if data.get("amount_paid") is not None else 0.0
-        total_amount = float(product.price) * qty
-        pending_amount = max(total_amount - amount_paid, 0.0)
-        change_left = max(amount_paid - total_amount, 0.0)
-        unit_type = data.get("unit_type", product.unit_type)
-
-        # -------------------- Save Customer (if partial/credit or change) --------------------
-        customer_id = None
-        if payment_type in ["partial", "credit"] or change_left > 0.0:
-            if data.get("customer_name") or data.get("customer_contact"):
-                customer = CustomerORM(
-                    name=data.get("customer_name"),
-                    contact=data.get("customer_contact")
-                )
-                db.add(customer)
-                db.flush()  # assign customer_id before commit
-                customer_id = customer.customer_id
-
-        # -------------------- Create Sale --------------------
-        sale = SaleORM(
-            user_id=user.user_id,
-            product_id=product.product_id,
-            unit_type=unit_type,
-            quantity=qty,
-            total_amount=total_amount,
-            payment_type=payment_type,
-            amount_paid=amount_paid,
-            pending_amount=pending_amount,
-            change_left=change_left,
-            customer_id=customer_id
-        )
-
-        # -------------------- Update Stock --------------------
-        product.stock = max(product.stock - qty, 0)
-
-        # -------------------- Commit --------------------
-        db.add(sale)
-        db.commit()
-        db.refresh(sale)
-
-        # -------------------- Notify User --------------------
-        send_message(chat_id, f"✅ Sale recorded: {qty} × {product.name} ({unit_type}) = ${total_amount}")
-        send_message(chat_id, get_stock_list(db))
-
-        # -------------------- Additional Notifications --------------------
-        notify_low_stock(db, product)
-        notify_top_product(db, product)
-        notify_high_value_sale(db, sale)
-
-    except Exception as e:
-        db.rollback()
-        send_message(chat_id, f"❌ Failed to record sale: {str(e)}")
-
-
-# -------------------- Clean Tenant-Aware Reports --------------------
-def generate_report(db: Session, report_type: str):
-    """
-    Generate tenant-aware reports with payment method details.
-    - db: SQLAlchemy session (already tenant-specific)
-    - report_type: report_daily, report_weekly, report_monthly, etc.
-    """
-
-    # -------------------- Daily Sales --------------------
-    if report_type == "report_daily":
-        # Get daily totals with payment method breakdown
-        daily_totals = (
-            db.query(
-                func.date(SaleORM.sale_date).label("day"),
-                func.sum(SaleORM.total_amount).label("total_revenue"),
-                func.count(SaleORM.sale_id).label("total_orders")
-            )
-            .group_by(func.date(SaleORM.sale_date))
-            .order_by(func.date(SaleORM.sale_date).desc())
-            .limit(1)
-            .first()
-        )
-        
-        if not daily_totals:
-            return "No sales data for today."
-        
-        # Get payment method breakdown for today
-        payment_breakdown = (
-            db.query(
-                SaleORM.payment_method,
-                func.sum(SaleORM.total_amount).label("amount"),
-                func.count(SaleORM.sale_id).label("count")
-            )
-            .filter(func.date(SaleORM.sale_date) == daily_totals.day)
-            .group_by(SaleORM.payment_method)
-            .all()
-        )
-        
-        lines = ["📅 *Daily Sales Report*"]
-        lines.append(f"📊 Date: {daily_totals.day}")
-        lines.append(f"💰 Total Revenue: ${float(daily_totals.total_revenue or 0):.2f}")
-        lines.append(f"🛒 Total Orders: {daily_totals.total_orders}")
-        
-        # Payment method breakdown
-        lines.append(f"\n💳 Payment Methods:")
-        for payment in payment_breakdown:
-            method = payment.payment_method or "Cash"  # Default to Cash if null
-            percentage = (payment.amount / daily_totals.total_revenue * 100) if daily_totals.total_revenue > 0 else 0
-            lines.append(f"• {method}: ${float(payment.amount):.2f} ({payment.count} orders, {percentage:.1f}%)")
-        
-        return "\n".join(lines)
-
-    # -------------------- Weekly Sales (Last 7 Days) --------------------
-    elif report_type == "report_weekly":        
-        # Calculate last 7 days
-        today = datetime.utcnow().date()
-        week_ago = today - timedelta(days=7)
-        
-        # Get weekly totals
-        weekly_totals = (
-            db.query(
-                func.sum(SaleORM.total_amount).label("total_revenue"),
-                func.count(SaleORM.sale_id).label("total_orders")
-            )
-            .filter(SaleORM.sale_date >= week_ago)
-            .first()
-        )
-        
-        if not weekly_totals or not weekly_totals.total_revenue:
-            return "No sales data for the past week."
-        
-        # Get payment method breakdown for the week
-        payment_breakdown = (
-            db.query(
-                SaleORM.payment_method,
-                func.sum(SaleORM.total_amount).label("amount"),
-                func.count(SaleORM.sale_id).label("count")
-            )
-            .filter(SaleORM.sale_date >= week_ago)
-            .group_by(SaleORM.payment_method)
-            .all()
-        )
-        
-        # Get daily breakdown
-        daily_results = (
-            db.query(
-                func.date(SaleORM.sale_date).label("day"),
-                func.sum(SaleORM.total_amount).label("daily_revenue"),
-                func.count(SaleORM.sale_id).label("daily_orders")
-            )
-            .filter(SaleORM.sale_date >= week_ago)
-            .group_by(func.date(SaleORM.sale_date))
-            .order_by(func.date(SaleORM.sale_date))
-            .all()
-        )
-        
-        lines = [f"📆 *Weekly Sales Report - Last 7 Days*"]
-        lines.append(f"📅 Period: {week_ago} to {today}")
-        lines.append(f"💰 Total Revenue: ${float(weekly_totals.total_revenue):.2f}")
-        lines.append(f"🛒 Total Orders: {weekly_totals.total_orders}")
-        
-        # Payment method breakdown
-        lines.append(f"\n💳 Payment Methods:")
-        for payment in payment_breakdown:
-            method = payment.payment_method or "Cash"
-            percentage = (payment.amount / weekly_totals.total_revenue * 100) if weekly_totals.total_revenue > 0 else 0
-            lines.append(f"• {method}: ${float(payment.amount):.2f} ({payment.count} orders, {percentage:.1f}%)")
-        
-        # Daily breakdown
-        lines.append(f"\n📊 Daily Breakdown:")
-        
-        # Fill in missing days with zero sales
-        current_date = week_ago
-        while current_date <= today:
-            # Find sales for this date
-            day_sales = next((r for r in daily_results if r.day == current_date), None)
-            
-            if day_sales:
-                lines.append(f"• {current_date}: ${float(day_sales.daily_revenue or 0):.2f} ({day_sales.daily_orders} orders)")
-            else:
-                lines.append(f"• {current_date}: $0.00 (0 orders)")
-            
-            current_date += timedelta(days=1)
-        
-        return "\n".join(lines)
-        
-    # -------------------- Monthly Sales (Current Month by Day) --------------------
-    elif report_type == "report_monthly":        
-        today = datetime.utcnow().date()
-        month_start = today.replace(day=1)
-        
-        # Get monthly totals
-        monthly_totals = (
-            db.query(
-                func.sum(SaleORM.total_amount).label("total_revenue"),
-                func.count(SaleORM.sale_id).label("total_orders")
-            )
-            .filter(SaleORM.sale_date >= month_start)
-            .first()
-        )
-        
-        if not monthly_totals or not monthly_totals.total_revenue:
-            return f"No sales data for {today.strftime('%B %Y')}."
-        
-        # Get payment method breakdown for the month
-        payment_breakdown = (
-            db.query(
-                SaleORM.payment_method,
-                func.sum(SaleORM.total_amount).label("amount"),
-                func.count(SaleORM.sale_id).label("count")
-            )
-            .filter(SaleORM.sale_date >= month_start)
-            .group_by(SaleORM.payment_method)
-            .all()
-        )
-        
-        # Get daily results
-        daily_results = (
-            db.query(
-                func.date(SaleORM.sale_date).label("day"),
-                func.sum(SaleORM.total_amount).label("daily_revenue"),
-                func.count(SaleORM.sale_id).label("daily_orders")
-            )
-            .filter(SaleORM.sale_date >= month_start)
-            .group_by(func.date(SaleORM.sale_date))
-            .order_by(func.date(SaleORM.sale_date))
-            .all()
-        )
-        
-        lines = [f"📊 *Monthly Sales Report - {today.strftime('%B %Y')}*"]
-        lines.append(f"💰 Monthly Total: ${float(monthly_totals.total_revenue):.2f}")
-        lines.append(f"🛒 Total Orders: {monthly_totals.total_orders}")
-        
-        # Payment method breakdown
-        lines.append(f"\n💳 Payment Methods:")
-        for payment in payment_breakdown:
-            method = payment.payment_method or "Cash"
-            percentage = (payment.amount / monthly_totals.total_revenue * 100) if monthly_totals.total_revenue > 0 else 0
-            lines.append(f"• {method}: ${float(payment.amount):.2f} ({payment.count} orders, {percentage:.1f}%)")
-        
-        lines.append(f"\n📅 Daily Breakdown:")
-        
-        for r in daily_results:
-            lines.append(f"• {r.day}: ${float(r.daily_revenue or 0):.2f} ({r.daily_orders} orders)")
-        
-        return "\n".join(lines)
-
-    # -------------------- Payment Method Summary Report --------------------
-    elif report_type == "report_payment_summary":        
-        today = datetime.utcnow().date()
-        month_start = today.replace(day=1)
-        week_ago = today - timedelta(days=7)
-        
-        # Today's payment breakdown
-        today_breakdown = (
-            db.query(
-                SaleORM.payment_method,
-                func.sum(SaleORM.total_amount).label("amount"),
-                func.count(SaleORM.sale_id).label("count")
-            )
-            .filter(func.date(SaleORM.sale_date) == today)
-            .group_by(SaleORM.payment_method)
-            .all()
-        )
-        
-        # Weekly payment breakdown
-        weekly_breakdown = (
-            db.query(
-                SaleORM.payment_method,
-                func.sum(SaleORM.total_amount).label("amount"),
-                func.count(SaleORM.sale_id).label("count")
-            )
-            .filter(SaleORM.sale_date >= week_ago)
-            .group_by(SaleORM.payment_method)
-            .all()
-        )
-        
-        # Monthly payment breakdown
-        monthly_breakdown = (
-            db.query(
-                SaleORM.payment_method,
-                func.sum(SaleORM.total_amount).label("amount"),
-                func.count(SaleORM.sale_id).label("count")
-            )
-            .filter(SaleORM.sale_date >= month_start)
-            .group_by(SaleORM.payment_method)
-            .all()
-        )
-        
-        lines = ["💳 *Payment Method Summary*"]
-        
-        # Today's summary
-        lines.append(f"\n📅 Today ({today}):")
-        today_total = sum(payment.amount for payment in today_breakdown)
-        for payment in today_breakdown:
-            method = payment.payment_method or "Cash"
-            percentage = (payment.amount / today_total * 100) if today_total > 0 else 0
-            lines.append(f"• {method}: ${float(payment.amount):.2f} ({payment.count} orders, {percentage:.1f}%)")
-        
-        if not today_breakdown:
-            lines.append("• No sales today")
-        
-        # Weekly summary
-        lines.append(f"\n📆 Last 7 Days:")
-        weekly_total = sum(payment.amount for payment in weekly_breakdown)
-        for payment in weekly_breakdown:
-            method = payment.payment_method or "Cash"
-            percentage = (payment.amount / weekly_total * 100) if weekly_total > 0 else 0
-            lines.append(f"• {method}: ${float(payment.amount):.2f} ({payment.count} orders, {percentage:.1f}%)")
-        
-        # Monthly summary
-        lines.append(f"\n📊 This Month ({today.strftime('%B')}):")
-        monthly_total = sum(payment.amount for payment in monthly_breakdown)
-        for payment in monthly_breakdown:
-            method = payment.payment_method or "Cash"
-            percentage = (payment.amount / monthly_total * 100) if monthly_total > 0 else 0
-            lines.append(f"• {method}: ${float(payment.amount):.2f} ({payment.count} orders, {percentage:.1f}%)")
-        
-        return "\n".join(lines)
-        
-    # -------------------- Low Stock Products --------------------
-    elif report_type == "report_low_stock":
-        # Products at or below their individual low stock threshold
-        products = db.query(ProductORM).filter(
-            ProductORM.stock <= ProductORM.low_stock_threshold
-        ).order_by(ProductORM.stock).all()
-        
-        if not products:
-            return "✅ All products have sufficient stock!"
-        
-        lines = ["⚠️ *Low Stock Alert*"]
-        
-        # Separate out-of-stock from low stock
-        out_of_stock = [p for p in products if p.stock == 0]
-        low_stock = [p for p in products if p.stock > 0]
-        
-        if out_of_stock:
-            lines.append("\n🔴 *OUT OF STOCK:*")
-            for p in out_of_stock:
-                lines.append(f"• {p.name}: 0 {p.unit_type}")
-        
-        if low_stock:
-            lines.append("\n🟡 *LOW STOCK:*")
-            for p in low_stock:
-                lines.append(f"• {p.name}: {p.stock} {p.unit_type} (threshold: {p.low_stock_threshold})")
-        
-        # Summary
-        lines.append(f"\n📊 Summary: {len(out_of_stock)} out of stock, {len(low_stock)} low stock")
-        
-        return "\n".join(lines)
-        
-    # -------------------- Top Products --------------------
-    elif report_type == "report_top_products":
-        results = (
-            db.query(
-                ProductORM.name.label("product"),
-                func.sum(SaleORM.quantity).label("total_qty"),
-                func.sum(SaleORM.total_amount).label("total_revenue")
-            )
-            .join(SaleORM, ProductORM.product_id == SaleORM.product_id)
-            .group_by(ProductORM.name)
-            .order_by(func.sum(SaleORM.quantity).desc())
-            .limit(5)
-            .all()
-        )
-        if not results:
-            return "No sales data."
-        lines = ["🏆 *Top Selling Products*"]
-        for r in results:
-            lines.append(f"{r.product}: {r.total_qty} sold, ${float(r.total_revenue or 0):.2f} revenue")
-        return "\n".join(lines)
-
-    # -------------------- Average Order Value --------------------
-    elif report_type == "report_aov":
-        total_orders = db.query(func.count(SaleORM.sale_id)).scalar() or 0
-        total_revenue = db.query(func.sum(SaleORM.total_amount)).scalar() or 0
-        aov = round(total_revenue / total_orders, 2) if total_orders > 0 else 0
-        
-        # Get payment method breakdown for AOV context
-        payment_breakdown = (
-            db.query(
-                SaleORM.payment_method,
-                func.avg(SaleORM.total_amount).label("avg_amount"),
-                func.count(SaleORM.sale_id).label("count")
-            )
-            .group_by(SaleORM.payment_method)
-            .all()
-        )
-        
-        lines = ["💰 *Average Order Value*"]
-        lines.append(f"Total Orders: {total_orders}")
-        lines.append(f"Total Revenue: ${total_revenue:.2f}")
-        lines.append(f"AOV: ${aov:.2f}")
-        
-        if payment_breakdown:
-            lines.append(f"\n💳 AOV by Payment Method:")
-            for payment in payment_breakdown:
-                method = payment.payment_method or "Cash"
-                lines.append(f"• {method}: ${float(payment.avg_amount or 0):.2f} ({payment.count} orders)")
-        
-        return "\n".join(lines)
-
-    # -------------------- Stock Turnover --------------------
-    elif report_type == "report_stock_turnover":
-        products = db.query(ProductORM).all()
-        if not products:
-            return "No products found."
-        lines = ["📦 *Stock Turnover per Product*"]
-        for p in products:
-            total_sold = db.query(func.sum(SaleORM.quantity)).filter(SaleORM.product_id == p.product_id).scalar() or 0
-            turnover_rate = total_sold / (p.stock + total_sold) if (p.stock + total_sold) > 0 else 0
-            lines.append(f"{p.name}: Sold {total_sold}, Stock {p.stock}, Turnover Rate {turnover_rate:.2f}")
-        return "\n".join(lines)
-
-    # -------------------- Credit List --------------------
-    elif report_type == "report_credits":
-        # Only show sales where credit is pending AND customer details were recorded
-        sales_with_credit = (
-            db.query(SaleORM)
-            .join(CustomerORM, SaleORM.customer_id == CustomerORM.customer_id)
-            .filter(SaleORM.pending_amount > 0)
-            .filter(CustomerORM.name.isnot(None))  # Only customers who provided details
-            .order_by(SaleORM.sale_date.desc())
-            .all()
-        )
-        
-        if not sales_with_credit:
-            return "✅ No outstanding credits (where customer details were recorded)."
-        
-        lines = ["💳 *Outstanding Credits*"]
-        total_credit_outstanding = 0
-        
-        for sale in sales_with_credit:
-            customer_name = sale.customer.name
-            contact = sale.customer.contact or "No contact"
-            product = db.query(ProductORM).filter(ProductORM.product_id == sale.product_id).first()
-            product_name = product.name if product else "Unknown Product"
-            
-            lines.append(f"• {customer_name} ({contact}): ${float(sale.pending_amount):.2f}")
-            lines.append(f"  📦 For: {sale.quantity} × {product_name}")
-            lines.append(f"  📅 Date: {sale.sale_date.strftime('%Y-%m-%d')}")
-            lines.append("")  # Empty line for readability
-            
-            total_credit_outstanding += sale.pending_amount
-        
-        lines.append(f"💰 *Total Credit Outstanding: ${total_credit_outstanding:.2f}*")
-        
-        return "\n".join(lines)
-        
-    # -------------------- Change List --------------------
-    elif report_type == "report_change":
-        # Only show sales where change is due AND customer details were recorded
-        sales_with_change = (
-            db.query(SaleORM)
-            .join(CustomerORM, SaleORM.customer_id == CustomerORM.customer_id)
-            .filter(SaleORM.change_left > 0)
-            .filter(CustomerORM.name.isnot(None))  # Only customers who provided details
-            .order_by(SaleORM.sale_date.desc())
-            .all()
-        )
-        
-        if not sales_with_change:
-            return "✅ No customers with change due (where details were recorded)."
-        
-        lines = ["💵 *Change Due to Customers*"]
-        total_change_due = 0
-        
-        for sale in sales_with_change:
-            customer_name = sale.customer.name
-            contact = sale.customer.contact or "No contact"
-            product = db.query(ProductORM).filter(ProductORM.product_id == sale.product_id).first()
-            product_name = product.name if product else "Unknown Product"
-            
-            lines.append(f"• {customer_name} ({contact}): ${float(sale.change_left):.2f}")
-            lines.append(f"  📦 For: {sale.quantity} × {product_name}")
-            lines.append(f"  📅 Date: {sale.sale_date.strftime('%Y-%m-%d')}")
-            lines.append("")  # Empty line for readability
-            
-            total_change_due += sale.change_left
-        
-        lines.append(f"💰 *Total Change Due: ${total_change_due:.2f}*")
-        
-        return "\n".join(lines)
-        
+    from datetime import datetime, timedelta
+    
+    # ✅ Add shop filter condition
+    shop_filter = ""
+    shop_display = ""
+    
+    if shop_id:
+        shop_filter = SaleORM.shop_id == shop_id
+        shop_display = f" for Shop: {shop_name or f'ID {shop_id}'}"
     else:
-        return "❌ Unknown report type."
-        
-def generate_report(db: Session, report_type: str):
-    """
-    Generate tenant-aware reports.
-    - db: SQLAlchemy session (already tenant-specific)
-    - report_type: report_daily, report_weekly, report_monthly, etc.
-    """
+        shop_display = " (All Shops)"
+    
     # -------------------- Daily Sales --------------------
     if report_type == "report_daily":
         # Get daily totals with surcharge breakdown
+        query = db.query(
+            func.date(SaleORM.sale_date).label("day"),
+            func.sum(SaleORM.total_amount).label("total_revenue"),
+            func.sum(SaleORM.surcharge_amount).label("total_surcharge"),
+            func.count(SaleORM.sale_id).label("total_orders")
+        )
+        
+        # ✅ Apply shop filter if provided
+        if shop_id:
+            query = query.filter(shop_filter)
+        
         daily_totals = (
-            db.query(
-                func.date(SaleORM.sale_date).label("day"),
-                func.sum(SaleORM.total_amount).label("total_revenue"),
-                func.sum(SaleORM.surcharge_amount).label("total_surcharge"),
-                func.count(SaleORM.sale_id).label("total_orders")
-            )
-            .group_by(func.date(SaleORM.sale_date))
+            query.group_by(func.date(SaleORM.sale_date))
             .order_by(func.date(SaleORM.sale_date).desc())
             .limit(1)
             .first()
         )
         
         if not daily_totals:
-            return "No sales data for today."
+            return f"No sales data for today{shop_display}."
         
         # Calculate net revenue (without surcharge)
         net_revenue = daily_totals.total_revenue - (daily_totals.total_surcharge or 0)
         
-        lines = ["📅 *Daily Sales Report*"]
+        lines = [f"📅 *Daily Sales Report{shop_display}*"]
         lines.append(f"📊 Date: {daily_totals.day}")
         lines.append(f"💰 Gross Revenue: ${float(daily_totals.total_revenue or 0):.2f}")
         
@@ -1742,17 +1258,18 @@ def generate_report(db: Session, report_type: str):
         lines.append(f"🛒 Total Orders: {daily_totals.total_orders}")
         
         # Payment method breakdown WITH surcharge
-        payment_breakdown = (
-            db.query(
-                SaleORM.payment_method,
-                func.sum(SaleORM.total_amount).label("amount"),
-                func.sum(SaleORM.surcharge_amount).label("surcharge"),
-                func.count(SaleORM.sale_id).label("count")
-            )
-            .filter(func.date(SaleORM.sale_date) == daily_totals.day)
-            .group_by(SaleORM.payment_method)
-            .all()
-        )
+        payment_query = db.query(
+            SaleORM.payment_method,
+            func.sum(SaleORM.total_amount).label("amount"),
+            func.sum(SaleORM.surcharge_amount).label("surcharge"),
+            func.count(SaleORM.sale_id).label("count")
+        ).filter(func.date(SaleORM.sale_date) == daily_totals.day)
+        
+        # ✅ Apply shop filter
+        if shop_id:
+            payment_query = payment_query.filter(shop_filter)
+        
+        payment_breakdown = payment_query.group_by(SaleORM.payment_method).all()
         
         if payment_breakdown:
             lines.append(f"\n💳 Payment Methods:")
@@ -1771,50 +1288,55 @@ def generate_report(db: Session, report_type: str):
         week_ago = today - timedelta(days=7)
         
         # Get weekly totals WITH surcharge
-        weekly_totals = (
-            db.query(
-                func.sum(SaleORM.total_amount).label("total_revenue"),
-                func.sum(SaleORM.surcharge_amount).label("total_surcharge"),
-                func.count(SaleORM.sale_id).label("total_orders")
-            )
-            .filter(SaleORM.sale_date >= week_ago)
-            .first()
-        )
+        weekly_query = db.query(
+            func.sum(SaleORM.total_amount).label("total_revenue"),
+            func.sum(SaleORM.surcharge_amount).label("total_surcharge"),
+            func.count(SaleORM.sale_id).label("total_orders")
+        ).filter(SaleORM.sale_date >= week_ago)
+        
+        # ✅ Apply shop filter
+        if shop_id:
+            weekly_query = weekly_query.filter(shop_filter)
+        
+        weekly_totals = weekly_query.first()
         
         if not weekly_totals or not weekly_totals.total_revenue:
-            return "No sales data for the past week."
+            return f"No sales data for the past week{shop_display}."
         
         # Calculate net revenue
         net_revenue = weekly_totals.total_revenue - (weekly_totals.total_surcharge or 0)
         
         # Get payment method breakdown WITH surcharge
-        payment_breakdown = (
-            db.query(
-                SaleORM.payment_method,
-                func.sum(SaleORM.total_amount).label("amount"),
-                func.sum(SaleORM.surcharge_amount).label("surcharge"),
-                func.count(SaleORM.sale_id).label("count")
-            )
-            .filter(SaleORM.sale_date >= week_ago)
-            .group_by(SaleORM.payment_method)
-            .all()
-        )
+        payment_query = db.query(
+            SaleORM.payment_method,
+            func.sum(SaleORM.total_amount).label("amount"),
+            func.sum(SaleORM.surcharge_amount).label("surcharge"),
+            func.count(SaleORM.sale_id).label("count")
+        ).filter(SaleORM.sale_date >= week_ago)
+        
+        # ✅ Apply shop filter
+        if shop_id:
+            payment_query = payment_query.filter(shop_filter)
+        
+        payment_breakdown = payment_query.group_by(SaleORM.payment_method).all()
         
         # Get daily breakdown WITH surcharge
-        daily_results = (
-            db.query(
-                func.date(SaleORM.sale_date).label("day"),
-                func.sum(SaleORM.total_amount).label("daily_revenue"),
-                func.sum(SaleORM.surcharge_amount).label("daily_surcharge"),
-                func.count(SaleORM.sale_id).label("daily_orders")
-            )
-            .filter(SaleORM.sale_date >= week_ago)
-            .group_by(func.date(SaleORM.sale_date))
-            .order_by(func.date(SaleORM.sale_date))
-            .all()
-        )
+        daily_query = db.query(
+            func.date(SaleORM.sale_date).label("day"),
+            func.sum(SaleORM.total_amount).label("daily_revenue"),
+            func.sum(SaleORM.surcharge_amount).label("daily_surcharge"),
+            func.count(SaleORM.sale_id).label("daily_orders")
+        ).filter(SaleORM.sale_date >= week_ago)
         
-        lines = [f"📆 *Weekly Sales Report - Last 7 Days*"]
+        # ✅ Apply shop filter
+        if shop_id:
+            daily_query = daily_query.filter(shop_filter)
+        
+        daily_results = daily_query.group_by(func.date(SaleORM.sale_date)) \
+            .order_by(func.date(SaleORM.sale_date)) \
+            .all()
+        
+        lines = [f"📆 *Weekly Sales Report - Last 7 Days{shop_display}*"]
         lines.append(f"📅 Period: {week_ago} to {today}")
         lines.append(f"💰 Gross Revenue: ${float(weekly_totals.total_revenue):.2f}")
         
@@ -1858,50 +1380,55 @@ def generate_report(db: Session, report_type: str):
         month_start = today.replace(day=1)
         
         # Get monthly totals WITH surcharge
-        monthly_totals = (
-            db.query(
-                func.sum(SaleORM.total_amount).label("total_revenue"),
-                func.sum(SaleORM.surcharge_amount).label("total_surcharge"),
-                func.count(SaleORM.sale_id).label("total_orders")
-            )
-            .filter(SaleORM.sale_date >= month_start)
-            .first()
-        )
+        monthly_query = db.query(
+            func.sum(SaleORM.total_amount).label("total_revenue"),
+            func.sum(SaleORM.surcharge_amount).label("total_surcharge"),
+            func.count(SaleORM.sale_id).label("total_orders")
+        ).filter(SaleORM.sale_date >= month_start)
+        
+        # ✅ Apply shop filter
+        if shop_id:
+            monthly_query = monthly_query.filter(shop_filter)
+        
+        monthly_totals = monthly_query.first()
         
         if not monthly_totals or not monthly_totals.total_revenue:
-            return f"No sales data for {today.strftime('%B %Y')}."
+            return f"No sales data for {today.strftime('%B %Y')}{shop_display}."
         
         # Calculate net revenue
         net_revenue = monthly_totals.total_revenue - (monthly_totals.total_surcharge or 0)
         
         # Get payment method breakdown WITH surcharge
-        payment_breakdown = (
-            db.query(
-                SaleORM.payment_method,
-                func.sum(SaleORM.total_amount).label("amount"),
-                func.sum(SaleORM.surcharge_amount).label("surcharge"),
-                func.count(SaleORM.sale_id).label("count")
-            )
-            .filter(SaleORM.sale_date >= month_start)
-            .group_by(SaleORM.payment_method)
-            .all()
-        )
+        payment_query = db.query(
+            SaleORM.payment_method,
+            func.sum(SaleORM.total_amount).label("amount"),
+            func.sum(SaleORM.surcharge_amount).label("surcharge"),
+            func.count(SaleORM.sale_id).label("count")
+        ).filter(SaleORM.sale_date >= month_start)
+        
+        # ✅ Apply shop filter
+        if shop_id:
+            payment_query = payment_query.filter(shop_filter)
+        
+        payment_breakdown = payment_query.group_by(SaleORM.payment_method).all()
         
         # Get daily results WITH surcharge
-        daily_results = (
-            db.query(
-                func.date(SaleORM.sale_date).label("day"),
-                func.sum(SaleORM.total_amount).label("daily_revenue"),
-                func.sum(SaleORM.surcharge_amount).label("daily_surcharge"),
-                func.count(SaleORM.sale_id).label("daily_orders")
-            )
-            .filter(SaleORM.sale_date >= month_start)
-            .group_by(func.date(SaleORM.sale_date))
-            .order_by(func.date(SaleORM.sale_date))
-            .all()
-        )
+        daily_query = db.query(
+            func.date(SaleORM.sale_date).label("day"),
+            func.sum(SaleORM.total_amount).label("daily_revenue"),
+            func.sum(SaleORM.surcharge_amount).label("daily_surcharge"),
+            func.count(SaleORM.sale_id).label("daily_orders")
+        ).filter(SaleORM.sale_date >= month_start)
         
-        lines = [f"📊 *Monthly Sales Report - {today.strftime('%B %Y')}*"]
+        # ✅ Apply shop filter
+        if shop_id:
+            daily_query = daily_query.filter(shop_filter)
+        
+        daily_results = daily_query.group_by(func.date(SaleORM.sale_date)) \
+            .order_by(func.date(SaleORM.sale_date)) \
+            .all()
+        
+        lines = [f"📊 *Monthly Sales Report - {today.strftime('%B %Y')}{shop_display}*"]
         lines.append(f"💰 Gross Revenue: ${float(monthly_totals.total_revenue):.2f}")
         
         if monthly_totals.total_surcharge and monthly_totals.total_surcharge > 0:
@@ -1935,45 +1462,48 @@ def generate_report(db: Session, report_type: str):
         week_ago = today - timedelta(days=7)
         
         # Today's payment breakdown WITH surcharge
-        today_breakdown = (
-            db.query(
-                SaleORM.payment_method,
-                func.sum(SaleORM.total_amount).label("amount"),
-                func.sum(SaleORM.surcharge_amount).label("surcharge"),
-                func.count(SaleORM.sale_id).label("count")
-            )
-            .filter(func.date(SaleORM.sale_date) == today)
-            .group_by(SaleORM.payment_method)
-            .all()
-        )
+        today_query = db.query(
+            SaleORM.payment_method,
+            func.sum(SaleORM.total_amount).label("amount"),
+            func.sum(SaleORM.surcharge_amount).label("surcharge"),
+            func.count(SaleORM.sale_id).label("count")
+        ).filter(func.date(SaleORM.sale_date) == today)
+        
+        # ✅ Apply shop filter
+        if shop_id:
+            today_query = today_query.filter(shop_filter)
+        
+        today_breakdown = today_query.group_by(SaleORM.payment_method).all()
         
         # Weekly payment breakdown WITH surcharge
-        weekly_breakdown = (
-            db.query(
-                SaleORM.payment_method,
-                func.sum(SaleORM.total_amount).label("amount"),
-                func.sum(SaleORM.surcharge_amount).label("surcharge"),
-                func.count(SaleORM.sale_id).label("count")
-            )
-            .filter(SaleORM.sale_date >= week_ago)
-            .group_by(SaleORM.payment_method)
-            .all()
-        )
+        weekly_query = db.query(
+            SaleORM.payment_method,
+            func.sum(SaleORM.total_amount).label("amount"),
+            func.sum(SaleORM.surcharge_amount).label("surcharge"),
+            func.count(SaleORM.sale_id).label("count")
+        ).filter(SaleORM.sale_date >= week_ago)
+        
+        # ✅ Apply shop filter
+        if shop_id:
+            weekly_query = weekly_query.filter(shop_filter)
+        
+        weekly_breakdown = weekly_query.group_by(SaleORM.payment_method).all()
         
         # Monthly payment breakdown WITH surcharge
-        monthly_breakdown = (
-            db.query(
-                SaleORM.payment_method,
-                func.sum(SaleORM.total_amount).label("amount"),
-                func.sum(SaleORM.surcharge_amount).label("surcharge"),
-                func.count(SaleORM.sale_id).label("count")
-            )
-            .filter(SaleORM.sale_date >= month_start)
-            .group_by(SaleORM.payment_method)
-            .all()
-        )
+        monthly_query = db.query(
+            SaleORM.payment_method,
+            func.sum(SaleORM.total_amount).label("amount"),
+            func.sum(SaleORM.surcharge_amount).label("surcharge"),
+            func.count(SaleORM.sale_id).label("count")
+        ).filter(SaleORM.sale_date >= month_start)
         
-        lines = ["💳 *Payment Method Summary*"]
+        # ✅ Apply shop filter
+        if shop_id:
+            monthly_query = monthly_query.filter(shop_filter)
+        
+        monthly_breakdown = monthly_query.group_by(SaleORM.payment_method).all()
+        
+        lines = [f"💳 *Payment Method Summary{shop_display}*"]
         
         # Today's summary
         lines.append(f"\n📅 Today ({today}):")
@@ -2003,22 +1533,45 @@ def generate_report(db: Session, report_type: str):
         
         return "\n".join(lines)
     
-        
     # -------------------- Low Stock Products --------------------
     elif report_type == "report_low_stock":
-        # Products at or below their individual low stock threshold
-        products = db.query(ProductORM).filter(
-            ProductORM.stock <= ProductORM.low_stock_threshold
-        ).order_by(ProductORM.stock).all()
-        
-        if not products:
-            return "✅ All products have sufficient stock!"
-        
-        lines = ["⚠️ *Low Stock Alert*"]
-        
-        # Separate out-of-stock from low stock
-        out_of_stock = [p for p in products if p.stock == 0]
-        low_stock = [p for p in products if p.stock > 0]
+        if shop_id:
+            # ✅ SHOP-SPECIFIC: Check product_shop_stock for this shop
+            low_stock_items = db.query(
+                ProductORM.name,
+                ProductShopStockORM.stock,
+                ProductShopStockORM.low_stock_threshold,
+                ProductORM.unit_type
+            ).join(
+                ProductShopStockORM, ProductORM.product_id == ProductShopStockORM.product_id
+            ).filter(
+                ProductShopStockORM.shop_id == shop_id,
+                ProductShopStockORM.stock <= ProductShopStockORM.low_stock_threshold
+            ).order_by(ProductShopStockORM.stock).all()
+            
+            if not low_stock_items:
+                return f"✅ All products have sufficient stock in shop{shop_display}!"
+            
+            lines = [f"⚠️ *Low Stock Alert{shop_display}*"]
+            
+            # Separate out-of-stock from low stock
+            out_of_stock = [p for p in low_stock_items if p.stock == 0]
+            low_stock = [p for p in low_stock_items if p.stock > 0]
+            
+        else:
+            # ✅ ALL SHOPS: Check global product stock
+            products = db.query(ProductORM).filter(
+                ProductORM.stock <= ProductORM.low_stock_threshold
+            ).order_by(ProductORM.stock).all()
+            
+            if not products:
+                return "✅ All products have sufficient stock across all shops!"
+            
+            lines = ["⚠️ *Low Stock Alert (All Shops)*"]
+            
+            # Separate out-of-stock from low stock
+            out_of_stock = [p for p in products if p.stock == 0]
+            low_stock = [p for p in products if p.stock > 0]
         
         if out_of_stock:
             lines.append("\n🔴 *OUT OF STOCK:*")
@@ -2028,7 +1581,10 @@ def generate_report(db: Session, report_type: str):
         if low_stock:
             lines.append("\n🟡 *LOW STOCK:*")
             for p in low_stock:
-                lines.append(f"• {p.name}: {p.stock} {p.unit_type} (threshold: {p.low_stock_threshold})")
+                if shop_id:
+                    lines.append(f"• {p.name}: {p.stock} {p.unit_type} (threshold: {p.low_stock_threshold})")
+                else:
+                    lines.append(f"• {p.name}: {p.stock} {p.unit_type} (threshold: {p.low_stock_threshold})")
         
         # Summary
         lines.append(f"\n📊 Summary: {len(out_of_stock)} out of stock, {len(low_stock)} low stock")
@@ -2037,60 +1593,106 @@ def generate_report(db: Session, report_type: str):
         
     # -------------------- Top Products --------------------
     elif report_type == "report_top_products":
-        results = (
-            db.query(
-                ProductORM.name.label("product"),
-                func.sum(SaleORM.quantity).label("total_qty"),
-                func.sum(SaleORM.total_amount).label("total_revenue")
-            )
-            .join(SaleORM, ProductORM.product_id == SaleORM.product_id)
-            .group_by(ProductORM.name)
-            .order_by(func.sum(SaleORM.quantity).desc())
-            .limit(5)
-            .all()
-        )
+        query = db.query(
+            ProductORM.name.label("product"),
+            func.sum(SaleORM.quantity).label("total_qty"),
+            func.sum(SaleORM.total_amount).label("total_revenue")
+        ).join(SaleORM, ProductORM.product_id == SaleORM.product_id)
+        
+        # ✅ Apply shop filter
+        if shop_id:
+            query = query.filter(shop_filter)
+        
+        results = query.group_by(ProductORM.name) \
+            .order_by(func.sum(SaleORM.quantity).desc()) \
+            .limit(5).all()
+            
         if not results:
-            return "No sales data."
-        lines = ["🏆 *Top Selling Products*"]
+            return f"No sales data{shop_display}."
+        
+        lines = [f"🏆 *Top Selling Products{shop_display}*"]
         for r in results:
             lines.append(f"{r.product}: {r.total_qty} sold, ${float(r.total_revenue or 0):.2f} revenue")
         return "\n".join(lines)
 
     # -------------------- Average Order Value --------------------
     elif report_type == "report_aov":
-        total_orders = db.query(func.count(SaleORM.sale_id)).scalar() or 0
-        total_revenue = db.query(func.sum(SaleORM.total_amount)).scalar() or 0
+        query = db.query(
+            func.count(SaleORM.sale_id).label("total_orders"),
+            func.sum(SaleORM.total_amount).label("total_revenue")
+        )
+        
+        # ✅ Apply shop filter
+        if shop_id:
+            query = query.filter(shop_filter)
+        
+        result = query.first()
+        
+        total_orders = result.total_orders or 0
+        total_revenue = result.total_revenue or 0
         aov = round(total_revenue / total_orders, 2) if total_orders > 0 else 0
-        return f"💰 *Average Order Value*\nTotal Orders: {total_orders}\nTotal Revenue: ${total_revenue:.2f}\nAOV: ${aov:.2f}"
+        
+        return f"💰 *Average Order Value{shop_display}*\nTotal Orders: {total_orders}\nTotal Revenue: ${total_revenue:.2f}\nAOV: ${aov:.2f}"
 
     # -------------------- Stock Turnover --------------------
     elif report_type == "report_stock_turnover":
-        products = db.query(ProductORM).all()
-        if not products:
-            return "No products found."
-        lines = ["📦 *Stock Turnover per Product*"]
-        for p in products:
-            total_sold = db.query(func.sum(SaleORM.quantity)).filter(SaleORM.product_id == p.product_id).scalar() or 0
-            turnover_rate = total_sold / (p.stock + total_sold) if (p.stock + total_sold) > 0 else 0
-            lines.append(f"{p.name}: Sold {total_sold}, Stock {p.stock}, Turnover Rate {turnover_rate:.2f}")
+        if shop_id:
+            # ✅ SHOP-SPECIFIC: Use product_shop_stock
+            products_query = db.query(
+                ProductORM.name,
+                ProductShopStockORM.stock,
+                func.sum(SaleORM.quantity).label("total_sold")
+            ).outerjoin(
+                ProductShopStockORM, ProductORM.product_id == ProductShopStockORM.product_id
+            ).outerjoin(
+                SaleORM, ProductORM.product_id == SaleORM.product_id
+            ).filter(
+                ProductShopStockORM.shop_id == shop_id,
+                SaleORM.shop_id == shop_id if SaleORM.shop_id else True
+            ).group_by(ProductORM.name, ProductShopStockORM.stock).all()
+        else:
+            # ✅ ALL SHOPS: Use global product stock
+            products = db.query(ProductORM).all()
+            products_query = []
+            for p in products:
+                total_sold = db.query(func.sum(SaleORM.quantity)) \
+                    .filter(SaleORM.product_id == p.product_id) \
+                    .scalar() or 0
+                products_query.append((p.name, p.stock, total_sold))
+        
+        if not products_query:
+            return f"No products found{shop_display}."
+        
+        lines = [f"📦 *Stock Turnover per Product{shop_display}*"]
+        for item in products_query:
+            if shop_id:
+                name, stock, total_sold = item.name, item.stock, item.total_sold
+            else:
+                name, stock, total_sold = item[0], item[1], item[2]
+                
+            turnover_rate = total_sold / (stock + total_sold) if (stock + total_sold) > 0 else 0
+            lines.append(f"{name}: Sold {total_sold}, Stock {stock}, Turnover Rate {turnover_rate:.2f}")
+        
         return "\n".join(lines)
 
     # -------------------- Credit List --------------------
     elif report_type == "report_credits":
         # Only show sales where credit is pending AND customer details were recorded
-        sales_with_credit = (
-            db.query(SaleORM)
-            .join(CustomerORM, SaleORM.customer_id == CustomerORM.customer_id)
-            .filter(SaleORM.pending_amount > 0)
+        query = db.query(SaleORM) \
+            .join(CustomerORM, SaleORM.customer_id == CustomerORM.customer_id) \
+            .filter(SaleORM.pending_amount > 0) \
             .filter(CustomerORM.name.isnot(None))  # Only customers who provided details
-            .order_by(SaleORM.sale_date.desc())
-            .all()
-        )
+        
+        # ✅ Apply shop filter
+        if shop_id:
+            query = query.filter(shop_filter)
+        
+        sales_with_credit = query.order_by(SaleORM.sale_date.desc()).all()
         
         if not sales_with_credit:
-            return "✅ No outstanding credits (where customer details were recorded)."
+            return f"✅ No outstanding credits{shop_display} (where customer details were recorded)."
         
-        lines = ["💳 *Outstanding Credits*"]
+        lines = [f"💳 *Outstanding Credits{shop_display}*"]
         total_credit_outstanding = 0
         
         for sale in sales_with_credit:
@@ -2113,19 +1715,21 @@ def generate_report(db: Session, report_type: str):
     # -------------------- Change List --------------------
     elif report_type == "report_change":
         # Only show sales where change is due AND customer details were recorded
-        sales_with_change = (
-            db.query(SaleORM)
-            .join(CustomerORM, SaleORM.customer_id == CustomerORM.customer_id)
-            .filter(SaleORM.change_left > 0)
+        query = db.query(SaleORM) \
+            .join(CustomerORM, SaleORM.customer_id == CustomerORM.customer_id) \
+            .filter(SaleORM.change_left > 0) \
             .filter(CustomerORM.name.isnot(None))  # Only customers who provided details
-            .order_by(SaleORM.sale_date.desc())
-            .all()
-        )
+        
+        # ✅ Apply shop filter
+        if shop_id:
+            query = query.filter(shop_filter)
+        
+        sales_with_change = query.order_by(SaleORM.sale_date.desc()).all()
         
         if not sales_with_change:
-            return "✅ No customers with change due (where details were recorded)."
+            return f"✅ No customers with change due{shop_display} (where details were recorded)."
         
-        lines = ["💵 *Change Due to Customers*"]
+        lines = [f"💵 *Change Due to Customers{shop_display}*"]
         total_change_due = 0
         
         for sale in sales_with_change:
@@ -2150,39 +1754,54 @@ def generate_report(db: Session, report_type: str):
         
 
 def report_menu_keyboard(role: str):
-    """Build the reports submenu with buttons."""
+    """Build the reports submenu with buttons for 3 roles."""
+    
+    # Reports accessible to ALL users
+    all_reports = [
+        ("📅 Daily Sales", "report_daily"),
+        ("📦 View Stock", "view_stock"),  # Added for consistency
+        ("🏆 Top Products", "report_top_products")
+    ]
+    
+    # Reports for Admin and Shopkeeper
+    shop_user_reports = [
+        ("📆 Weekly Sales", "report_weekly"),
+        ("📊 Monthly Sales per Product", "report_monthly"),
+        ("💳 Credit List", "report_credits"),
+        ("💵 Change List", "report_change")
+    ]
+    
+    # Reports for Owner only
+    owner_reports = [
+        ("⚠️ Low Stock Products", "report_low_stock"),
+        ("💰 Average Order Value", "report_aov"),
+        ("📦 Stock Turnover", "report_stock_turnover"),
+        ("💸 Payment Summary", "report_payment_summary")  # New owner-only report
+    ]
+    
+    # Build keyboard based on role
+    keyboard = []
+    
+    # Add basic reports for everyone
+    for text, callback in all_reports:
+        keyboard.append([{"text": text, "callback_data": callback}])
+    
+    # Add shop user reports for admin/shopkeeper
+    if role in ["admin", "shopkeeper"]:
+        for text, callback in shop_user_reports:
+            keyboard.append([{"text": text, "callback_data": callback}])
+    
+    # Add owner-only reports
     if role == "owner":
-        kb_dict = {
-            "inline_keyboard": [
-                [{"text": "📅 Daily Sales", "callback_data": "report_daily"}],
-                [{"text": "📆 Weekly Sales", "callback_data": "report_weekly"}],
-                [{"text": "📊 Monthly Sales per Product", "callback_data": "report_monthly"}],
-                [{"text": "⚠️ Low Stock Products", "callback_data": "report_low_stock"}],
-                [{"text": "🏆 Top Products", "callback_data": "report_top_products"}],
-                [{"text": "💰 Average Order Value", "callback_data": "report_aov"}],
-                [{"text": "📦 Stock Turnover", "callback_data": "report_stock_turnover"}],
-                [{"text": "💳 Credit List", "callback_data": "report_credits"}],
-                [{"text": "💵 Change List", "callback_data": "report_change"}],
-                [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}],
-            ]
-        }
-    elif role == "shopkeeper":
-        # Only daily, weekly, monthly + credit/change
-        kb_dict = {
-            "inline_keyboard": [
-                [{"text": "📅 Daily Sales", "callback_data": "report_daily"}],
-                [{"text": "📆 Weekly Sales", "callback_data": "report_weekly"}],
-                [{"text": "📊 Monthly Sales per Product", "callback_data": "report_monthly"}],
-                [{"text": "💳 Credit List", "callback_data": "report_credits"}],
-                [{"text": "💵 Change List", "callback_data": "report_change"}],
-                [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}],
-            ]
-        }
-    else:
-        kb_dict = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
+        for text, callback in owner_reports:
+            keyboard.append([{"text": text, "callback_data": callback}])
+    
+    # Add back button
+    keyboard.append([{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}])
+    
+    return {"inline_keyboard": keyboard}
 
-    return kb_dict
-
+    
 # -------------------- Webhook --------------------
 @router.post("/telegram/webhook")
 async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
@@ -2279,9 +1898,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                     # Create tenant schema
                     try:
-                        schema_name = f"tenant_{chat_id}"
                         print(f"🔍 DEBUG: Creating tenant schema: {schema_name}")
-                        tenant_db_url = create_tenant_db(chat_id)
+                        schema_name, _ = create_tenant_db(chat_id)
                         new_user.tenant_schema = schema_name
                         db.commit()
                         logger.info(f"✅ New owner created: {generated_username} with schema '{schema_name}'")
@@ -2345,7 +1963,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 # Get current shops to show status
                 shops = tenant_db.query(ShopORM).all()
                 has_shops = len(shops) > 0
-    
+
                 # Create dynamic menu based on whether shops exist
                 if not has_shops:
                     # No shops yet - setup first shop
@@ -2360,12 +1978,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         [{"text": "🏪 Update Main Shop", "callback_data": "update_main_shop"}],
                         [{"text": "➕ Add New Shop", "callback_data": "add_new_shop"}],
                         [{"text": "📋 View All Shops", "callback_data": "view_all_shops"}],
+                        [{"text": "👥 Manage Shop Users", "callback_data": "manage_shop_users"}],  # NEW
                         [{"text": "📊 Manage Shop Stock", "callback_data": "manage_shop_stock"}],
                         [{"text": "🔄 Set Default Shop", "callback_data": "set_default_shop"}],
                         [{"text": "📈 Shop Reports", "callback_data": "shop_reports"}],
                         [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
                     ]
-        
+
                     # Count shops and show status
                     main_shop = tenant_db.query(ShopORM).filter(ShopORM.is_main == True).first()
                     message = f"🏪 *Shop Management*\n\n"
@@ -2375,8 +1994,9 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     message += "\nSelect an option below:"
 
                 send_message(chat_id, message, {"inline_keyboard": kb_rows})
+                tenant_db.close()
                 return {"ok": True}
-
+    
             # -------------------- Setup First Shop (when no shops exist) --------------------
             elif text == "setup_first_shop" and role == "owner":
                 send_message(chat_id, "🏪 Let's set up your first shop!\n\nEnter shop name:")
@@ -2413,6 +2033,241 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "❌ No shops found. Please set up your first shop.")
     
                 return {"ok": True}
+                
+            # -------------------- Manage Shop Users --------------------
+            elif text == "manage_shop_users" and role == "owner":
+                tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                if not tenant_db:
+                    send_message(chat_id, "❌ Unable to access store database.")
+                    return {"ok": True}
+
+                shops = tenant_db.query(ShopORM).all()
+                tenant_db.close()
+    
+                if not shops:
+                    send_message(chat_id, "❌ No shops found. Please create a shop first.")
+                    return {"ok": True}
+
+                # Show shop selection for user management
+                kb_rows = []
+                for shop in shops:
+                    kb_rows.append([{"text": f"🏪 {shop.name} - Manage Users", "callback_data": f"select_shop_for_user_mgmt:{shop.shop_id}"}])
+    
+                kb_rows.append([{"text": "➕ Create New Shop User", "callback_data": "create_shop_user"}])
+                kb_rows.append([{"text": "⬅️ Back", "callback_data": "manage_shops"}])
+    
+                send_message(chat_id, "👥 *Shop User Management*\n\nSelect a shop to manage users:", {"inline_keyboard": kb_rows})
+                return {"ok": True}
+
+
+            elif text == "create_shop_user" and role == "owner":
+                # Get shops for selection
+                tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                if not tenant_db:
+                    send_message(chat_id, "❌ Unable to access store database.")
+                    return {"ok": True}
+
+                shops = tenant_db.query(ShopORM).all()
+                tenant_db.close()
+    
+                if not shops:
+                    send_message(chat_id, "❌ No shops found. Please create a shop first.")
+                    return {"ok": True}
+
+                # Create shop selection keyboard
+                kb_rows = []
+                for shop in shops:
+                    kb_rows.append([{"text": f"🏪 {shop.name}", "callback_data": f"create_user_for_shop:{shop.shop_id}"}])
+                kb_rows.append([{"text": "⬅️ Back", "callback_data": "manage_shop_users"}])
+    
+                send_message(chat_id, "🏪 Select shop for new shop user:", {"inline_keyboard": kb_rows})
+                return {"ok": True}
+
+
+            elif text.startswith("create_user_for_shop:") and role == "owner":
+                try:
+                    shop_id = int(text.split(":")[1])
+        
+                    # Get tenant session
+                    tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                    if not tenant_db:
+                        send_message(chat_id, "❌ Unable to access store database.")
+                        return {"ok": True}
+        
+                    # Create shop user
+                    result = create_shop_user(db, tenant_db, user, shop_id)
+                    tenant_db.close()
+        
+                    if result:
+                        credentials_msg = (
+                            f"✅ *Shop User Created*\n\n"
+                            f"🏪 **Shop:** {result['shop_name']}\n"
+                            f"👤 **Username:** `{result['username']}`\n"
+                            f"🔑 **Password:** `{result['password']}`\n\n"
+                            f"📝 **Instructions:**\n"
+                            f"1. Share these credentials with shopkeeper\n"
+                            f"2. They use /start in Telegram\n"
+                            f"3. Select 'I'm a Shopkeeper'\n"
+                            f"4. Enter username and password\n\n"
+                            f"⚠️ **Save this information!**"
+                        )
+                        send_message(chat_id, credentials_msg)
+                    else:
+                        send_message(chat_id, "❌ Failed to create shop user. Please try again.")
+        
+                except Exception as e:
+                    logger.error(f"❌ Error creating shop user: {e}")
+                    send_message(chat_id, "❌ Error creating shop user.")
+    
+                return {"ok": True}
+
+
+            elif text.startswith("select_shop_for_user_mgmt:") and role == "owner":
+                try:
+                    shop_id = int(text.split(":")[1])
+        
+                    # Get shop details
+                    tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                    if not tenant_db:
+                        send_message(chat_id, "❌ Unable to access store database.")
+                        return {"ok": True}
+        
+                    shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
+                    if not shop:
+                        send_message(chat_id, "❌ Shop not found.")
+                        tenant_db.close()
+                        return {"ok": True}
+        
+                    # Get existing shop users for this shop
+                    shop_users = get_shop_users(db, user.tenant_schema, shop_id)
+        
+                    tenant_db.close()
+        
+                    # Build message
+                    message = f"🏪 *{shop.name} - Shop Users*\n\n"
+        
+                    if not shop_users:
+                        message += "No shop users created yet.\n\n"
+                    else:
+                        message += f"**Existing Users ({len(shop_users)}):**\n"
+                        for i, shop_user in enumerate(shop_users, 1):
+                            message += f"{i}. `{shop_user['username']}`\n"
+                        message += "\n"
+        
+                    # Create management buttons
+                    kb_rows = [
+                        [{"text": "➕ Create New User", "callback_data": f"create_user_for_shop:{shop_id}"}],
+                        [{"text": "🔄 Reset Password", "callback_data": f"reset_user_password:{shop_id}"}],
+                        [{"text": "🗑 Delete User", "callback_data": f"delete_shop_user:{shop_id}"}],
+                        [{"text": "📋 View All Users", "callback_data": f"view_all_shop_users:{shop_id}"}],
+                        [{"text": "⬅️ Back", "callback_data": "manage_shop_users"}]
+                    ]
+        
+                    send_message(chat_id, message, {"inline_keyboard": kb_rows})
+        
+                except Exception as e:
+                    logger.error(f"❌ Error managing shop users: {e}")
+                    send_message(chat_id, "❌ Error loading shop users.")
+    
+                return {"ok": True}
+    
+    
+            elif text.startswith("reset_user_password:") and role == "owner":
+                try:
+                    shop_id = int(text.split(":")[1])
+        
+                    # Get shop users for selection
+                    shop_users = get_shop_users(db, user.tenant_schema, shop_id)
+        
+                    if not shop_users:
+                        send_message(chat_id, "❌ No shop users found for this shop.")
+                        return {"ok": True}
+        
+                    # Create user selection keyboard
+                    kb_rows = []
+                    for shop_user in shop_users:
+                        kb_rows.append([{"text": f"🔄 Reset: {shop_user['username']}", "callback_data": f"reset_password_for:{shop_user['username']}"}])
+        
+                    kb_rows.append([{"text": "⬅️ Back", "callback_data": f"select_shop_for_user_mgmt:{shop_id}"}])
+        
+                    send_message(chat_id, "👤 Select user to reset password:", {"inline_keyboard": kb_rows})
+        
+                except Exception as e:
+                    logger.error(f"❌ Error resetting password: {e}")
+                    send_message(chat_id, "❌ Error resetting password.")
+    
+                return {"ok": True}
+
+
+            elif text.startswith("reset_password_for:") and role == "owner":
+                try:
+                    username = text.split(":")[1]
+        
+                    # Reset password
+                    new_password = reset_shop_user_password(db, username)
+        
+                    if new_password:
+                        success_msg = (
+                            f"✅ *Password Reset Successful*\n\n"
+                            f"👤 **Username:** `{username}`\n"
+                            f"🔑 **New Password:** `{new_password}`\n\n"
+                            f"Share the new password with the shopkeeper."
+                        )
+                        send_message(chat_id, success_msg)
+                    else:
+                        send_message(chat_id, f"❌ Failed to reset password for {username}")
+        
+                except Exception as e:
+                    logger.error(f"❌ Error resetting password: {e}")
+                    send_message(chat_id, "❌ Error resetting password.")
+    
+                return {"ok": True}
+
+
+            elif text.startswith("delete_shop_user:") and role == "owner":
+                try:
+                    shop_id = int(text.split(":")[1])
+        
+                    # Get shop users for selection
+                    shop_users = get_shop_users(db, user.tenant_schema, shop_id)
+        
+                    if not shop_users:
+                        send_message(chat_id, "❌ No shop users found for this shop.")
+                        return {"ok": True}
+        
+                    # Create user selection keyboard
+                    kb_rows = []
+                    for shop_user in shop_users:
+                        kb_rows.append([{"text": f"🗑 Delete: {shop_user['username']}", "callback_data": f"delete_user:{shop_user['username']}"}])
+        
+                    kb_rows.append([{"text": "⬅️ Back", "callback_data": f"select_shop_for_user_mgmt:{shop_id}"}])
+        
+                    send_message(chat_id, "⚠️ Select user to DELETE (cannot be undone):", {"inline_keyboard": kb_rows})
+        
+                except Exception as e:
+                    logger.error(f"❌ Error deleting user: {e}")
+                    send_message(chat_id, "❌ Error deleting user.")
+    
+                return {"ok": True}
+
+
+            elif text.startswith("delete_user:") and role == "owner":
+                try:
+                    username = text.split(":")[1]
+        
+                    # Confirm deletion
+                    user_states[chat_id] = {
+                        "action": "confirm_delete_user",
+                        "data": {"username": username}
+                    }
+        
+                    send_message(chat_id, f"⚠️ **Confirm Deletion**\n\nDelete shop user `{username}`?\n\nType 'YES' to confirm or 'NO' to cancel:")
+        
+                except Exception as e:
+                    logger.error(f"❌ Error deleting user: {e}")
+                    send_message(chat_id, "❌ Error deleting user.")
+    
+                return {"ok": True}
     
             # -------------------- Create Shopkeeper --------------------
             elif text == "create_shopkeeper":
@@ -2424,6 +2279,412 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 send_message(chat_id, "👤 Enter a username for the new shopkeeper:")
                 return {"ok": True}
 
+            # -------------------- User Management (Owner only) --------------------
+            elif text == "manage_users" and role == "owner":
+                # Get all shops first
+                tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                if not tenant_db:
+                    send_message(chat_id, "❌ Unable to access store database.")
+                    return {"ok": True}
+    
+                shops = tenant_db.query(ShopORM).all()
+                tenant_db.close()
+    
+                if not shops:
+                    kb_rows = [
+                        [{"text": "➕ Create First Shop", "callback_data": "setup_first_shop"}],
+                        [{"text": "🔙 Back to Menu", "callback_data": "back_to_menu"}]
+                    ]
+                    send_message(chat_id, "📋 *User Management*\n\nNo shops found. Create your first shop to add users:", 
+                                {"inline_keyboard": kb_rows})
+                    return {"ok": True}
+    
+                # Create shop selection keyboard
+                kb_rows = []
+                for shop in shops:
+                    # Get user count for this shop
+                    shop_users = db.query(User).filter(
+                        User.shop_id == shop.shop_id,
+                        User.role.in_(["admin", "shopkeeper"])
+                    ).count()
+        
+                    kb_rows.append([{
+                        "text": f"🏪 {shop.name} ({shop_users} users)",
+                        "callback_data": f"manage_shop_users:{shop.shop_id}"
+                    }])
+    
+                kb_rows.append([{"text": "➕ Create New User", "callback_data": "create_user"}])
+                kb_rows.append([{"text": "🔙 Back to Menu", "callback_data": "back_to_menu"}])
+    
+                send_message(chat_id, "📋 *User Management*\n\nSelect a shop to manage users:", 
+                            {"inline_keyboard": kb_rows})
+                return {"ok": True}
+    
+            elif text.startswith("manage_shop_users:") and role == "owner":
+                try:
+                    shop_id = int(text.split(":")[1])
+        
+                    # Get shop info
+                    tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                    if not tenant_db:
+                        send_message(chat_id, "❌ Unable to access store database.")
+                        return {"ok": True}
+        
+                    shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
+                    if not shop:
+                        send_message(chat_id, "❌ Shop not found.")
+                        tenant_db.close()
+                        return {"ok": True}
+        
+                    # Get users for this shop
+                    shop_users = db.query(User).filter(
+                        User.shop_id == shop_id,
+                        User.role.in_(["admin", "shopkeeper"])
+                    ).all()
+        
+                    tenant_db.close()
+        
+                    # Build message
+                    message = f"🏪 *{shop.name} - User Management*\n\n"
+        
+                    if not shop_users:
+                        message += "No users created for this shop yet.\n\n"
+                    else:
+                        message += f"**Users ({len(shop_users)}):**\n"
+                        for i, shop_user in enumerate(shop_users, 1):
+                            role_icon = "🛡️" if shop_user.role == 'admin' else "👨‍💼"
+                            status = "✅" if shop_user.chat_id else "❌"
+                            message += f"{i}. {role_icon} `{shop_user.username}` ({shop_user.role}) {status}\n"
+                        message += "\n✅ = Telegram linked\n❌ = Not linked yet\n\n"
+        
+                    # Create management buttons
+                    kb_rows = [
+                        [{"text": "➕ Create New User", "callback_data": f"create_user_for_shop:{shop_id}"}],
+                        [{"text": "🔄 Reset Password", "callback_data": f"reset_user_password:{shop_id}"}],
+                        [{"text": "🗑 Delete User", "callback_data": f"delete_shop_user:{shop_id}"}],
+                        [{"text": "🔙 Back to Shop List", "callback_data": "manage_users"}]
+                    ]
+        
+                    send_message(chat_id, message, {"inline_keyboard": kb_rows})
+        
+                except Exception as e:
+                    logger.error(f"❌ Error managing shop users: {e}")
+                    send_message(chat_id, "❌ Error loading shop users.")
+    
+                return {"ok": True}
+    
+            elif text.startswith("create_user_for_shop:") and role == "owner":
+                try:
+                    shop_id = int(text.split(":")[1])
+        
+                    # Get shop info
+                    tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                    if not tenant_db:
+                        send_message(chat_id, "❌ Unable to access store database.")
+                        return {"ok": True}
+        
+                    shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
+                    if not shop:
+                        send_message(chat_id, "❌ Shop not found.")
+                        tenant_db.close()
+                        return {"ok": True}
+        
+                    tenant_db.close()
+        
+                    # Start user creation flow
+                    user_states[chat_id] = {
+                        "action": "create_user_for_shop",
+                        "step": 1,
+                        "data": {
+                            "shop_id": shop_id,
+                            "shop_name": shop.name
+                        }
+                    }
+        
+                    send_message(chat_id, f"👤 *Create User for {shop.name}*\n\nEnter username for the new user:")
+        
+                except Exception as e:
+                    logger.error(f"❌ Error creating user: {e}")
+                    send_message(chat_id, "❌ Error starting user creation.")
+    
+                return {"ok": True}
+    
+            elif text.startswith("reset_user_password:") and role == "owner":
+                try:
+                    shop_id = int(text.split(":")[1])
+        
+                    # Get users for this shop
+                    shop_users = db.query(User).filter(
+                        User.shop_id == shop_id,
+                        User.role.in_(["admin", "shopkeeper"])
+                    ).all()
+        
+                    if not shop_users:
+                        send_message(chat_id, "❌ No users found for this shop.")
+                        return {"ok": True}
+        
+                    # Create user selection keyboard
+                    kb_rows = []
+                    for shop_user in shop_users:
+                        role_icon = "🛡️" if shop_user.role == 'admin' else "👨‍💼"
+                        kb_rows.append([{
+                            "text": f"{role_icon} Reset: {shop_user.username} ({shop_user.role})",
+                            "callback_data": f"reset_password_for:{shop_user.username}"
+                        }])
+        
+                    kb_rows.append([{"text": "🔙 Back", "callback_data": f"manage_shop_users:{shop_id}"}])
+        
+                    send_message(chat_id, "👤 Select user to reset password:", {"inline_keyboard": kb_rows})
+        
+                except Exception as e:
+                    logger.error(f"❌ Error resetting password: {e}")
+                    send_message(chat_id, "❌ Error resetting password.")
+    
+                return {"ok": True}
+    
+            elif text.startswith("reset_password_for:") and role == "owner":
+                try:
+                    username = text.split(":")[1]
+        
+                    # Reset password
+                    from app.user_management import reset_user_password
+                    new_password = reset_user_password(username)
+        
+                    if new_password:
+                        # Get user info
+                        target_user = db.query(User).filter(User.username == username).first()
+            
+                        # Format credentials message
+                        from app.user_management import format_user_credentials_message
+                        credentials_msg = format_user_credentials_message(target_user, new_password, target_user.role)
+            
+                        send_message(chat_id, credentials_msg)
+                    else:
+                        send_message(chat_id, f"❌ Failed to reset password for {username}")
+        
+                except Exception as e:
+                    logger.error(f"❌ Error resetting password: {e}")
+                    send_message(chat_id, "❌ Error resetting password.")
+    
+                return {"ok": True}
+    
+            elif text.startswith("delete_shop_user:") and role == "owner":
+                try:
+                    shop_id = int(text.split(":")[1])
+        
+                    # Get users for this shop
+                    shop_users = db.query(User).filter(
+                        User.shop_id == shop_id,
+                        User.role.in_(["admin", "shopkeeper"])
+                    ).all()
+        
+                    if not shop_users:
+                        send_message(chat_id, "❌ No users found for this shop.")
+                        return {"ok": True}
+        
+                    # Create user selection keyboard
+                    kb_rows = []
+                    for shop_user in shop_users:
+                        role_icon = "🛡️" if shop_user.role == 'admin' else "👨‍💼"
+                        kb_rows.append([{
+                            "text": f"{role_icon} Delete: {shop_user.username} ({shop_user.role})",
+                            "callback_data": f"delete_user:{shop_user.username}"
+                        }])
+        
+                    kb_rows.append([{"text": "🔙 Back", "callback_data": f"manage_shop_users:{shop_id}"}])
+        
+                    send_message(chat_id, "⚠️ Select user to DELETE (cannot be undone):", {"inline_keyboard": kb_rows})
+        
+                except Exception as e:
+                    logger.error(f"❌ Error deleting user: {e}")
+                    send_message(chat_id, "❌ Error deleting user.")
+    
+                return {"ok": True}
+    
+            elif text.startswith("delete_user:") and role == "owner":
+                try:
+                    username = text.split(":")[1]
+        
+                    # Confirm deletion
+                    user_states[chat_id] = {
+                        "action": "confirm_delete_user",
+                        "data": {"username": username}
+                    }
+        
+                    send_message(chat_id, f"⚠️ **Confirm Deletion**\n\nDelete user `{username}`?\n\nType 'YES' to confirm or 'NO' to cancel:")
+        
+                except Exception as e:
+                    logger.error(f"❌ Error deleting user: {e}")
+                    send_message(chat_id, "❌ Error deleting user.")
+    
+                return {"ok": True}
+    
+            # -------------------- Admin User Management Callbacks --------------------
+            elif text == "manage_users_admin" and role == "admin":
+                # Get tenant session
+                tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                if not tenant_db:
+                    send_message(chat_id, "❌ Unable to access store database.")
+                    return {"ok": True}
+
+                # Get shopkeepers for this admin's shop
+                shopkeepers = db.query(User).filter(
+                    User.tenant_schema == user.tenant_schema,
+                    User.shop_id == user.shop_id,
+                    User.role == "shopkeeper",
+                    User.user_id != user.user_id  # Exclude self
+                ).all()
+
+                tenant_db.close()
+
+                # Build message
+                message = f"👥 **User Management (Admin)**\n\n"
+                message += f"🏪 Shop: {user.shop_name or f'Shop {user.shop_id}'}\n"
+                message += f"📊 Shopkeepers: {len(shopkeepers)}\n\n"
+
+                if not shopkeepers:
+                    message += "No shopkeepers assigned to your shop.\n\n"
+                else:
+                    message += "**Current Shopkeepers:**\n"
+                    for i, shopkeeper in enumerate(shopkeepers, 1):
+                        status = "✅ Linked" if shopkeeper.chat_id else "❌ Not Linked"
+                        message += f"{i}. `{shopkeeper.username}` - {status}\n"
+                    message += "\n"
+
+                # Create admin management buttons
+                kb_rows = [
+                    [{"text": "➕ Create Shopkeeper", "callback_data": "create_shopkeeper_admin"}],
+                    [{"text": "🔄 Reset Password", "callback_data": "reset_password_admin"}],
+                    [{"text": "🗑 Delete Shopkeeper", "callback_data": "delete_shopkeeper_admin"}],
+                    [{"text": "📋 View All Shopkeepers", "callback_data": "view_shopkeepers_admin"}],
+                    [{"text": "🔙 Back to Menu", "callback_data": "main_menu"}]
+                ]
+
+                send_message(chat_id, message, {"inline_keyboard": kb_rows})
+                return {"ok": True}
+
+            elif text == "create_shopkeeper_admin" and role == "admin":
+                # Start shopkeeper creation flow
+                user_states[chat_id] = {
+                    "action": "create_shopkeeper_admin",
+                    "step": 1,
+                    "data": {
+                        "shop_id": user.shop_id,
+                        "shop_name": user.shop_name
+                    }
+                }
+                send_message(chat_id, "👤 Enter username for new shopkeeper:")
+                return {"ok": True}
+
+            elif text == "reset_password_admin" and role == "admin":
+                # Get shopkeepers for selection
+                shopkeepers = db.query(User).filter(
+                    User.tenant_schema == user.tenant_schema,
+                    User.shop_id == user.shop_id,
+                    User.role == "shopkeeper"
+                ).all()
+
+                if not shopkeepers:
+                    send_message(chat_id, "❌ No shopkeepers to reset password.")
+                    return {"ok": True}
+
+                # Create selection keyboard
+                kb_rows = []
+                for shopkeeper in shopkeepers:
+                    kb_rows.append([{
+                        "text": f"🔄 {shopkeeper.username}",
+                        "callback_data": f"reset_password_admin_user:{shopkeeper.username}"
+                    }])
+    
+                kb_rows.append([{"text": "🔙 Back", "callback_data": "manage_users_admin"}])
+    
+                send_message(chat_id, "👤 Select shopkeeper to reset password:", {"inline_keyboard": kb_rows})
+                return {"ok": True}
+
+            elif text.startswith("reset_password_admin_user:") and role == "admin":
+                username = text.split(":")[1]
+    
+                # Reset password
+                from app.user_management import reset_user_password
+                new_password = reset_user_password(username)
+    
+                if new_password:
+                    # Get user info
+                    target_user = db.query(User).filter(
+                        User.username == username,
+                        User.tenant_schema == user.tenant_schema,
+                        User.shop_id == user.shop_id
+                    ).first()
+        
+                    if target_user:
+                        success_msg = f"✅ **Password Reset Successful**\n\n"
+                        success_msg += f"👤 **Username:** `{target_user.username}`\n"
+                        success_msg += f"🔑 **New Password:** `{new_password}`\n\n"
+                        success_msg += f"Share the new password with the shopkeeper."
+            
+                        send_message(chat_id, success_msg)
+                    else:
+                        send_message(chat_id, f"❌ Shopkeeper {username} not found in your shop.")
+                else:
+                    send_message(chat_id, f"❌ Failed to reset password for {username}")
+    
+                return {"ok": True}
+    
+            elif text == "delete_shopkeeper_admin" and role == "admin":
+                # Get shopkeepers for deletion
+                shopkeepers = db.query(User).filter(
+                    User.tenant_schema == user.tenant_schema,
+                    User.shop_id == user.shop_id,
+                    User.role == "shopkeeper"
+                ).all()
+
+                if not shopkeepers:
+                    send_message(chat_id, "❌ No shopkeepers to delete.")
+                    return {"ok": True}
+
+                kb_rows = []
+                for shopkeeper in shopkeepers:
+                    kb_rows.append([{
+                        "text": f"🗑 {shopkeeper.username}",
+                        "callback_data": f"delete_shopkeeper_admin_user:{shopkeeper.username}"
+                    }])
+    
+                kb_rows.append([{"text": "🔙 Back", "callback_data": "manage_users_admin"}])
+    
+                send_message(chat_id, "⚠️ Select shopkeeper to DELETE:", {"inline_keyboard": kb_rows})
+                return {"ok": True}
+
+            elif text.startswith("delete_shopkeeper_admin_user:") and role == "admin":
+                username = text.split(":")[1]
+    
+                # Confirm deletion
+                user_states[chat_id] = {
+                    "action": "confirm_delete_shopkeeper_admin",
+                    "data": {"username": username}
+                }
+    
+                send_message(chat_id, f"⚠️ **Confirm Deletion**\n\nDelete shopkeeper `{username}`?\n\nType 'YES' to confirm or 'NO' to cancel:")
+                return {"ok": True}
+
+                message = f"👥 **Shopkeepers - {user.shop_name}**\n\n"
+    
+                if not shopkeepers:
+                    message += "No shopkeepers in your shop.\n"
+                else:
+                    for i, shopkeeper in enumerate(shopkeepers, 1):
+                        created = shopkeeper.created_at.strftime("%Y-%m-%d") if shopkeeper.created_at else "Unknown"
+                        status = "✅ Active" if shopkeeper.is_active else "❌ Inactive"
+                        telegram = "📱 Linked" if shopkeeper.chat_id else "❌ Not Linked"
+            
+                        message += f"{i}. **{shopkeeper.username}**\n"
+                        message += f"   👤 Name: {shopkeeper.name}\n"
+                        message += f"   📅 Created: {created}\n"
+                        message += f"   {status} | {telegram}\n\n"
+
+                kb_rows = [[{"text": "🔙 Back", "callback_data": "manage_users_admin"}]]
+                send_message(chat_id, message, {"inline_keyboard": kb_rows})
+                return {"ok": True}
+    
             # -------------------- Add Product --------------------
             elif text == "add_product":
                 send_message(chat_id, "➕ Add a new product! 🛒\n\nEnter product name:")
@@ -2461,7 +2722,72 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 except (ValueError, IndexError):
                     send_message(chat_id, "❌ Invalid approval ID.")
                 return {"ok": True}  # ← ADD THIS LINE
+            
+            # ==================== INLINE CONFIRMATION HANDLERS ====================
+            
+            # ✅ Handle delete confirmation from inline buttons
+            elif text.startswith("confirm_delete_"):
+                confirmation = text.split("_")[-1]  # "yes" or "no"
                 
+                if confirmation == "yes":
+                    # Get current state to find username
+                    current_state = user_states.get(chat_id, {})
+                    username = current_state.get("data", {}).get("username")
+                    
+                    if not username:
+                        send_message(chat_id, "❌ Error: No user selected for deletion.")
+                        user_states.pop(chat_id, None)
+                        return {"ok": True}
+                    
+                    # Get admin user to verify shop assignment
+                    admin_user = db.query(User).filter(User.chat_id == chat_id).first()
+                    if not admin_user or admin_user.role != 'admin':
+                        send_message(chat_id, "❌ Unauthorized: Admin access required.")
+                        user_states.pop(chat_id, None)
+                        return {"ok": True}
+                    
+                    try:
+                        # Find and delete the shopkeeper
+                        shopkeeper = db.query(User).filter(
+                            User.username == username,
+                            User.tenant_schema == admin_user.tenant_schema,
+                            User.shop_id == admin_user.shop_id,
+                            User.role == 'shopkeeper'
+                        ).first()
+                        
+                        if shopkeeper:
+                            # Delete the shopkeeper
+                            db.delete(shopkeeper)
+                            db.commit()
+                            
+                            send_message(chat_id, f"✅ Shopkeeper `{username}` has been successfully deleted!")
+                        else:
+                            send_message(chat_id, f"❌ Shopkeeper `{username}` not found or doesn't belong to your shop.")
+                    
+                    except Exception as e:
+                        db.rollback()
+                        logging.error(f"Error deleting shopkeeper: {e}")
+                        send_message(chat_id, f"❌ An error occurred while deleting the shopkeeper: {e}")
+                
+                else:  # "no"
+                    send_message(chat_id, "✅ Deletion cancelled. The shopkeeper was not deleted.")
+                
+                # Clear state and show admin menu
+                user_states.pop(chat_id, None)
+                
+                # Show admin user management menu
+                kb_rows = [
+                    [{"text": "➕ Create Shopkeeper", "callback_data": "create_shopkeeper_admin"}],
+                    [{"text": "🔄 Reset Password", "callback_data": "reset_password_admin"}],
+                    [{"text": "🗑 Delete Shopkeeper", "callback_data": "delete_shopkeeper_admin"}],
+                    [{"text": "📋 View All Shopkeepers", "callback_data": "view_shopkeepers_admin"}],
+                    [{"text": "🔙 Back to Menu", "callback_data": "main_menu"}]
+                ]
+                
+                send_message(chat_id, "👥 User Management:", {"inline_keyboard": kb_rows})
+                return {"ok": True}
+            
+            # ==================== END INLINE CONFIRMATION HANDLERS ====================    
             
             # -------------------- Quick Stock Update --------------------
             elif text == "quick_stock_update":
@@ -2502,7 +2828,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             elif text == "cancel_quick_stock":
                 user_states.pop(chat_id, None)
                 send_message(chat_id, "❌ Quick stock update cancelled.")
-                kb = main_menu(user.role)
+                from app.user_management import get_role_based_menu
+                kb = get_role_based_menu(user.role)
                 send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                 return {"ok": True}
                     
@@ -2534,7 +2861,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 user_states[chat_id] = {"action": "add_shop", "step": 1, "data": {}}
                 send_message(chat_id, "🏪 Enter name for new shop:")
                 return {"ok": True}
-
+    
             elif text == "view_all_shops":
                 tenant_db = get_tenant_session(user.tenant_schema, chat_id)
                 if not tenant_db:
@@ -2563,6 +2890,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 send_message(chat_id, shop_list, {"inline_keyboard": kb_rows})
                 return {"ok": True}
 
+            
             # -------------------- Shop Stock Management --------------------
             elif text == "add_shop_stock":
                 user_states[chat_id] = {"action": "add_shop_stock", "step": 1, "data": {}}
@@ -2753,9 +3081,17 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "⚠️ Cannot record sale: tenant DB unavailable.")
                     return {"ok": True}
 
-                # Get available shops
-                shops = tenant_db.query(ShopORM).all()
-    
+                # ✅ UPDATED: Get shops based on user role
+                if user.role == "owner":
+                    # Owner can see all shops
+                    shops = tenant_db.query(ShopORM).all()
+                elif user.role in ["admin", "shopkeeper"]:
+                    # Admin/shopkeeper can only see their assigned shop
+                    shops = tenant_db.query(ShopORM).filter(ShopORM.shop_id == user.shop_id).all()
+                else:
+                    send_message(chat_id, "❌ Invalid role.")
+                    return {"ok": True}
+
                 if not shops:
                     send_message(chat_id, "❌ No shops found. Please set up shops first in 'Manage Shops'.")
                     return {"ok": True}
@@ -2765,7 +3101,10 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     user_states[chat_id] = {
                         "action": "awaiting_sale", 
                         "step": 1, 
-                        "data": {"selected_shop_id": shops[0].shop_id}
+                        "data": {
+                            "selected_shop_id": shops[0].shop_id,
+                            "selected_shop_name": shops[0].name
+                        }
                     }
                     send_message(chat_id, f"🏪 Shop: {shops[0].name}\n💰 Record a new sale!\nEnter product name:")
                 else:
@@ -2776,10 +3115,10 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             "text": f"🏪 {shop.name} {'⭐' if shop.is_main else ''}",
                             "callback_data": f"select_shop_for_sale:{shop.shop_id}"
                         }])
-        
+    
                     send_message(chat_id, "🏪 Select shop for sale:", {"inline_keyboard": kb_rows})
                 return {"ok": True}
-
+    
             # -------------------- Shop Selection for Sale --------------------
             elif text.startswith("select_shop_for_sale:"):
                 try:
@@ -2953,7 +3292,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
     
                 user_states.pop(chat_id, None)
                 send_message(chat_id, "❌ Sale cancelled.")
-                kb = main_menu(user.role)
+                from app.user_management import get_role_based_menu
+                kb = get_role_based_menu(user.role)
                 send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                 return {"ok": True}
 
@@ -3225,59 +3565,113 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     
             # -------------------- View Stock --------------------
             elif text == "view_stock":
-                # 🔍 ADD DEBUG INFO
-                print(f"🔍 VIEW STOCK DEBUG: User {user.username} (role: {user.role})")
-                print(f"🔍 VIEW STOCK DEBUG: Tenant schema: {user.tenant_schema}")
-                print(f"🔍 VIEW STOCK DEBUG: Chat ID: {chat_id}")
-    
                 tenant_db = get_tenant_session(user.tenant_schema, chat_id)
                 if not tenant_db:
-                    print(f"❌ VIEW STOCK DEBUG: No tenant DB for schema: {user.tenant_schema}")
                     send_message(chat_id, "⚠️ Cannot view stock: tenant DB unavailable.")
                     return {"ok": True}
     
-                # 🔍 Check if products exist
-                product_count = tenant_db.query(ProductORM).count()
-                print(f"🔍 VIEW STOCK DEBUG: Found {product_count} products in schema {user.tenant_schema}")
+                # ✅ UPDATED: Filter by shop if user is not owner
+                if user.role in ["admin", "shopkeeper"]:
+                    # Get products with stock for this specific shop
+                    products = tenant_db.query(ProductORM).all()
+        
+                    stock_list = "📦 *Stock for your shop*\n\n"
+                    for product in products:
+                        # Get shop-specific stock
+                        shop_stock = tenant_db.query(ProductShopStockORM).filter(
+                            ProductShopStockORM.product_id == product.product_id,
+                            ProductShopStockORM.shop_id == user.shop_id
+                        ).first()
+            
+                        stock_qty = shop_stock.stock if shop_stock else 0
+                        status = "🟢" if stock_qty > 10 else "🟡" if stock_qty > 0 else "🔴"
+            
+                        stock_list += f"{status} *{product.name}*\n"
+                        stock_list += f"  📊 Stock: {stock_qty} {product.unit_type}\n"
+                        stock_list += f"  💰 Price: ${product.price}\n\n"
+                else:
+                    # Owner sees all shops stock
+                    stock_list = get_stock_list(tenant_db)
     
-                stock_list = get_stock_list(tenant_db)
                 kb_dict = {"inline_keyboard": [[{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]]}
                 send_message(chat_id, stock_list, kb_dict)
                 return {"ok": True}
-    
+        
             # -------------------- Reports Menu --------------------
             elif text == "report_menu":
                 kb_dict = report_menu_keyboard(role)
                 send_message(chat_id, "📊 Select a report:", kb_dict)
                 return {"ok": True}
 
-            # -------------------- Report Callbacks --------------------
+            # -------------------- Report Callbacks (UPDATED FOR MULTI-SHOP) --------------------
             elif text in ["report_daily", "report_weekly", "report_monthly", "report_low_stock", 
                           "report_top_products", "report_aov", "report_stock_turnover", 
-                          "report_credits", "report_change"]:
-    
-                logger.info(f"🎯 Processing callback: {text} from chat_id={chat_id}")
-    
+                          "report_credits", "report_change", "report_payment_summary"]:  # ✅ Added payment_summary
+
+                logger.info(f"🎯 Processing callback: {text} from chat_id={chat_id}, role={user.role}")
+
                 tenant_db = get_tenant_session(user.tenant_schema, chat_id)
                 if tenant_db is None:
                     send_message(chat_id, "❌ Unable to access tenant database.")
                     return {"ok": True}
-    
-                try:
-                    # Use your existing generate_report function
-                    report = generate_report(tenant_db, text)
-                    send_message(chat_id, report)
-                except Exception as e:
-                    logger.error(f"❌ {text} failed: {e}")
-                    send_message(chat_id, f"❌ Failed to generate {text.replace('_', ' ')}.")
-    
-                return {"ok": True}
 
+                try:
+                    # ✅ UPDATED: Determine shop information based on user role
+                    shop_id = None
+                    shop_name = None
+        
+                    if user.role in ["admin", "shopkeeper"]:
+                        # Admin/Shopkeeper can only see reports for their assigned shop
+                        shop_id = user.shop_id
+                        shop_name = user.shop_name or f"Shop {shop_id}"
+            
+                        # Verify shop assignment exists
+                        if not shop_id:
+                            send_message(chat_id, "❌ You are not assigned to any shop. Contact the owner.")
+                            return {"ok": True}
+            
+                        # Verify shop exists in tenant database
+                        shop_exists = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
+                        if not shop_exists:
+                            send_message(chat_id, f"❌ Shop {shop_name} not found in database.")
+                            return {"ok": True}
+            
+                        logger.info(f"📊 {user.role.title()} '{user.username}' generating {text} for shop {shop_name} (ID: {shop_id})")
+        
+                    else:
+                        # Owner can see all shops (no shop filtering)
+                        logger.info(f"📊 Owner '{user.username}' generating {text} for all shops")
+
+                    # ✅ UPDATED: Generate report with shop filtering
+                    report = generate_report(tenant_db, text, shop_id=shop_id, shop_name=shop_name)
+        
+                    # Send the report
+                    send_message(chat_id, report)
+        
+                    # Log successful generation
+                    logger.info(f"✅ Report '{text}' generated successfully for chat_id={chat_id}")
+        
+                except Exception as e:
+                    logger.error(f"❌ {text} failed for chat_id={chat_id}: {e}")
+                    import traceback
+                    traceback.print_exc()
+        
+                    error_msg = f"❌ Failed to generate {text.replace('_', ' ')}."
+                    if "division by zero" in str(e):
+                        error_msg += "\n\nℹ️ No data available for this report period."
+                    elif "relation" in str(e) and "does not exist" in str(e):
+                        error_msg += "\n\nℹ️ Database tables not initialized. Please contact support."
+        
+                    send_message(chat_id, error_msg)
+
+                return {"ok": True}
+    
             # Handle back to menu
             elif text == "back_to_menu":
                 logger.info(f"🎯 Processing callback: back_to_menu from chat_id={chat_id}")
     
-                kb = main_menu(user.role)
+                from app.user_management import get_role_based_menu
+                kb = get_role_based_menu(user.role)
                 send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                 return {"ok": True}
     
@@ -3329,39 +3723,44 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 user = db.query(User).filter(User.chat_id == chat_id).first()
 
                 if user:
-                    # ✅ EXISTING USER - Direct to password prompt
-                    if user.role == "owner":
-                        send_message(chat_id, "🔐 Welcome back, Owner! Please enter your password:")
-                    else:  # shopkeeper
-                        send_message(chat_id, "🔐 Welcome back! Please enter your password:")
+                    # ✅ CASE: User already exists and chat_id is linked
+                    role_display = {
+                        "owner": "👑 Owner",
+                        "admin": "🛡️ Admin", 
+                        "shopkeeper": "👨‍💼 Shopkeeper"
+                    }
         
-                    user_states[chat_id] = {"action": "login", "step": 1, "data": {}}
-
-                    # Ensure tenant schema for owners
-                    if user.role == "owner":
-                        try:
-                            schema_name = f"tenant_{chat_id}"
-                            tenant_db_url = create_tenant_db(chat_id)
-                            user.tenant_schema = schema_name
-                            db.commit()
-                            logger.info(f"✅ Tenant schema ensured for {user.username}: {schema_name}")
-                        except Exception as e:
-                            logger.error(f"❌ Failed to ensure tenant schema for {user.username}: {e}")
+                    welcome_msg = f"👋 Welcome back, {user.name}!\n"
+                    welcome_msg += f"👤 Role: {role_display.get(user.role, user.role)}"
+        
+                    if user.role in ["admin", "shopkeeper"] and user.shop_name:
+                        welcome_msg += f"\n🏪 Shop: {user.shop_name}"
+        
+                    # Show role-based menu immediately
+                    from app.user_management import get_role_based_menu
+                    kb = get_role_based_menu(user.role)
+                    send_message(chat_id, welcome_msg, keyboard=kb)
 
                 else:
-                    # ✅ NEW USER - Ask for role selection
+                    # ✅ CASE: New user OR staff without linked chat_id
+                    # Fresh start - ask for role
                     kb_rows = [
-                        [{"text": "🏪 I'm a Shop Owner", "callback_data": "user_type:owner"}],
-                        [{"text": "👤 I'm a Shopkeeper", "callback_data": "user_type:shopkeeper"}]
+                        [{"text": "👑 I'm a Shop Owner", "callback_data": "user_type:owner"}],
+                        [{"text": "👤 I'm a Shop User", "callback_data": "user_type:shop_user"}]
                     ]
-                    send_message(chat_id, "👋 Welcome! Please select your role:", {"inline_keyboard": kb_rows})
+                    send_message(chat_id, 
+                                "👋 Welcome! Please select your role:\n\n"
+                                "• 👑 **Shop Owner** - Create your own store\n"
+                                "• 👤 **Shop User** - Already have credentials (Admin/Shopkeeper)", 
+                                {"inline_keyboard": kb_rows})
 
                 return {"ok": True}
-
+    
+        
             # -------------------- User Type Selection Callback --------------------
             elif text.startswith("user_type:"):
                 user_type = text.split(":")[1]
-    
+
                 if user_type == "owner":
                     # Create new owner with generated credentials
                     generated_username = create_username(f"Owner{chat_id}")
@@ -3380,30 +3779,38 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     db.commit()
                     db.refresh(new_user)
 
-                    # Create tenant schema
+                    # ✅ UPDATED: Create tenant schema WITHOUT default users
                     try:
-                        schema_name = f"tenant_{chat_id}"
-                        tenant_db_url = create_tenant_db(chat_id)
+                        # ✅ Updated: create_tenant_db returns only owner credentials now
+                        schema_name, credentials_dict = create_tenant_db(chat_id)
                         new_user.tenant_schema = schema_name
+                        # ❌ REMOVE: new_user.shop_id = 1  # No default shop ID yet
                         db.commit()
                         logger.info(f"✅ New owner created: {generated_username} with schema '{schema_name}'")
+
+                        # ✅ Send ONLY owner credentials
+                        send_owner_credentials(chat_id, generated_username, generated_password)
+
+                        # ✅ REMOVED: Don't send default users credentials (they don't exist yet)
+                        # Default users will be created when owner creates their first shop
+
                     except Exception as e:
                         logger.error(f"❌ Failed to create tenant schema: {e}")
                         send_message(chat_id, "❌ Could not initialize store database.")
                         return {"ok": True}
 
-                    # Send credentials and start shop setup
-                    send_owner_credentials(chat_id, generated_username, generated_password)
-                    send_message(chat_id, "🏪 Let's set up your shop! Please enter the shop name:")
-                    user_states[chat_id] = {"action": "setup_shop", "step": 1, "data": {}}
+                    # ✅ Start FIRST shop setup (not just any shop)
+                    send_message(chat_id, "🏪 Let's set up your FIRST shop! Please enter the shop name:")
+                    user_states[chat_id] = {"action": "setup_first_shop", "step": 1, "data": {}}
 
-                else:  # shopkeeper
-                    # Step-by-step shopkeeper login
+                else:  # shop_user (admin or shopkeeper)
+                    # Step-by-step shop user login
                     send_message(chat_id, "👤 Please enter your username:")
-                    user_states[chat_id] = {"action": "shopkeeper_login", "step": 1, "data": {}}
-    
-                return {"ok": True}
+                    user_states[chat_id] = {"action": "shop_user_login", "step": 1, "data": {}}
 
+                return {"ok": True}
+    
+    
             # -------------------- Login Flow --------------------
             if chat_id in user_states:
                 state = user_states[chat_id]
@@ -3411,120 +3818,102 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 step = state.get("step", 1)
                 data = state.get("data", {})
 
-                # ✅ REGULAR LOGIN (for existing users - both owners and shopkeepers)
-                if action == "login" and step == 1:
-                    entered_password = text.strip()
-                    user = db.query(User).filter(User.chat_id == chat_id).first()
-
-                    if not user:
-                        send_message(chat_id, "❌ User not found. Please try /start again.")
-                        user_states.pop(chat_id, None)
-                        return {"ok": True}
-
-                    # Verify password
-                    if not verify_password(entered_password, user.password_hash):
-                        send_message(chat_id, "❌ Incorrect password. Please try again:")
-                        return {"ok": True}
-
-                    # ✅ Login successful - NO schema changes for anyone
-                    send_message(chat_id, f"✅ Login successful! Welcome, {user.name}.")
-                    user_states.pop(chat_id, None)
-
-                    # Verify tenant connection using EXISTING schema
-                    try:
-                        if not user.tenant_schema:
-                            send_message(chat_id, "❌ User not properly linked to a store. Contact support.")
-                            return {"ok": True}
-            
-                        tenant_db = get_tenant_session(user.tenant_schema, chat_id)
-                        if tenant_db is None:
-                            logger.error(f"❌ Tenant DB connection failed for {user.username}")
-                            send_message(chat_id, "❌ Unable to access store database. Please contact support.")
-                            return {"ok": True}
-        
-                        logger.info(f"✅ Tenant DB connection successful for {user.username}")
-
-                    except Exception as e:
-                        logger.error(f"❌ Tenant setup failed for {user.username}: {e}")
-                        send_message(chat_id, "❌ Database initialization failed. Please contact support.")
-                        return {"ok": True}
-
-                    # Show appropriate menu
-                    kb = main_menu(user.role)
-                    send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
-                    return {"ok": True}
-    
-                # ✅ SHOPKEEPER LOGIN (for new shopkeepers - first time linking chat_id)
-                elif action == "shopkeeper_login":
+                # ✅ SHOP USER LOGIN (for admin/shopkeeper users - first time linking chat_id)
+                elif action == "shop_user_login":
                     if step == 1:  # Enter Username
                         username = text.strip()
                         if not username:
                             send_message(chat_id, "❌ Username cannot be empty. Please enter your username:")
                             return {"ok": True}
-            
-                        # Check if username exists and is a shopkeeper
-                        candidate = db.query(User).filter(User.username == username, User.role == "shopkeeper").first()
-            
+
+                        # Check if username exists and is NOT an owner (admin or shopkeeper only)
+                        candidate = db.query(User).filter(
+                            User.username == username,
+                            User.role.in_(["admin", "shopkeeper"])  # Only allow admin/shopkeeper
+                        ).first()
+
                         if not candidate:
-                            send_message(chat_id, "❌ Username not found or not a shopkeeper. Please try again:")
+                            send_message(chat_id, "❌ Username not found or invalid user type. Please try again:")
                             return {"ok": True}
-            
+
                         # Store username and move to password step
                         data["username"] = username
                         data["candidate_user_id"] = candidate.user_id
-                        user_states[chat_id] = {"action": "shopkeeper_login", "step": 2, "data": data}
+                        user_states[chat_id] = {"action": "shop_user_login", "step": 2, "data": data}
                         send_message(chat_id, "🔐 Please enter your password:")
-            
-                    # (password verification)
+
                     elif step == 2:  # Enter Password
                         password = text.strip()
                         if not password:
                             send_message(chat_id, "❌ Password cannot be empty. Please enter your password:")
                             return {"ok": True}
-    
+
                         # Get the candidate user
                         candidate = db.query(User).filter(User.user_id == data["candidate_user_id"]).first()
-    
+
                         if not candidate:
                             send_message(chat_id, "❌ User not found. Please start over with /start")
                             user_states.pop(chat_id, None)
                             return {"ok": True}
-    
+
                         # Verify password
                         if not verify_password(password, candidate.password_hash):
                             send_message(chat_id, "❌ Incorrect password. Please try again:")
                             return {"ok": True}
-    
-                        # ✅ ONLY update chat_id - preserve everything else
+
+                        # ✅ Login successful - link Telegram chat_id
                         candidate.chat_id = chat_id
                         db.commit()
-    
-                        send_message(chat_id, f"✅ Login successful! Welcome, {candidate.name}.")
+
+                        # ✅ UPDATED: Welcome message with shop context
+                        role_display = {
+                            "admin": "🛡️ Admin (Full Access)",
+                            "shopkeeper": "👨‍💼 Shopkeeper (Limited Access)"
+                        }
+                        welcome_msg = f"✅ Login successful! Welcome, {candidate.name}.\n"
+                        welcome_msg += f"👤 Role: {role_display.get(candidate.role, candidate.role)}"
+        
+                        # Add shop info if available
+                        if candidate.shop_name:
+                            welcome_msg += f"\n🏪 Shop: {candidate.shop_name}"
+        
+                        send_message(chat_id, welcome_msg)
                         user_states.pop(chat_id, None)
-    
-                        # Verify tenant connection using EXISTING tenant_schema
+
+                        # Verify tenant connection
                         try:
                             if not candidate.tenant_schema:
-                                send_message(chat_id, "❌ Shopkeeper not properly linked to a store. Contact the owner.")
+                                send_message(chat_id, "❌ User not properly linked to a store. Contact the owner.")
                                 return {"ok": True}
-            
+
                             tenant_db = get_tenant_session(candidate.tenant_schema, chat_id)
                             if tenant_db is None:
                                 send_message(chat_id, "❌ Unable to access store database. Contact the store owner.")
                                 return {"ok": True}
+    
+                            # ✅ UPDATED: Get shop name from candidate (already has shop_name field)
+                            if candidate.shop_name:
+                                # Send notification about shop assignment
+                                from app.telegram_notifications import notify_user_assigned_to_shop
+                                notify_user_assigned_to_shop(chat_id, candidate.shop_name, candidate.role)
+            
+                            tenant_db.close()
+    
                         except Exception as e:
                             logger.error(f"❌ Tenant connection failed: {e}")
                             send_message(chat_id, "❌ Database access failed. Contact the store owner.")
                             return {"ok": True}
-    
-                        # Show shopkeeper menu
-                        kb = main_menu(candidate.role)
-                        send_message(chat_id, "🏠 Shopkeeper Menu:", keyboard=kb)
-            
+
+                        # Show role-based menu
+                        from app.user_management import get_role_based_menu
+                        kb = get_role_based_menu(candidate.role)
+                        send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+
                     return {"ok": True}
-                
+    
+        
                 # -------------------- Unified Shop Setup/Update (Owner only) --------------------
-                elif action == "setup_shop" and user.role == "owner":
+                elif action == "setup_shop" and user.role == "owner":  # CHANGED: "owner" only, not "owner, admin"
                     if step == 1:  # Shop Name
                         shop_name = text.strip()
                         if not shop_name:
@@ -3558,15 +3947,16 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             existing_shops = tenant_db.query(ShopORM).count()
                             is_main = existing_shops == 0 or data.get("is_first_shop", False)
 
-                            new_shop = ShopORM(
-                                name=data["name"],
-                                location=data.get("location", ""),
-                                contact=data.get("contact", ""),
-                                is_main=is_main
-                            )
-                            tenant_db.add(new_shop)
-                            tenant_db.commit()
-                            tenant_db.refresh(new_shop)
+                            # ✅ UPDATED: Use tenant_db helpers for shop creation
+                            if is_main:
+                                new_shop = create_initial_shop(tenant_db, data["name"], data.get("location", ""), data.get("contact", ""))
+                            else:
+                                new_shop = create_additional_shop(tenant_db, data["name"], data.get("location", ""), data.get("contact", ""))
+
+                            if not new_shop:
+                                send_message(chat_id, "❌ Failed to create shop. Please try again.")
+                                user_states.pop(chat_id, None)
+                                return {"ok": True}
 
                             success_msg = f"✅ Shop {'created' if is_main else 'added'} successfully!\n\n"
                             success_msg += f"🏪 *{new_shop.name}*\n"
@@ -3577,6 +3967,42 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             if new_shop.is_main:
                                 success_msg += f"⭐ *Set as Main Store*\n"
 
+                            # ✅ Create shop-specific users (ONLY owner can create default users)
+                            credentials = create_shop_users(chat_id, new_shop.shop_id, new_shop.name)
+            
+                            if credentials:
+                                # Send credentials via notifications
+                                from app.telegram_notifications import send_new_user_credentials
+                
+                                # Send admin credentials
+                                admin_data = credentials.get("admin", {})
+                                if admin_data:
+                                    send_new_user_credentials(
+                                        chat_id, 
+                                        "admin", 
+                                        admin_data["username"], 
+                                        admin_data["password"], 
+                                        admin_data["email"],
+                                        new_shop.name
+                                    )
+                
+                                # Send shopkeeper credentials  
+                                shopkeeper_data = credentials.get("shopkeeper", {})
+                                if shopkeeper_data:
+                                    send_new_user_credentials(
+                                        chat_id,
+                                        "shopkeeper",
+                                        shopkeeper_data["username"],
+                                        shopkeeper_data["password"],
+                                        shopkeeper_data["email"],
+                                        new_shop.name
+                                    )
+                
+                                success_msg += f"\n👥 *Default users created for this shop!*\n"
+                                success_msg += f"Check messages above for credentials to share with staff."
+                            else:
+                                success_msg += f"\n⚠️ Could not create default users. You can create them later via 'Manage Users'."
+
                             send_message(chat_id, success_msg)
 
                         except Exception as e:
@@ -3585,13 +4011,15 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                         # Clear state and return to menu
                         user_states.pop(chat_id, None)
-                        kb = main_menu(user.role)
+                        from app.user_management import get_role_based_menu
+                        kb = get_role_based_menu(user.role)
                         send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
 
                     return {"ok": True}
+    
 
-                # -------------------- Update Existing Shop --------------------
-                elif action == "update_existing_shop" and user.role == "owner":
+                # -------------------- Update Existing Shop (Owner only) --------------------
+                elif action == "update_existing_shop" and user.role == "owner":  # CHANGED: owner only
                     tenant_db = get_tenant_session(user.tenant_schema, chat_id)
                     if not tenant_db:
                         send_message(chat_id, "❌ Unable to access database.")
@@ -3643,70 +4071,110 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
         
                         # Clear state and return to menu
                         user_states.pop(chat_id, None)
-                        kb = main_menu(user.role)
+                        from app.user_management import get_role_based_menu
+                        kb = get_role_based_menu(user.role)
                         send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
 
                     return {"ok": True}
-    
-                # -------------------- Shopkeeper Creation / Management --------------------
-                elif action == "create_shopkeeper" and user.role == "owner":
-                    if step == 1:  # Enter Shopkeeper Name
-                        shopkeeper_name = text.strip()
-                        if shopkeeper_name:
-                            data["name"] = shopkeeper_name
-                            user_states[chat_id] = {"action": action, "step": 2, "data": data}
-                            send_message(chat_id, "👤 Enter shopkeeper phone number or email:")
-                        else:
-                            send_message(chat_id, "❌ Name cannot be empty. Enter shopkeeper name:")
 
-                    elif step == 2:  # Enter Shopkeeper Contact
-                        contact = text.strip()
-                        if not contact:
-                            send_message(chat_id, "❌ Contact cannot be empty. Enter shopkeeper phone or email:")
-                            return {"ok": False}
-
-                        data["contact"] = contact
-
-                        # Generate Credentials
-                        username = create_username(f"SK{int(time.time())}")
-                        password = generate_password()
-                        password_hash = hash_password(password)
-
-                        # Save Shopkeeper (using tenant_schema for relationship inference)
-                        new_sk = User(
-                            name=data["name"],
-                            username=username,
-                            password_hash=password_hash,
-                            email=contact if "@" in contact else None,
-                            chat_id=None,  # will link on Telegram login
-                            role="shopkeeper",
-                            tenant_schema=user.tenant_schema  # ✅ Shopkeepers share owner's tenant schema
-                        )
-                        db.add(new_sk)
-                        db.commit()
-                        db.refresh(new_sk)
-
-                        # Notify Owner
-                        send_message(
-                            chat_id,
-                            f"✅ Shopkeeper created successfully!\n\n"
-                            f"👤 Name: {data['name']}\n"
-                            f"🔑 Username: {username}\n"
-                            f"🔑 Password: {password}\n"
-                            f"📞 Contact: {contact}\n"
-                            f"🏪 Tenant Schema: {user.tenant_schema}\n\n"
-                            f"Share these credentials with the shopkeeper for login."
-                        )
-
-                        # Reset & Show Menu
-                        user_states.pop(chat_id, None)
-                        kb_dict = main_menu(user.role)
-                        send_message(chat_id, "🏠 Main Menu:", kb_dict)
-                        return {"ok": True}
+                # -------------------- User Creation Flow (Owner/Admin only) --------------------
+                elif action == "create_user" and user.role in ["owner", "admin"]:
+                    if step == 1:  # Select Role
+                        role_selection = text.strip().lower()
         
+                        # ✅ RESTRICTION: Admin can only create shopkeepers
+                        if user.role == "admin" and role_selection != "shopkeeper":
+                            send_message(chat_id, "❌ Admins can only create shopkeepers, not other admins.")
+                            user_states.pop(chat_id, None)
+                            return {"ok": True}
+            
+                        if role_selection not in ["admin", "shopkeeper"]:
+                            send_message(chat_id, "❌ Please select a valid role: 'admin' or 'shopkeeper'")
+                            return {"ok": True}
+                    
+                        data["role"] = role_selection
+                        user_states[chat_id] = {"action": action, "step": 2, "data": data}
+        
+                        # Get shops for selection
+                        tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                        if not tenant_db:
+                            send_message(chat_id, "❌ Unable to access store database.")
+                            user_states.pop(chat_id, None)
+                            return {"ok": True}
 
-                # -------------------- Add Shop Flow --------------------
-                elif action == "add_shop" and user.role == "owner":
+                        # ✅ DIFFERENT LOGIC FOR ADMIN vs OWNER
+                        if user.role == "admin":
+                            # Admin can only create users for their own shop
+                            shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == user.shop_id).first()
+                            if not shop:
+                                send_message(chat_id, "❌ You are not assigned to any shop.")
+                                user_states.pop(chat_id, None)
+                                return {"ok": True}
+            
+                            # Auto-select admin's shop and skip to step 3 (username)
+                            data["selected_shop_id"] = user.shop_id
+                            data["shop_name"] = user.shop_name
+                            user_states[chat_id] = {"action": action, "step": 3, "data": data}
+                            send_message(chat_id, f"👤 Creating {role_selection} for {user.shop_name}\nEnter username:")
+
+                        elif user.role == "owner":
+                            # Owner sees all shops
+                            shops = tenant_db.query(ShopORM).all()
+                            tenant_db.close()
+
+                            if not shops:
+                                send_message(chat_id, "❌ No shops found. Please create a shop first.")
+                                user_states.pop(chat_id, None)
+                                return {"ok": True}
+
+                            # Create shop selection keyboard for owner
+                            kb_rows = []
+                            for shop in shops:
+                                kb_rows.append([{"text": f"🏪 {shop.name}", "callback_data": f"select_shop_for_user:{shop.shop_id}"}])
+                            kb_rows.append([{"text": "⬅️ Cancel", "callback_data": "back_to_menu"}])
+
+                            send_message(chat_id, f"🏪 Select shop for new {role_selection}:", {"inline_keyboard": kb_rows})
+                            
+                    elif step == 2:  # Shop selected via callback (handled separately)
+                        # This will be handled by the callback
+                        pass
+    
+                    elif step == 3:  # Custom name (optional)
+                        custom_name = text.strip()
+                        if custom_name.lower() == "skip":
+                            custom_name = None
+        
+                        shop_id = data.get("selected_shop_id")
+                        role = data.get("role")
+        
+                        if not shop_id or not role:
+                            send_message(chat_id, "❌ Missing information. Please start over.")
+                            user_states.pop(chat_id, None)
+                            return {"ok": True}
+        
+                        # Create the user
+                        from app.user_management import create_custom_user
+        
+                        result = create_custom_user(db, user.tenant_schema, shop_id, role, custom_name)
+        
+                        if result:
+                            from app.user_management import format_user_credentials_message
+            
+                            credentials_msg = format_user_credentials_message({role: result})
+                            send_message(chat_id, credentials_msg)
+                        else:
+                            send_message(chat_id, f"❌ Failed to create {role} user. Please try again.")
+        
+                        # Clear state and return to menu
+                        user_states.pop(chat_id, None)
+                        from app.user_management import get_role_based_menu
+                        kb = get_role_based_menu(user.role)
+                        send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+    
+                    return {"ok": True}
+
+                # -------------------- Add Shop Flow (Owner only) --------------------
+                elif action == "add_shop" and user.role == "owner":  # CHANGED: owner only
                     if step == 1:  # Shop Name
                         shop_name = text.strip()
                         if not shop_name:
@@ -3740,26 +4208,54 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             return {"ok": True}
 
                         try:
-                            # Check if this is the first shop (make it main)
-                            existing_shops = tenant_db.query(ShopORM).count()
-                            is_main = existing_shops == 0
+                            # Create additional shop (not main)
+                            new_shop = create_additional_shop(tenant_db, data["name"], data["location"], data["contact"])
 
-                            new_shop = ShopORM(
-                                name=data["name"],
-                                location=data["location"],
-                                contact=data["contact"],
-                                is_main=is_main
-                            )
-                            tenant_db.add(new_shop)
-                            tenant_db.commit()
-                            tenant_db.refresh(new_shop)
+                            if not new_shop:
+                                send_message(chat_id, "❌ Failed to add shop. Please try again.")
+                                user_states.pop(chat_id, None)
+                                return {"ok": True}
 
                             success_msg = f"✅ Shop added successfully!\n\n"
                             success_msg += f"🏪 *{new_shop.name}*\n"
                             success_msg += f"📍 {new_shop.location}\n"
                             success_msg += f"📞 {new_shop.contact}\n"
-                            if new_shop.is_main:
-                                success_msg += f"⭐ *Main Store*\n"
+
+                            # ✅ Create shop-specific users
+                            credentials = create_shop_users(chat_id, new_shop.shop_id, new_shop.name)
+            
+                            if credentials:
+                                # Send credentials via notifications
+                                from app.telegram_notifications import send_new_user_credentials
+                
+                                # Send admin credentials
+                                admin_data = credentials.get("admin", {})
+                                if admin_data:
+                                    send_new_user_credentials(
+                                        chat_id, 
+                                        "admin", 
+                                        admin_data["username"], 
+                                        admin_data["password"], 
+                                        admin_data["email"],
+                                        new_shop.name
+                                    )
+                
+                                # Send shopkeeper credentials  
+                                shopkeeper_data = credentials.get("shopkeeper", {})
+                                if shopkeeper_data:
+                                    send_new_user_credentials(
+                                        chat_id,
+                                        "shopkeeper",
+                                        shopkeeper_data["username"],
+                                        shopkeeper_data["password"],
+                                        shopkeeper_data["email"],
+                                        new_shop.name
+                                    )
+                
+                                success_msg += f"\n👥 *Default users created for this shop!*\n"
+                                success_msg += f"Check messages above for credentials to share with staff."
+                            else:
+                                success_msg += f"\n⚠️ Could not create default users. You can create them later via 'Manage Users'."
 
                             send_message(chat_id, success_msg)
 
@@ -3769,11 +4265,158 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                         # Clear state and return to menu
                         user_states.pop(chat_id, None)
-                        kb = main_menu(user.role)
+                        from app.user_management import get_role_based_menu
+                        kb = get_role_based_menu(user.role)
                         send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
 
                     return {"ok": True}
-
+    
+                elif action == "confirm_delete_user":
+                    confirmation = text.strip().upper()
+    
+                    if confirmation == "YES":
+                        username = data.get("username")
+        
+                        # Delete the user
+                        from app.user_management import delete_user
+                        if delete_user(username):
+                            send_message(chat_id, f"✅ User `{username}` deleted successfully.")
+                        else:
+                            send_message(chat_id, f"❌ Failed to delete user `{username}`.")
+                    else:
+                        send_message(chat_id, "❌ Deletion cancelled.")
+    
+                    user_states.pop(chat_id, None)
+                    from app.user_management import get_role_based_menu
+                    kb = get_role_based_menu(user.role)
+                    send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+                    return {"ok": True}
+    
+                # ==================== STEP 2: ADMIN SHOPKEEPER DELETION CONFIRMATION ====================
+                elif text == "confirm_delete_shopkeeper_admin":
+                    confirmation = text.strip().upper()
+    
+                    if confirmation == "YES":
+                        username = data.get("username")
+                        
+                        if not username:
+                            send_message(chat_id, "❌ Error: Username not found in state.")
+                            user_states.pop(chat_id, None)
+                            return {"ok": True}
+                        
+                        # Get admin user to verify shop assignment
+                        admin_user = db.query(User).filter(User.chat_id == chat_id).first()
+                        if not admin_user or admin_user.role != 'admin':
+                            send_message(chat_id, "❌ Unauthorized: Admin access required.")
+                            user_states.pop(chat_id, None)
+                            return {"ok": True}
+                        
+                        try:
+                            # Find and delete the shopkeeper (must be in admin's shop)
+                            shopkeeper = db.query(User).filter(
+                                User.username == username,
+                                User.tenant_schema == admin_user.tenant_schema,
+                                User.shop_id == admin_user.shop_id,
+                                User.role == 'shopkeeper'
+                            ).first()
+                            
+                            if shopkeeper:
+                                # Delete the shopkeeper
+                                db.delete(shopkeeper)
+                                db.commit()
+                                
+                                send_message(chat_id, f"✅ Shopkeeper `{username}` has been successfully deleted!")
+                            else:
+                                send_message(chat_id, f"❌ Shopkeeper `{username}` not found or doesn't belong to your shop.")
+                        
+                        except Exception as e:
+                            db.rollback()
+                            logging.error(f"Error deleting shopkeeper: {e}")
+                            send_message(chat_id, f"❌ An error occurred while deleting the shopkeeper: {e}")
+                    
+                    else:  # NO
+                        send_message(chat_id, "✅ Deletion cancelled. The shopkeeper was not deleted.")
+                    
+                    # Clear state and show admin menu
+                    user_states.pop(chat_id, None)
+                    
+                    # Show admin menu
+                    from app.user_management import get_role_based_menu
+                    kb = get_role_based_menu('admin')
+                    send_message(chat_id, "🛡️ Admin Menu:", keyboard=kb)
+                    return {"ok": True}
+                # ==================== END STEP 2 ====================
+                
+                # -------------------- Admin Create Shopkeeper Flow --------------------
+                elif action == "create_shopkeeper_admin" and user.role == "admin":
+                    if step == 1:  # Enter username
+                        username = text.strip()
+                        if not username:
+                            send_message(chat_id, "❌ Username cannot be empty. Enter username:")
+                            return {"ok": True}
+        
+                        # Check if username already exists in this tenant
+                        existing_user = db.query(User).filter(
+                            User.username == username,
+                            User.tenant_schema == user.tenant_schema
+                        ).first()
+        
+                        if existing_user:
+                            send_message(chat_id, f"❌ Username '{username}' already exists. Try another:")
+                            return {"ok": True}
+        
+                        data["username"] = username
+                        user_states[chat_id] = {"action": action, "step": 2, "data": data}
+                        send_message(chat_id, "👤 Enter name for shopkeeper (press Enter to skip):")
+    
+                    elif step == 2:  # Enter name (optional)
+                        name = text.strip()
+                        if name:
+                            data["name"] = name
+        
+                        # Generate credentials
+                        from app.user_management import generate_password, hash_password
+        
+                        password = generate_password()
+                        email = f"{data['username']}_{int(time.time())}@example.com"
+        
+                        # Create shopkeeper user
+                        new_shopkeeper = User(
+                            username=data["username"],
+                            name=data.get("name", data["username"]),
+                            email=email,
+                            password_hash=hash_password(password),
+                            role="shopkeeper",
+                            tenant_schema=user.tenant_schema,
+                            shop_id=user.shop_id,
+                            shop_name=user.shop_name,
+                            created_by=user.username
+                        )
+        
+                        db.add(new_shopkeeper)
+                        db.commit()
+        
+                        # Send credentials
+                        success_msg = f"✅ **Shopkeeper Created Successfully!**\n\n"
+                        success_msg += f"🏪 Shop: {user.shop_name}\n"
+                        success_msg += f"👤 Username: `{new_shopkeeper.username}`\n"
+                        success_msg += f"🔑 Password: `{password}`\n\n"
+                        success_msg += "Share these credentials with the shopkeeper."
+        
+                        send_message(chat_id, success_msg)
+        
+                        # Clear state
+                        user_states.pop(chat_id, None)
+        
+                        # Return to admin user management
+                        kb_rows = [
+                            [{"text": "➕ Create Another", "callback_data": "create_shopkeeper_admin"}],
+                            [{"text": "🔙 Back to User Management", "callback_data": "manage_users_admin"}]
+                        ]
+                        send_message(chat_id, "What would you like to do next?", {"inline_keyboard": kb_rows})
+    
+                    return {"ok": True}
+    
                 # -------------------- Add Product --------------------
                 elif action == "awaiting_product":
                     # -------------------- Ensure tenant DB --------------------
@@ -3873,29 +4516,19 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                 send_message(chat_id, "❌ Price must be greater than 0. Please enter a positive number:")
                                 return {"ok": True}
                             data["price"] = price
+            
+                            # ✅ UPDATED: Tag product with shop_id for non-owner users
+                            if user.role in ["admin", "shopkeeper"]:
+                                data["shop_id"] = user.shop_id
+            
                             user_states[chat_id] = {"action": action, "step": 5, "data": data}
                             send_message(chat_id, "📊 Enter minimum stock level (e.g., 10):")
                         except ValueError:
                             send_message(chat_id, "❌ Invalid price. Please enter a positive number:")
                         return {"ok": True}
-
-                    elif step == 5:  # Min Stock Level (Owner)
-                        min_stock_text = text.strip()
-                        if not min_stock_text:
-                            send_message(chat_id, "❌ Minimum stock level cannot be empty. Please enter a valid number:")
-                            return {"ok": True}
-                        try:
-                            min_stock = int(min_stock_text)
-                            if min_stock < 0:
-                                send_message(chat_id, "❌ Minimum stock cannot be negative. Please enter a valid number:")
-                                return {"ok": True}
-                            data["min_stock_level"] = min_stock
-                            user_states[chat_id] = {"action": action, "step": 6, "data": data}
-                            send_message(chat_id, "⚠️ Enter low stock threshold (alert level):")
-                        except ValueError:
-                            send_message(chat_id, "❌ Invalid number. Please enter a valid minimum stock level:")
-                        return {"ok": True}
-
+    
+                    # ... rest of the flow ...
+    
                     elif step == 6:  # Low Stock Threshold (Owner)
                         threshold_text = text.strip()
                         if not threshold_text:
@@ -3909,19 +4542,20 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             data["low_stock_threshold"] = threshold
 
                             # Save product
-                            add_product(tenant_db, chat_id, data)
+                            # ✅ UPDATED: Pass user object to add_product function
+                            add_product(tenant_db, chat_id, data, user)
                             tenant_db.commit()
                             send_message(chat_id, f"✅ Product *{data['name']}* added successfully.")
                             user_states.pop(chat_id, None)
-                            
+            
                             # ✅ Return to main menu
-                            kb = main_menu(user.role)
+                            from app.user_management import get_role_based_menu
+                            kb = get_role_based_menu(user.role)
                             send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                         except ValueError:
                             send_message(chat_id, "❌ Invalid number. Please enter a valid low stock threshold:")
                         return {"ok": True}
-                        
-
+        
                 # -------------------- Quick Stock Update Flow --------------------
                 elif action == "quick_stock_update":
                     # Ensure tenant session is available
@@ -4018,7 +4652,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     
                                     # Return to main menu
                                     user_states.pop(chat_id, None)
-                                    kb = main_menu(user.role)
+                                    from app.user_management import get_role_based_menu
+                                    kb = get_role_based_menu(user.role)
                                     send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                                 else:
                                     send_message(chat_id, "❌ Product not found in database.")
@@ -4206,7 +4841,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                         # Clear state and return to menu
                         user_states.pop(chat_id, None)
-                        kb = main_menu(user.role)
+                        from app.user_management import get_role_based_menu
+                        kb = get_role_based_menu(user.role)
                         send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
 
                     return {"ok": True}
@@ -4375,7 +5011,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             
                             # ✅ Return to main menu
                             user_states.pop(chat_id, None)  # Clear state
-                            kb = main_menu(user.role)  # Get role-based menu
+                            from app.user_management import get_role_based_menu
+                            kb = get_role_based_menu(user.role)
                             send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                             return {"ok": True}
                             
@@ -4729,7 +5366,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             if confirmation != "yes":
                                 send_message(chat_id, "❌ Sale cancelled.")
                                 user_states.pop(chat_id, None)
-                                kb = main_menu(user.role)
+                                from app.user_management import get_role_based_menu
+                                kb = get_role_based_menu(user.role)
                                 send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                                 return {"ok": True}
                             
@@ -4739,7 +5377,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             if record_sale_result:
                                 logger.info(f"🎉 STEP 6 → Sale recorded successfully - Chat: {chat_id}")
                                 user_states.pop(chat_id, None)
-                                kb = main_menu(user.role)
+                                from app.user_management import get_role_based_menu
+                                kb = get_role_based_menu(user.role)
                                 send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                             else:
                                 logger.error(f"❌ STEP 6 → Sale recording failed - Chat: {chat_id}")
@@ -4756,7 +5395,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         if confirmation != "yes":
                             send_message(chat_id, "❌ Sale cancelled.")
                             user_states.pop(chat_id, None)
-                            kb = main_menu(user.role)
+                            from app.user_management import get_role_based_menu
+                            kb = get_role_based_menu(user.role)
                             send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                             return {"ok": True}
                         
@@ -4764,7 +5404,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         record_sale_result = record_cart_sale(tenant_db, chat_id, data)
                         if record_sale_result:
                             user_states.pop(chat_id, None)
-                            kb = main_menu(user.role)
+                            from app.user_management import get_role_based_menu
+                            kb = get_role_based_menu(user.role)
                             send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                         else:
                             send_message(chat_id, "❌ Failed to record sale. Please try again.")
