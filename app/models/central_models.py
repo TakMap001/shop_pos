@@ -36,6 +36,8 @@ class User(Base):
     shop_name = Column(String(255), nullable=True)  # ✅ ADD THIS: Shop name for display
     tenant_schema = Column(String(255), nullable=True)
     created_at = Column(TIMESTAMP, server_default=func.now())
+    created_by = Column(String(255), nullable=True)
+    is_active = Column(Boolean, default=True)
     
     
     # No relationships to tenant models (different schemas)
