@@ -5412,9 +5412,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                                             
         return {"ok": True}
 
-    except Exception as e:
-    import traceback  # ⚠️ MUST BE HERE
-    print("❌ Webhook crashed with error:", str(e))
-    traceback.print_exc()
-    return {"status": "error", "detail": str(e)}
     
+    except Exception as e:
+        print("❌ Webhook crashed with error:", str(e))
+        traceback.print_exc()
+        return {"status": "error", "detail": str(e)}
