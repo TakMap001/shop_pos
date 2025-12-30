@@ -1795,6 +1795,7 @@ def report_menu_keyboard(role: str):
 # -------------------- Webhook --------------------
 @router.post("/telegram/webhook")
 async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
+    import traceback
     try:
         data = await request.json()
         print("📩 Incoming Telegram update:", data)
@@ -1869,7 +1870,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     
                     # Create new owner with generated credentials
                     generated_username = create_username(f"Owner{chat_id}")
-                    from app.user_management import generate_password
+                    from app.user_management import generate_password, hash_password
                     generated_password = generate_password()
                     generated_email = f"{chat_id}_{int(time.time())}@example.com"
                     print(f"🔍 DEBUG: Generated username: {generated_username}")
