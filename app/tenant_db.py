@@ -69,8 +69,6 @@ def create_tenant_db(chat_id: int, role: str = "owner") -> tuple:
     """
     Create tenant schema for a new owner.
     Returns: (schema_name, credentials_dict)
-    - schema_name: the created schema name
-    - credentials_dict: owner credentials only (admin/shopkeeper created later with shops)
     """
     if not chat_id:
         raise ValueError("❌ Invalid chat_id for tenant schema creation")
@@ -80,119 +78,64 @@ def create_tenant_db(chat_id: int, role: str = "owner") -> tuple:
         raise RuntimeError("❌ DATABASE_URL is missing")
     
     engine = create_engine(database_url)
-    
-    # ✅ Check if this is a shopkeeper or admin - they should NOT get their own schema
-    with engine.connect() as conn:
-        user_result = conn.execute(
-            text("SELECT role, tenant_schema FROM users WHERE chat_id = :cid"),
-            {"cid": chat_id}
-        ).fetchone()
-    
-    # If shopkeeper or admin, return their existing tenant_schema
-    if user_result and user_result[0] in ["shopkeeper", "admin"]:
-        existing_schema = user_result[1]
-        if existing_schema:
-            logger.info(f"🔄 {user_result[0].title()} {chat_id} - returning existing schema: {existing_schema}")
-            return existing_schema, {}  # Return empty credentials
-    
-    # Only create schema for owners or users without tenant_schema
     schema_name = f"tenant_{chat_id}"
-    tenant_db_url = f"{database_url}#{schema_name}"
     
-    logger.info(f"📌 Preparing tenant schema: {schema_name}")
+    logger.info(f"📌 Creating tenant schema: {schema_name} for chat_id={chat_id}")
 
-    credentials = {}  # ✅ Store credentials to return
-    
     try:
         with engine.connect() as conn:
-            # Create schema if needed (only for owners)
-            if not user_result or user_result[0] == "owner":
-                result = conn.execute(
-                    text("SELECT schema_name FROM information_schema.schemata WHERE schema_name=:s"),
-                    {"s": schema_name},
-                ).fetchone()
-                if not result:
-                    conn.execute(text(f'CREATE SCHEMA "{schema_name}"'))
-                    conn.commit()
-                    logger.info(f"✅ Tenant schema '{schema_name}' created.")
-                else:
-                    logger.info(f"ℹ️ Tenant schema '{schema_name}' already exists.")
+            # 1. CREATE SCHEMA
+            conn.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"'))
+            conn.commit()
+            logger.info(f"✅ Schema '{schema_name}' created")
+            
+            # 2. CREATE TENANT RECORD (if not exists)
+            existing_tenant = conn.execute(
+                text("SELECT tenant_id FROM tenants WHERE telegram_owner_id = :oid"),
+                {"oid": chat_id},
+            ).fetchone()
 
-                # Ensure tenant record exists
-                existing = conn.execute(
-                    text("SELECT tenant_id FROM tenants WHERE telegram_owner_id = :oid"),
-                    {"oid": chat_id},
-                ).fetchone()
-
-                if not existing:
-                    conn.execute(
-                        text("""
-                            INSERT INTO tenants (tenant_id, store_name, telegram_owner_id, database_url, created_at)
-                            VALUES (gen_random_uuid(), :store, :oid, :url, :created)
-                        """),
-                        {
-                            "store": f"Store_{chat_id}",
-                            "oid": chat_id,
-                            "url": tenant_db_url,
-                            "created": datetime.utcnow(),
-                        },
-                    )
-                    conn.commit()
-                    logger.info(f"✅ Tenant record created for {chat_id}")
-                else:
-                    conn.execute(
-                        text("UPDATE tenants SET database_url = :url WHERE telegram_owner_id = :oid"),
-                        {"url": tenant_db_url, "oid": chat_id},
-                    )
-                    conn.commit()
-                    logger.info(f"ℹ️ Tenant record updated for {chat_id}")
-
-                # Link user to tenant schema
+            if not existing_tenant:
                 conn.execute(
-                    text("UPDATE users SET tenant_schema = :schema WHERE chat_id = :cid"),
-                    {"schema": schema_name, "cid": chat_id},
+                    text("""
+                        INSERT INTO tenants (tenant_id, store_name, telegram_owner_id, database_url, created_at)
+                        VALUES (gen_random_uuid(), :store, :oid, :url, NOW())
+                    """),
+                    {
+                        "store": f"Store_{chat_id}",
+                        "oid": chat_id,
+                        "url": database_url,
+                    },
                 )
                 conn.commit()
-                logger.info(f"✅ Linked user {chat_id} → {schema_name}")
-
-        # Create tables in the schema
-        ensure_tenant_tables(database_url, schema_name)
-        logger.info(f"✅ Tenant setup complete for chat_id={chat_id}")
-        
-        # ✅ UPDATED: Generate owner credentials only
-        # We DON'T create default users here - they'll be created per shop
-        
-        # Get owner info from database
-        with engine.connect() as conn:
-            owner_result = conn.execute(
-                text("SELECT username FROM users WHERE chat_id = :cid"),
-                {"cid": chat_id}
+                logger.info(f"✅ Tenant record created for {chat_id}")
+            
+            # 3. UPDATE USER'S tenant_schema FIELD
+            result = conn.execute(
+                text("UPDATE users SET tenant_schema = :schema WHERE chat_id = :cid RETURNING username"),
+                {"schema": schema_name, "cid": chat_id},
             ).fetchone()
             
-            if owner_result:
-                owner_username = owner_result[0]
-                # Generate a temporary password for display (owner already has password)
-                owner_password = generate_password()
-                
-                credentials = {
-                    "owner": {
-                        "username": owner_username,
-                        "password": owner_password,  # This is just for display
-                        "email": f"{owner_username}@example.com",
-                        "note": "You already have an account. This is your username."
-                    }
-                    # ⚠️ NO admin/shopkeeper created here - they'll be created per shop
-                }
-        
-        return schema_name, credentials  # ✅ Return schema name and owner credentials
+            if result:
+                logger.info(f"✅ Linked user {result[0]} → {schema_name}")
+            else:
+                logger.warning(f"⚠️ User with chat_id {chat_id} not found")
+            
+            conn.commit()
+
+        # 4. CREATE TABLES IN THE SCHEMA
+        ensure_tenant_tables(database_url, schema_name)
+        logger.info(f"✅ All tables created in '{schema_name}'")
+
+        # 5. RETURN SUCCESS
+        return schema_name, {}
         
     except Exception as e:
-        logger.error(f"❌ Tenant creation failed for {schema_name}: {e}")
+        logger.error(f"❌ Tenant creation failed: {e}")
         import traceback
         traceback.print_exc()
-        # Still return schema name if possible
-        return schema_name, {}
-
+        return None, {}
+        
 # ======================================================
 # 🔹 CREATE SHOP-SPECIFIC USERS (NEW FUNCTION)
 # ======================================================
