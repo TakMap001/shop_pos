@@ -2,6 +2,8 @@
 
 import json 
 import traceback
+import secrets    # For secure password generation
+import string     # For password character sets
 from fastapi import APIRouter, Request, Depends
 import requests, os
 from sqlalchemy.orm import Session
@@ -20,7 +22,6 @@ from app.telegram_notifications import notify_owner_of_new_shopkeeper
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_API_URL
 from app.tenant_db import get_tenant_session, create_tenant_db, ensure_tenant_tables, ensure_tenant_session
 import random
-import string
 import bcrypt
 import time
 from app.core import SessionLocal  # ✅ REMOVE duplicate get_db
@@ -85,22 +86,6 @@ def create_username(full_name: str) -> str:
     base = "".join(full_name.lower().split())  # remove spaces
     suffix = str(random.randint(100, 999))
     return f"{base}{suffix}"
-
-def generate_password(length: int = 10) -> str:
-    """Generate a secure random password."""
-    chars = string.ascii_letters + string.digits + "!@#$%^&*()"
-    return "".join(random.choice(chars) for _ in range(length))
-
-def hash_password(password: str) -> str:
-    """Hash password using bcrypt."""
-    salt = bcrypt.gensalt()
-    hashed = bcrypt.hashpw(password.encode("utf-8"), salt)
-    return hashed.decode("utf-8")
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a plain password against a hashed password."""
-    return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
-
 
 def get_user(chat_id: int, db: Session):
     return db.query(User).filter(User.user_id == chat_id).first()
