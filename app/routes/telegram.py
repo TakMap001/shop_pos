@@ -1890,8 +1890,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                     # Create tenant schema
                     try:
-                        print(f"🔍 DEBUG: Creating tenant schema: {schema_name}")
                         schema_name, _ = create_tenant_db(chat_id)
+                        print(f"🔍 DEBUG: Creating tenant schema: {schema_name}")
                         new_user.tenant_schema = schema_name
                         db.commit()
                         logger.info(f"✅ New owner created: {generated_username} with schema '{schema_name}'")
