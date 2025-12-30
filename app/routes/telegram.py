@@ -20,7 +20,7 @@ from config import DATABASE_URL
 from telebot import types
 from app.telegram_notifications import notify_owner_of_new_shopkeeper
 from config import TELEGRAM_BOT_TOKEN, TELEGRAM_API_URL
-from app.tenant_db import get_tenant_session, create_tenant_db, ensure_tenant_tables, ensure_tenant_session
+from app.tenant_db import get_tenant_session, create_tenant_db, ensure_tenant_tables, ensure_tenant_session, create_initial_shop, create_additional_shop, create_shop_users
 import random
 import bcrypt
 import time
