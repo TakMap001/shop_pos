@@ -436,7 +436,7 @@ def add_product(db: Session, chat_id: int, data: dict):
     try:
         name = data.get("name")
         price = float(data.get("price", 0))
-        stock = int(data.get("quantity", 0))
+        stock = int(data.get("quantity", 0))  # This is for shop stock, not product stock
         unit_type = data.get("unit_type", "unit")
         min_stock_level = int(data.get("min_stock_level", 0))
         low_stock_threshold = int(data.get("low_stock_threshold", 0))
@@ -462,14 +462,15 @@ def add_product(db: Session, chat_id: int, data: dict):
         send_message(chat_id, f"❌ Product '{name}' already exists{' for this shop' if shop_id else ''}.")
         return "Product already exists"
 
+    # ✅ FIXED: Create product WITHOUT stock field
     new_product = ProductORM(
         name=name,
         price=price,
-        stock=stock,
         unit_type=unit_type,
         min_stock_level=min_stock_level,
         low_stock_threshold=low_stock_threshold,
         shop_id=shop_id
+        # ❌ REMOVED: stock=stock - Stock goes in ProductShopStockORM
     )
 
     try:
@@ -477,18 +478,22 @@ def add_product(db: Session, chat_id: int, data: dict):
         db.commit()
         db.refresh(new_product)
         
-        # Create shop-specific stock record
+        # ✅ Create shop-specific stock record (THIS is where stock goes)
         if shop_id:
             shop_stock = ProductShopStockORM(
                 product_id=new_product.product_id,
                 shop_id=shop_id,
-                stock=stock,
+                stock=stock,  # ✅ Stock goes here
                 min_stock_level=min_stock_level,
                 low_stock_threshold=low_stock_threshold,
                 reorder_quantity=0
             )
             db.add(shop_stock)
             db.commit()
+        else:
+            # If no shop_id (global product), you might want to create stock for all shops
+            # Or just skip stock creation for now
+            pass
         
     except Exception as e:
         db.rollback()
