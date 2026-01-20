@@ -427,11 +427,11 @@ def get_stock_list(db: Session):
     
     return "\n".join(lines)
 
-
 def add_product(db: Session, chat_id: int, data: dict):
     """
     Add a product in a tenant-aware way using structured `data` collected step by step.
     The `db` session is already connected to the tenant's DB.
+    Returns: None on success, or error message if something goes wrong.
     """
     try:
         name = data.get("name")
@@ -440,6 +440,7 @@ def add_product(db: Session, chat_id: int, data: dict):
         unit_type = data.get("unit_type", "unit")
         min_stock_level = int(data.get("min_stock_level", 0))
         low_stock_threshold = int(data.get("low_stock_threshold", 0))
+        shop_id = data.get("shop_id")
 
         if not name:
             raise ValueError("Missing product name.")
@@ -449,13 +450,17 @@ def add_product(db: Session, chat_id: int, data: dict):
             raise ValueError("Stock cannot be negative.")
     except Exception as e:
         send_message(chat_id, f"❌ Invalid product data: {str(e)}")
-        return
+        return str(e)  # Return error message
 
-    # Ensure product is unique for this tenant
-    existing = db.query(ProductORM).filter(func.lower(ProductORM.name) == name.lower()).first()
+    # Check for existing product
+    query = db.query(ProductORM).filter(func.lower(ProductORM.name) == name.lower())
+    if shop_id:
+        query = query.filter(ProductORM.shop_id == shop_id)
+    
+    existing = query.first()
     if existing:
-        send_message(chat_id, f"❌ Product '{name}' already exists.")
-        return
+        send_message(chat_id, f"❌ Product '{name}' already exists{' for this shop' if shop_id else ''}.")
+        return "Product already exists"
 
     new_product = ProductORM(
         name=name,
@@ -464,23 +469,45 @@ def add_product(db: Session, chat_id: int, data: dict):
         unit_type=unit_type,
         min_stock_level=min_stock_level,
         low_stock_threshold=low_stock_threshold,
+        shop_id=shop_id
     )
 
     try:
         db.add(new_product)
         db.commit()
         db.refresh(new_product)
+        
+        # Create shop-specific stock record
+        if shop_id:
+            shop_stock = ProductShopStockORM(
+                product_id=new_product.product_id,
+                shop_id=shop_id,
+                stock=stock,
+                min_stock_level=min_stock_level,
+                low_stock_threshold=low_stock_threshold,
+                reorder_quantity=0
+            )
+            db.add(shop_stock)
+            db.commit()
+        
     except Exception as e:
         db.rollback()
         send_message(chat_id, f"❌ Database error: {str(e)}")
-        return
+        return str(e)
 
+    # Product added successfully - send success message
+    shop_info = f" for shop {data.get('shop_name', '')}" if shop_id else ""
     send_message(
         chat_id,
-        f"✅ Product added: *{name}*\n💲 Price: {price}\n📦 Stock: {stock} {unit_type}\n"
-        f"📊 Min Level: {min_stock_level}, ⚠️ Low Stock Alert: {low_stock_threshold}"
+        f"✅ Product added{shop_info}: *{name}*\n"
+        f"💲 Price: ${price:.2f}\n"
+        f"📦 Stock: {stock} {unit_type}\n"
+        f"📊 Min Level: {min_stock_level}\n"
+        f"⚠️ Low Stock Alert: {low_stock_threshold}"
     )
-
+    
+    return None  # Success - returns None
+    
 
 # In your telegram.py, replace the notification functions with:
 
@@ -2677,10 +2704,102 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 send_message(chat_id, message, {"inline_keyboard": kb_rows})
                 return {"ok": True}
     
+            # Add this in your callback handling section (around line where you handle other callbacks):
+            elif text == "owner_dashboard" and user.role == "owner":
+                # Create owner dashboard
+                tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                if not tenant_db:
+                    send_message(chat_id, "❌ Unable to access store database.")
+                    return {"ok": True}
+    
+                # Get stats for dashboard
+                shops_count = tenant_db.query(ShopORM).count()
+                products_count = tenant_db.query(ProductORM).count()
+                sales_count = tenant_db.query(SaleORM).count()
+    
+                dashboard_msg = f"👑 *Owner Dashboard*\n\n"
+                dashboard_msg += f"🏪 **Shops:** {shops_count}\n"
+                dashboard_msg += f"📦 **Products:** {products_count}\n"
+                dashboard_msg += f"💰 **Total Sales:** {sales_count}\n"
+    
+                # Get recent sales
+                recent_sales = tenant_db.query(SaleORM).order_by(SaleORM.sale_date.desc()).limit(5).all()
+                if recent_sales:
+                    dashboard_msg += f"\n📈 **Recent Sales:**\n"
+                    for sale in recent_sales:
+                        product = tenant_db.query(ProductORM).filter(ProductORM.product_id == sale.product_id).first()
+                        product_name = product.name if product else f"Product {sale.product_id}"
+                        dashboard_msg += f"• {product_name}: ${sale.total_amount:.2f}\n"
+    
+                kb_rows = [
+                    [{"text": "🏪 Manage Shops", "callback_data": "manage_shops"}],
+                    [{"text": "👥 Manage Users", "callback_data": "manage_users"}],
+                    [{"text": "📊 View Reports", "callback_data": "report_menu"}],
+                    [{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}]
+                ]
+    
+                send_message(chat_id, dashboard_msg, {"inline_keyboard": kb_rows})
+                tenant_db.close()
+                return {"ok": True}
+    
             # -------------------- Add Product --------------------
             elif text == "add_product":
-                send_message(chat_id, "➕ Add a new product! 🛒\n\nEnter product name:")
-                user_states[chat_id] = {"action": "awaiting_product", "step": 1, "data": {}}
+                # For owners with multiple shops, ask which shop
+                tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                if not tenant_db:
+                    send_message(chat_id, "⚠️ Tenant database not linked. Please restart with /start.")
+                    return {"ok": True}
+
+                shops = tenant_db.query(ShopORM).all()
+                tenant_db.close()
+    
+                if len(shops) == 1:
+                    # Only one shop - start product creation directly
+                    user_states[chat_id] = {
+                        "action": "awaiting_product", 
+                        "step": 1, 
+                        "data": {"shop_id": shops[0].shop_id, "shop_name": shops[0].name}
+                    }
+                    send_message(chat_id, "➕ Add a new product! 🛒\n\nEnter product name:")
+                else:
+                    # Multiple shops - ask user to select
+                    kb_rows = []
+                    for shop in shops:
+                        kb_rows.append([{
+                            "text": f"🏪 {shop.name} {'⭐' if shop.is_main else ''}",
+                            "callback_data": f"select_shop_for_product:{shop.shop_id}"
+                        }])
+                    kb_rows.append([{"text": "⬅️ Cancel", "callback_data": "back_to_menu"}])
+        
+                    send_message(chat_id, "🏪 Select shop for the new product:", {"inline_keyboard": kb_rows})
+    
+                return {"ok": True}
+    
+            elif text.startswith("select_shop_for_product:"):
+                try:
+                    shop_id = int(text.split(":")[1])
+        
+                    tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                    if not tenant_db:
+                        send_message(chat_id, "❌ Unable to access store database.")
+                        return {"ok": True}
+        
+                    shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
+                    tenant_db.close()
+        
+                    if shop:
+                        user_states[chat_id] = {
+                            "action": "awaiting_product", 
+                            "step": 1, 
+                            "data": {"shop_id": shop_id, "shop_name": shop.name}
+                        }
+                        send_message(chat_id, f"🏪 Shop: {shop.name}\n➕ Add a new product! 🛒\n\nEnter product name:")
+                    else:
+                        send_message(chat_id, "❌ Shop not found.")
+    
+                except (ValueError, IndexError):
+                    send_message(chat_id, "❌ Invalid shop selection.")
+    
                 return {"ok": True}
         
             # -------------------- Approval Callbacks --------------------
@@ -4411,14 +4530,22 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
     
                 # -------------------- Add Product --------------------
                 elif action == "awaiting_product":
-                    # -------------------- Ensure tenant DB --------------------
+                    # Add comprehensive debug
+                    print(f"🔍 DEBUG [awaiting_product]: Action triggered")
+                    print(f"  Step: {step}")
+                    print(f"  Text received: '{text}'")
+                    print(f"  Data keys: {list(data.keys())}")
+                    print(f"  Shop ID in data: {data.get('shop_id')}")
+                    print(f"  Shop Name in data: {data.get('shop_name')}")
+    
                     tenant_db = get_tenant_session(user.tenant_schema, chat_id)
                     if tenant_db is None:
+                        print(f"❌ DEBUG: Failed to get tenant session")
                         send_message(chat_id, "❌ Unable to access tenant database.")
                         return {"ok": True}
+    
+                    print(f"✅ DEBUG: Tenant session obtained")
 
-                    data = state.get("data", {})
-  
                     # -------------------- Step Handling --------------------
                     if step == 1:  # Product Name
                         product_name = text.strip()
@@ -4428,6 +4555,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         data["name"] = product_name
                         user_states[chat_id] = {"action": action, "step": 2, "data": data}
                         send_message(chat_id, "📦 Enter quantity:")
+                        print(f"🔍 DEBUG: Product name saved, moving to step 2")
                         return {"ok": True}
 
                     elif step == 2:  # Quantity
@@ -4443,61 +4571,29 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             data["quantity"] = qty
                             user_states[chat_id] = {"action": action, "step": 3, "data": data}
                             send_message(chat_id, "📏 Enter unit type (e.g., piece, pack, box, carton):")
+                            print(f"🔍 DEBUG: Quantity saved, moving to step 3")
                         except ValueError:
                             send_message(chat_id, "❌ Invalid quantity. Please enter a positive number:")
                         return {"ok": True}
 
-                    elif step == 3:  # Unit Type
+                    elif step == 3:  # Unit Type - SIMPLIFIED
                         unit_type = text.strip().lower()
                         if not unit_type:
-                            send_message(chat_id, "❌ Unit type cannot be empty. Please enter a valid unit type (e.g., piece, box, carton, kg, liter, pack):")
+                            send_message(chat_id, "❌ Unit type cannot be empty. Please enter a unit type:")
                             return {"ok": True}
-    
-                        # Validate unit type is not a number
-                        try:
-                            float(unit_type)  # If this works, it's a number (wrong!)
-                            send_message(chat_id, "❌ Unit type must be text, not a number. Please enter like: piece, box, carton, kg, liter, pack:")
-                            return {"ok": True}
-                        except ValueError:
-                            # Good, it's not a number
-                            pass
-    
-                        # Common valid unit types
-                        valid_units = ['piece', 'pieces', 'box', 'boxes', 'carton', 'cartons', 'kg', 'kgs', 'kilogram', 'kilograms', 'liter', 'liters', 'pack', 'packs', 'bottle', 'bottles', 'bag', 'bags']
-    
-                        # Allow any text but warn if not in common list
-                        if unit_type not in valid_units:
-                            send_message(chat_id, f"⚠️ '{unit_type}' is not a common unit type. Common types: piece, box, carton, kg, liter, pack. Continue anyway? (yes/no)")
-                            user_states[chat_id] = {"action": "awaiting_product", "step": 3.5, "data": data}
-                            return {"ok": True}
-    
-                        data["unit_type"] = unit_type
-                        # ... continue with flow
-
-                    elif step == 3.5:  # Confirm unusual unit type
-                        confirmation = text.strip().lower()
-                        if confirmation != "yes":
-                            send_message(chat_id, "❌ Unit type rejected. Please enter a valid unit type (e.g., piece, box, carton):")
-                            user_states[chat_id] = {"action": "awaiting_product", "step": 3, "data": data}
-                            return {"ok": True}
-    
-                        data["unit_type"] = data.get("unit_type", "")
-                        user_states[chat_id] = {"action": "awaiting_product", "step": 4, "data": data}
-                        if user.role == "owner":
-                            send_message(chat_id, "💲 Enter product price:")
-                        else:
-                            # Shopkeeper: save for approval and notify owner
-                            if add_product_pending_approval(tenant_db, chat_id, data):
-                                send_message(chat_id, f"✅ Product *{data['name']}* added for approval. Owner will review shortly.")
-                                # Notify owner immediately
-                                notify_owner_of_pending_approval(chat_id, "add_product", data['name'], user.name)
-                            else:
-                                send_message(chat_id, "❌ Failed to submit product for approval. Please try again.")
         
-                            user_states.pop(chat_id, None)
+                        # Simple validation - just check it's not just a number
+                        if unit_type.isdigit():
+                            send_message(chat_id, "❌ Unit type cannot be just numbers. Examples: piece, box, kg:")
+                            return {"ok": True}
+        
+                        data["unit_type"] = unit_type
+                        user_states[chat_id] = {"action": action, "step": 4, "data": data}
+                        send_message(chat_id, "💲 Enter product price:")
+                        print(f"🔍 DEBUG: Unit type '{unit_type}' saved, moving to step 4")
                         return {"ok": True}
 
-                    elif step == 4:  # Price (Owner only)
+                    elif step == 4:  # Price
                         price_text = text.strip()
                         if not price_text:
                             send_message(chat_id, "❌ Price cannot be empty. Please enter a valid price:")
@@ -4508,20 +4604,32 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                 send_message(chat_id, "❌ Price must be greater than 0. Please enter a positive number:")
                                 return {"ok": True}
                             data["price"] = price
-            
-                            # ✅ UPDATED: Tag product with shop_id for non-owner users
-                            if user.role in ["admin", "shopkeeper"]:
-                                data["shop_id"] = user.shop_id
-            
                             user_states[chat_id] = {"action": action, "step": 5, "data": data}
                             send_message(chat_id, "📊 Enter minimum stock level (e.g., 10):")
+                            print(f"🔍 DEBUG: Price saved, moving to step 5")
                         except ValueError:
                             send_message(chat_id, "❌ Invalid price. Please enter a positive number:")
                         return {"ok": True}
-    
-                    # ... rest of the flow ...
-    
-                    elif step == 6:  # Low Stock Threshold (Owner)
+
+                    elif step == 5:  # Min Stock Level
+                        min_stock_text = text.strip()
+                        if not min_stock_text:
+                            send_message(chat_id, "❌ Minimum stock level cannot be empty. Please enter a valid number:")
+                            return {"ok": True}
+                        try:
+                            min_stock = int(min_stock_text)
+                            if min_stock < 0:
+                                send_message(chat_id, "❌ Minimum stock cannot be negative. Please enter a valid number:")
+                                return {"ok": True}
+                            data["min_stock_level"] = min_stock
+                            user_states[chat_id] = {"action": action, "step": 6, "data": data}
+                            send_message(chat_id, "⚠️ Enter low stock threshold (e.g., 5):")
+                            print(f"🔍 DEBUG: Min stock saved, moving to step 6")
+                        except ValueError:
+                            send_message(chat_id, "❌ Invalid number. Please enter a valid minimum stock level:")
+                        return {"ok": True}
+
+                    elif step == 6:  # Low Stock Threshold
                         threshold_text = text.strip()
                         if not threshold_text:
                             send_message(chat_id, "❌ Low stock threshold cannot be empty. Please enter a valid number:")
@@ -4533,21 +4641,43 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                 return {"ok": True}
                             data["low_stock_threshold"] = threshold
 
-                            # Save product
-                            # ✅ UPDATED: Pass user object to add_product function
-                            add_product(tenant_db, chat_id, data, user)
-                            tenant_db.commit()
-                            send_message(chat_id, f"✅ Product *{data['name']}* added successfully.")
-                            user_states.pop(chat_id, None)
+                            print(f"🔍 DEBUG: Calling add_product function with data: {data}")
+                            # ✅ CORRECT: Call add_product with the right parameters (no 'user' parameter)
+                            from app.routes.telegram import add_product
+                            result = add_product(tenant_db, chat_id, data)
             
-                            # ✅ Return to main menu
+                            if result is None:  # add_product returns None on success (sends message itself)
+                                success_msg = f"✅ Product *{data['name']}* added successfully!"
+                                if data.get('shop_name'):
+                                    success_msg += f"\n🏪 Shop: {data['shop_name']}"
+                                send_message(chat_id, success_msg)
+                            else:
+                                # If add_product returned something (error), it already sent message
+                                pass
+                
+                            user_states.pop(chat_id, None)
+                            print(f"🔍 DEBUG: Product saved, clearing state")
+            
+                            # Return to main menu
                             from app.user_management import get_role_based_menu
                             kb = get_role_based_menu(user.role)
                             send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
-                        except ValueError:
-                            send_message(chat_id, "❌ Invalid number. Please enter a valid low stock threshold:")
+            
+                        except ValueError as e:
+                            send_message(chat_id, f"❌ Invalid number: {e}")
+                        except Exception as e:
+                            print(f"❌ DEBUG: Exception in step 6: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            send_message(chat_id, f"❌ Error saving product: {e}")
                         return {"ok": True}
-        
+
+                    else:
+                        print(f"❌ DEBUG: Unknown step {step} in awaiting_product")
+                        send_message(chat_id, "❌ Invalid step in product creation. Please start over.")
+                        user_states.pop(chat_id, None)
+                        return {"ok": True}
+                
                 # -------------------- Quick Stock Update Flow --------------------
                 elif action == "quick_stock_update":
                     # Ensure tenant session is available
