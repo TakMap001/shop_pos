@@ -462,15 +462,13 @@ def add_product(db: Session, chat_id: int, data: dict):
         send_message(chat_id, f"❌ Product '{name}' already exists{' for this shop' if shop_id else ''}.")
         return "Product already exists"
 
-    # ✅ FIXED: Create product WITHOUT stock field
+    # ✅ FIXED: Create product with ONLY basic fields
     new_product = ProductORM(
         name=name,
         price=price,
         unit_type=unit_type,
-        min_stock_level=min_stock_level,
-        low_stock_threshold=low_stock_threshold,
         shop_id=shop_id
-        # ❌ REMOVED: stock=stock - Stock goes in ProductShopStockORM
+        # ❌ REMOVED: stock, min_stock_level, low_stock_threshold
     )
 
     try:
@@ -478,21 +476,21 @@ def add_product(db: Session, chat_id: int, data: dict):
         db.commit()
         db.refresh(new_product)
         
-        # ✅ Create shop-specific stock record (THIS is where stock goes)
+        # ✅ Create shop-specific stock record with ALL stock-related fields
         if shop_id:
             shop_stock = ProductShopStockORM(
                 product_id=new_product.product_id,
                 shop_id=shop_id,
-                stock=stock,  # ✅ Stock goes here
-                min_stock_level=min_stock_level,
-                low_stock_threshold=low_stock_threshold,
+                stock=stock,  # Stock goes here
+                min_stock_level=min_stock_level,  # Min stock goes here
+                low_stock_threshold=low_stock_threshold,  # Low threshold goes here
                 reorder_quantity=0
             )
             db.add(shop_stock)
             db.commit()
         else:
-            # If no shop_id (global product), you might want to create stock for all shops
-            # Or just skip stock creation for now
+            # If no shop_id (global product), handle differently
+            # For now, just create a basic product without stock info
             pass
         
     except Exception as e:
@@ -511,8 +509,7 @@ def add_product(db: Session, chat_id: int, data: dict):
         f"⚠️ Low Stock Alert: {low_stock_threshold}"
     )
     
-    return None  # Success - returns None
-    
+    return None  # Success - returns None    
 
 # In your telegram.py, replace the notification functions with:
 
