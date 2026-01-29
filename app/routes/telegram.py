@@ -4284,10 +4284,10 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             send_message(chat_id, "❌ Login cancelled. Account remains on previous device.")
         
                         user_states.pop(chat_id, None)
-                        return {"ok": True"
+                        return {"ok": True}
 
-                    return {"ok": True}    
-        
+                    return {"ok": True}
+                            
                 # -------------------- Unified Shop Setup/Update (Owner only) --------------------
                 elif action == "setup_shop" and user.role == "owner":  # CHANGED: "owner" only, not "owner, admin"
                     if step == 1:  # Shop Name
