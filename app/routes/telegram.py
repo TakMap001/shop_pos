@@ -4086,7 +4086,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             # =====================================================
             
             # -------------------- /start --------------------
-            elif text == "/start":
+            if text == "/start":
                 user = db.query(User).filter(User.chat_id == chat_id).first()
 
                 if user:
