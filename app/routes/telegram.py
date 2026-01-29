@@ -4086,7 +4086,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
             # =====================================================
             
             # -------------------- /start --------------------
-            if text == "/start":
+            elif text == "/start":
                 user = db.query(User).filter(User.chat_id == chat_id).first()
 
                 if user:
@@ -4096,13 +4096,13 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         "admin": "🛡️ Admin", 
                         "shopkeeper": "👨‍💼 Shopkeeper"
                     }
-        
+
                     welcome_msg = f"👋 Welcome back, {user.name}!\n"
                     welcome_msg += f"👤 Role: {role_display.get(user.role, user.role)}"
-        
+
                     if user.role in ["admin", "shopkeeper"] and user.shop_name:
                         welcome_msg += f"\n🏪 Shop: {user.shop_name}"
-        
+
                     # Show role-based menu immediately
                     from app.user_management import get_role_based_menu
                     kb = get_role_based_menu(user.role)
@@ -4122,8 +4122,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                 {"inline_keyboard": kb_rows})
 
                 return {"ok": True}
-    
-        
+            
             # -------------------- User Type Selection Callback --------------------
             elif text.startswith("user_type:"):
                 user_type = text.split(":")[1]
@@ -4223,61 +4222,71 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             user_states.pop(chat_id, None)
                             return {"ok": True}
 
-                        # Verify password
+                        # ✅ IMPORTANT: Make sure verify_password is imported
+                        # Add this at the top of your file if not already there:
+                        # from app.user_management import verify_password
+        
                         if not verify_password(password, candidate.password_hash):
                             send_message(chat_id, "❌ Incorrect password. Please try again:")
                             return {"ok": True}
 
+                        # ✅ CRITICAL: Check if user is already logged in elsewhere
+                        if candidate.chat_id and candidate.chat_id != chat_id:
+                            # User is logged in from another device - ask if they want to switch
+                            send_message(chat_id, "⚠️ This account is already logged in from another device. Do you want to switch to this device? (yes/no)")
+                            data["existing_chat_id"] = candidate.chat_id
+                            user_states[chat_id] = {"action": "shop_user_login", "step": 3, "data": data}
+                            return {"ok": True}
+        
                         # ✅ Login successful - link Telegram chat_id
                         candidate.chat_id = chat_id
                         db.commit()
 
-                        # ✅ UPDATED: Welcome message with shop context
+                        # Welcome message
                         role_display = {
                             "admin": "🛡️ Admin (Full Access)",
                             "shopkeeper": "👨‍💼 Shopkeeper (Limited Access)"
                         }
                         welcome_msg = f"✅ Login successful! Welcome, {candidate.name}.\n"
                         welcome_msg += f"👤 Role: {role_display.get(candidate.role, candidate.role)}"
-        
+
                         # Add shop info if available
                         if candidate.shop_name:
                             welcome_msg += f"\n🏪 Shop: {candidate.shop_name}"
-        
+
                         send_message(chat_id, welcome_msg)
                         user_states.pop(chat_id, None)
-
-                        # Verify tenant connection
-                        try:
-                            if not candidate.tenant_schema:
-                                send_message(chat_id, "❌ User not properly linked to a store. Contact the owner.")
-                                return {"ok": True}
-
-                            tenant_db = get_tenant_session(candidate.tenant_schema, chat_id)
-                            if tenant_db is None:
-                                send_message(chat_id, "❌ Unable to access store database. Contact the store owner.")
-                                return {"ok": True}
-    
-                            # ✅ UPDATED: Get shop name from candidate (already has shop_name field)
-                            if candidate.shop_name:
-                                # Send notification about shop assignment
-                                from app.telegram_notifications import notify_user_assigned_to_shop
-                                notify_user_assigned_to_shop(chat_id, candidate.shop_name, candidate.role)
-            
-                            tenant_db.close()
-    
-                        except Exception as e:
-                            logger.error(f"❌ Tenant connection failed: {e}")
-                            send_message(chat_id, "❌ Database access failed. Contact the store owner.")
-                            return {"ok": True}
 
                         # Show role-based menu
                         from app.user_management import get_role_based_menu
                         kb = get_role_based_menu(candidate.role)
                         send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+        
+                    elif step == 3:  # Handle switching devices
+                        confirmation = text.strip().lower()
+                        if confirmation == "yes":
+                            # Get candidate again
+                            candidate = db.query(User).filter(User.user_id == data["candidate_user_id"]).first()
+                            if candidate:
+                                # Switch chat_id to current device
+                                candidate.chat_id = chat_id
+                                db.commit()
+                
+                                send_message(chat_id, "✅ Device switched successfully!")
+                
+                                # Show role-based menu
+                                from app.user_management import get_role_based_menu
+                                kb = get_role_based_menu(candidate.role)
+                                send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+                            else:
+                                send_message(chat_id, "❌ User not found. Please start over.")
+                        else:
+                            send_message(chat_id, "❌ Login cancelled. Account remains on previous device.")
+        
+                        user_states.pop(chat_id, None)
+                        return {"ok": True"
 
-                    return {"ok": True}
-    
+                    return {"ok": True}    
         
                 # -------------------- Unified Shop Setup/Update (Owner only) --------------------
                 elif action == "setup_shop" and user.role == "owner":  # CHANGED: "owner" only, not "owner, admin"
