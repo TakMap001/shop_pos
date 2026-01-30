@@ -2019,7 +2019,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 else:  # shopkeeper
                     # Step-by-step shopkeeper login
                     send_message(chat_id, "👤 Please enter your username:")
-                    user_states[chat_id] = {"action": "shopkeeper_login", "step": 1, "data": {}}
+                    user_states[chat_id] = {"action": "shop_user_login", "step": 1, "data": {}}
         
                 return {"ok": True}
 
