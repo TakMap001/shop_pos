@@ -1,4 +1,3 @@
-
 """
 app/user_management.py
 Multi-level user management for shops
@@ -14,6 +13,7 @@ import logging
 import random
 import string
 import bcrypt
+import hashlib  # ⬅️ ADD THIS IMPORT
 import time
 
 logger = logging.getLogger(__name__)
@@ -26,12 +26,36 @@ def hash_password(password: str) -> str:
     return hashed.decode('utf-8')
 
 
+# ⬇️⬇️⬇️ UPDATE THIS FUNCTION - REPLACE ENTIRE FUNCTION ⬇️⬇️⬇️
 def verify_password(plain_password: str, hashed_password: str) -> bool:
-    """Verify a password against its hash"""
-    try:
-        return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
-    except Exception:
+    """Verify a password against its hash - handles both bcrypt and SHA256"""
+    if not hashed_password:
         return False
+    
+    try:
+        # Check if it's a bcrypt hash (starts with $2b$)
+        if hashed_password.startswith('$2b$'):
+            logger.debug(f"🔍 Verifying bcrypt hash for password")
+            return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
+        
+        # Check if it's a SHA256 hash (64 characters, hex digits)
+        elif len(hashed_password) == 64 and all(c in '0123456789abcdef' for c in hashed_password.lower()):
+            logger.debug(f"🔍 Verifying SHA256 hash for password")
+            # Hash the plain password with SHA256 and compare
+            sha256_hash = hashlib.sha256(plain_password.encode('utf-8')).hexdigest()
+            logger.debug(f"🔍 SHA256: Input hash: {hashed_password[:20]}...")
+            logger.debug(f"🔍 SHA256: Computed hash: {sha256_hash[:20]}...")
+            return sha256_hash == hashed_password
+        
+        # Unknown hash type
+        else:
+            logger.error(f"❌ Unknown hash type: {hashed_password[:20]}... (length: {len(hashed_password)})")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ Password verification error: {e}")
+        return False
+# ⬆️⬆️⬆️ END OF UPDATED FUNCTION ⬆️⬆️⬆️
 
 
 def generate_username(prefix: str, shop_name: str, existing_count: int = 0) -> str:
@@ -350,7 +374,7 @@ def reset_user_password(db: Session, username: str) -> Optional[str]:
             return None
         
         new_password = generate_password()
-        user.password_hash = hash_password(new_password)
+        user.password_hash = hash_password(new_password)  # ⬅️ Will create bcrypt hash
         db.commit()
         
         logger.info(f"✅ Reset password for user {username}")
@@ -550,3 +574,40 @@ def format_user_credentials_message(credentials: Dict) -> str:
     message += "⚠️ **Save these credentials!**"
     
     return message
+
+
+# ⬇️⬇️⬇️ ADD THIS NEW FUNCTION FOR PASSWORD MIGRATION ⬇️⬇️⬇️
+def migrate_user_password_to_bcrypt(db: Session, username: str, new_password: str = None) -> bool:
+    """
+    Migrate a user from SHA256 to bcrypt password hash
+    If new_password is None, generate a random one
+    Returns: tuple of (success, new_password_if_generated)
+    """
+    try:
+        user = db.query(User).filter(User.username == username).first()
+        if not user:
+            logger.warning(f"⚠️ User {username} not found")
+            return False, None
+        
+        # Check if already bcrypt
+        if user.password_hash and user.password_hash.startswith('$2b$'):
+            logger.info(f"ℹ️ User {username} already has bcrypt hash")
+            return True, None
+        
+        # Generate new password if not provided
+        if not new_password:
+            new_password = generate_password()
+            logger.info(f"🔑 Generated new password for {username}")
+        
+        # Update to bcrypt
+        user.password_hash = hash_password(new_password)
+        db.commit()
+        
+        logger.info(f"✅ Migrated user {username} to bcrypt hash")
+        return True, new_password
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to migrate password for {username}: {e}")
+        db.rollback()
+        return False, None
+# ⬆️⬆️⬆️ END OF NEW FUNCTION ⬆️⬆️⬆️
