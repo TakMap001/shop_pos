@@ -3544,7 +3544,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         "price": float(product.price),
                         "unit_type": product.unit_type,
                         "available_stock": stock_item.stock,  # FIXED: Use stock_item.stock
-                        "stock_id": stock_item.stock_id  # Store for stock update
+                        "stock_id": stock_item.id  # Store for stock update
                     }
         
                     # Update state with preserved cart and new product
@@ -5559,7 +5559,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                 "price": float(product.price),
                                 "unit_type": product.unit_type,
                                 "available_stock": stock_item.stock,  # CORRECT: Shop-specific stock
-                                "stock_id": stock_item.stock_id  # For updating stock later
+                                "stock_id": stock_item.id  # For updating stock later
                             }
                             user_states[chat_id] = {"action": "awaiting_sale", "step": 2, "data": data}
                             send_message(chat_id, f"📦 Selected {product.name} ({product.unit_type}). Enter quantity to add:")
@@ -5571,7 +5571,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             status = "🟢" if stock_item.stock > stock_item.low_stock_threshold else "🔴" if stock_item.stock == 0 else "🟡"
                             kb_rows.append([{
                                 "text": f"{status} {product.name} — Stock: {stock_item.stock} ({product.unit_type})", 
-                                "callback_data": f"select_sale:{product.product_id}:{stock_item.stock_id}"
+                                "callback_data": f"select_sale:{product.product_id}:{stock_item.id}"
                             }])
                         
                         kb_rows.append([{"text": "🛒 View Cart", "callback_data": "view_cart"}])
