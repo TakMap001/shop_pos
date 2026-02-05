@@ -4456,6 +4456,30 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                 send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                 return {"ok": True}
     
+            # -------------------- Logout Callback --------------------
+            elif text == "logout":
+                logger.info(f"🚪 User {user.username} (chat_id={chat_id}) logging out")
+    
+                # Clear user session
+                try:
+                    # Clear chat_id from user record (soft logout)
+                    user.chat_id = None
+                    db.commit()
+        
+                    # Clear any user states
+                    user_states.pop(chat_id, None)
+        
+                    # Send logout confirmation
+                    send_message(chat_id, "✅ You have been logged out successfully.\n\nUse /start to login again.")
+        
+                    logger.info(f"✅ User {user.username} logged out successfully")
+        
+                except Exception as e:
+                    logger.error(f"❌ Error during logout: {e}")
+                    send_message(chat_id, "❌ Error during logout. Please try again.")
+    
+                return {"ok": True}
+    
             # -------------------- Help --------------------
             elif text == "help":
                 help_text = (
