@@ -1306,6 +1306,67 @@ def check_low_stock_alerts(tenant_db, product_id, shop_id):
                 central_db.close()
                 
 
+# Add this function somewhere in your telegram.py file
+def generate_comparison_report(tenant_db, report_type, shop_ids=None, shop_names=None):
+    """
+    Generate comparison report for multiple shops
+    """
+    try:
+        if not shop_ids:
+            return "❌ No shops selected for comparison."
+        
+        report = f"📈 *Shop Comparison Report*\n\n"
+        
+        if report_type == "report_daily":
+            # Example: Daily sales comparison
+            for shop_id, shop_name in zip(shop_ids, shop_names):
+                daily_sales = tenant_db.query(SaleORM).filter(
+                    func.date(SaleORM.sale_date) == func.current_date(),
+                    SaleORM.shop_id == shop_id
+                ).all()
+                
+                total = sum(sale.total_amount for sale in daily_sales)
+                report += f"🏪 *{shop_name}*\n"
+                report += f"   📊 Today's Sales: ${total:.2f}\n"
+                report += f"   📈 Transactions: {len(daily_sales)}\n\n"
+        
+        elif report_type == "report_top_products":
+            # Top products comparison
+            for shop_id, shop_name in zip(shop_ids, shop_names):
+                top_products = tenant_db.query(
+                    SaleORM.product_id,
+                    ProductORM.name,
+                    func.sum(SaleORM.quantity).label('total_qty'),
+                    func.sum(SaleORM.total_amount).label('total_amount')
+                ).join(ProductORM, ProductORM.product_id == SaleORM.product_id
+                ).filter(
+                    SaleORM.shop_id == shop_id
+                ).group_by(SaleORM.product_id, ProductORM.name
+                ).order_by(func.sum(SaleORM.total_amount).desc()
+                ).limit(5).all()
+                
+                report += f"🏪 *{shop_name} - Top Products*\n"
+                for i, (product_id, name, qty, amount) in enumerate(top_products, 1):
+                    report += f"   {i}. {name}: {qty} sold (${amount:.2f})\n"
+                report += "\n"
+        
+        elif report_type == "report_low_stock":
+            # Low stock comparison
+            for shop_id, shop_name in zip(shop_ids, shop_names):
+                low_stock = tenant_db.query(ProductShopStockORM).filter(
+                    ProductShopStockORM.shop_id == shop_id,
+                    ProductShopStockORM.stock <= ProductShopStockORM.low_stock_threshold
+                ).count()
+                
+                report += f"🏪 *{shop_name}*\n"
+                report += f"   ⚠️ Low Stock Items: {low_stock}\n\n"
+        
+        return report
+        
+    except Exception as e:
+        logger.error(f"❌ Comparison report error: {e}")
+        return f"❌ Error generating comparison report: {str(e)}"
+        
 # -------------------- Clean Tenant-Aware Reports --------------------      
 def generate_report(db: Session, report_type: str, shop_id: int = None, shop_name: str = None):
     """
@@ -1862,51 +1923,59 @@ def generate_report(db: Session, report_type: str, shop_id: int = None, shop_nam
         return "❌ Unknown report type."
         
 
-def report_menu_keyboard(role: str):
-    """Build the reports submenu with buttons for 3 roles."""
+def report_menu_keyboard(role, is_shop_specific=False, shop_name=None):
+    """
+    Generate report menu keyboard based on user role and context
     
-    # Reports accessible to ALL users
-    all_reports = [
-        ("📅 Daily Sales", "report_daily"),
-        ("📦 View Stock", "view_stock"),  # Added for consistency
-        ("🏆 Top Products", "report_top_products")
+    Parameters:
+    - role: user role (owner, admin, shopkeeper)
+    - is_shop_specific: True if showing reports for a specific shop
+    - shop_name: Name of the specific shop (for display)
+    """
+    
+    # Base reports for all roles
+    base_reports = [
+        [{"text": "📅 Daily Sales", "callback_data": "report_daily"}],
+        [{"text": "📊 Weekly Sales", "callback_data": "report_weekly"}],
+        [{"text": "📈 Monthly Sales", "callback_data": "report_monthly"}],
+        [{"text": "📦 Low Stock", "callback_data": "report_low_stock"}],
+        [{"text": "🏆 Top Products", "callback_data": "report_top_products"}],
     ]
     
-    # Reports for Admin and Shopkeeper
-    shop_user_reports = [
-        ("📆 Weekly Sales", "report_weekly"),
-        ("📊 Monthly Sales per Product", "report_monthly"),
-        ("💳 Credit List", "report_credits"),
-        ("💵 Change List", "report_change")
-    ]
+    # Advanced reports for owners and admins
+    advanced_reports = []
+    if role in ["owner", "admin"]:
+        advanced_reports = [
+            [{"text": "💰 Average Order Value", "callback_data": "report_aov"}],
+            [{"text": "🔄 Stock Turnover", "callback_data": "report_stock_turnover"}],
+            [{"text": "💳 Payment Summary", "callback_data": "report_payment_summary"}],
+        ]
     
-    # Reports for Owner only
-    owner_reports = [
-        ("⚠️ Low Stock Products", "report_low_stock"),
-        ("💰 Average Order Value", "report_aov"),
-        ("📦 Stock Turnover", "report_stock_turnover"),
-        ("💸 Payment Summary", "report_payment_summary")  # New owner-only report
-    ]
-    
-    # Build keyboard based on role
-    keyboard = []
-    
-    # Add basic reports for everyone
-    for text, callback in all_reports:
-        keyboard.append([{"text": text, "callback_data": callback}])
-    
-    # Add shop user reports for admin/shopkeeper
-    if role in ["admin", "shopkeeper"]:
-        for text, callback in shop_user_reports:
-            keyboard.append([{"text": text, "callback_data": callback}])
-    
-    # Add owner-only reports
+    # Credit reports for owners
+    credit_reports = []
     if role == "owner":
-        for text, callback in owner_reports:
-            keyboard.append([{"text": text, "callback_data": callback}])
+        credit_reports = [
+            [{"text": "🔄 Credit Sales", "callback_data": "report_credits"}],
+            [{"text": "🪙 Change Due", "callback_data": "report_change"}],
+        ]
     
-    # Add back button
-    keyboard.append([{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}])
+    # Special owner-only options
+    owner_special = []
+    if role == "owner" and not is_shop_specific:
+        owner_special = [
+            [{"text": "🏪 Compare Shops", "callback_data": "report_compare_shops"}],
+            [{"text": "🏪 Shop-Specific Reports", "callback_data": "report_select_shop"}],
+        ]
+    
+    # Navigation buttons
+    nav_buttons = []
+    if is_shop_specific and shop_name:
+        nav_buttons.append([{"text": f"⬅️ Back to All Shops", "callback_data": "report_all_shops"}])
+    else:
+        nav_buttons.append([{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}])
+    
+    # Combine all sections
+    keyboard = base_reports + advanced_reports + credit_reports + owner_special + nav_buttons
     
     return {"inline_keyboard": keyboard}
 
@@ -3006,28 +3075,123 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     current_state = user_states.get(chat_id, {})
                     current_data = current_state.get("data", {})
         
-                    # Find the selected product from search results
+                    # Get tenant session to check stock
+                    tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                    if not tenant_db:
+                        send_message(chat_id, "❌ Unable to access store database.")
+                        return {"ok": True}
+        
+                    # Find the selected product from product_matches
                     selected_product = None
-                    for product in current_data.get("search_results", []):
+                    for product in current_data.get("product_matches", []):
                         if product["product_id"] == product_id:
                             selected_product = product
                             break
         
                     if selected_product:
+                        # Get shop-specific stock
+                        shop_id = current_data.get("selected_shop_id")
+                        if not shop_id:
+                            send_message(chat_id, "❌ No shop selected. Please start over.")
+                            user_states.pop(chat_id, None)
+                            return {"ok": True}
+            
+                        stock_item = tenant_db.query(ProductShopStockORM).filter(
+                            ProductShopStockORM.product_id == product_id,
+                            ProductShopStockORM.shop_id == shop_id
+                        ).first()
+            
+                        current_stock = stock_item.stock if stock_item else 0
+            
+                        # Update selected product with current stock
+                        selected_product["current_stock"] = current_stock
                         current_data["selected_product"] = selected_product
+            
                         user_states[chat_id] = {"action": "quick_stock_update", "step": 2, "data": current_data}
             
-                        send_message(chat_id, f"📦 Selected: {selected_product['name']}\nCurrent stock: {selected_product['current_stock']}\n\nEnter quantity to ADD to stock:")
+                        # Get shop name for message
+                        shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
+                        shop_name = shop.name if shop else f"Shop {shop_id}"
+            
+                        send_message(chat_id, f"📦 Selected: {selected_product['name']}\n🏪 Shop: {shop_name}\n📊 Current stock: {current_stock}\n\nEnter quantity to ADD to stock:")
                     else:
                         send_message(chat_id, "❌ Product selection failed. Please try again.")
                         user_states.pop(chat_id, None)
-    
+
                 except (ValueError, IndexError):
                     send_message(chat_id, "❌ Invalid product selection.")
                     user_states.pop(chat_id, None)
-    
+
                 return {"ok": True}
 
+            # New callback for owner shop selection
+            elif text.startswith("select_shop_for_quick_stock:"):
+                try:
+                    shop_id = int(text.split(":")[1])
+        
+                    current_state = user_states.get(chat_id, {})
+                    current_data = current_state.get("data", {})
+        
+                    # Get tenant session
+                    tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                    if not tenant_db:
+                        send_message(chat_id, "❌ Unable to access store database.")
+                        return {"ok": True}
+        
+                    # Get shop info
+                    shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
+                    if not shop:
+                        send_message(chat_id, "❌ Shop not found.")
+                        user_states.pop(chat_id, None)
+                        return {"ok": True}
+        
+                    current_data["selected_shop_id"] = shop_id
+                    current_data["selected_shop_name"] = shop.name
+        
+                    # Get product matches from previous step
+                    product_matches = current_data.get("product_matches", [])
+        
+                    if len(product_matches) == 1:
+                        # Single match - proceed directly
+                        product = product_matches[0]
+                        current_data["selected_product"] = product
+                        user_states[chat_id] = {"action": "quick_stock_update", "step": 2, "data": current_data}
+            
+                        # Get current stock for this shop
+                        stock_item = tenant_db.query(ProductShopStockORM).filter(
+                            ProductShopStockORM.product_id == product["product_id"],
+                            ProductShopStockORM.shop_id == shop_id
+                        ).first()
+                        current_stock = stock_item.stock if stock_item else 0
+            
+                        send_message(chat_id, f"📦 Selected: {product['name']}\n🏪 Shop: {shop.name}\n📊 Current stock: {current_stock}\n\nEnter quantity to ADD to stock:")
+                    else:
+                        # Multiple matches - show product selection
+                        user_states[chat_id] = {"action": "quick_stock_update", "step": 1.5, "data": current_data}
+            
+                        kb_rows = []
+                        for product in product_matches:
+                            # Get current stock for this shop
+                            stock_item = tenant_db.query(ProductShopStockORM).filter(
+                                ProductShopStockORM.product_id == product["product_id"],
+                                ProductShopStockORM.shop_id == shop_id
+                            ).first()
+                            current_stock = stock_item.stock if stock_item else 0
+                
+                            kb_rows.append([{
+                                "text": f"{product['name']} (Stock: {current_stock})",
+                                "callback_data": f"select_stock_product:{product['product_id']}"
+                            }])
+                        kb_rows.append([{"text": "❌ Cancel", "callback_data": "cancel_quick_stock"}])
+            
+                        send_message(chat_id, f"🏪 Shop: {shop.name}\n🔍 Multiple products found. Select one:", {"inline_keyboard": kb_rows})
+        
+                except (ValueError, IndexError):
+                    send_message(chat_id, "❌ Invalid shop selection.")
+                    user_states.pop(chat_id, None)
+    
+                return {"ok": True}
+    
             elif text == "cancel_quick_stock":
                 user_states.pop(chat_id, None)
                 send_message(chat_id, "❌ Quick stock update cancelled.")
@@ -4006,14 +4170,204 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
         
             # -------------------- Reports Menu --------------------
             elif text == "report_menu":
-                kb_dict = report_menu_keyboard(role)
-                send_message(chat_id, "📊 Select a report:", kb_dict)
+                # Check if this is a shop-specific report menu
+                current_state = user_states.get(chat_id, {})
+                is_shop_specific = False
+                shop_name = None
+    
+                if current_state and current_state.get("action") == "awaiting_shop_report":
+                    is_shop_specific = True
+                    current_data = current_state.get("data", {})
+                    shop_name = current_data.get("selected_shop_name")
+    
+                # Generate appropriate menu
+                kb_dict = report_menu_keyboard(user.role, is_shop_specific, shop_name)
+    
+                # Custom message based on context
+                if is_shop_specific and shop_name:
+                    message = f"📊 *Reports for {shop_name}*\n\nSelect report type:"
+                elif user.role == "owner":
+                    # Check if owner has multiple shops
+                    tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                    if tenant_db:
+                        shops = tenant_db.query(ShopORM).all()
+                        tenant_db.close()
+            
+                        if shops and len(shops) > 1:
+                            message = "📊 *Owner Reports*\n\nYou have multiple shops. Select report type:"
+                        else:
+                            message = "📊 Select a report:"
+                    else:
+                        message = "📊 Select a report:"
+                else:
+                    message = "📊 Select a report:"
+    
+                send_message(chat_id, message, kb_dict)
+                return {"ok": True}
+    
+            # -------------------- Owner Report Selection Callbacks --------------------
+            elif text == "report_all_shops" and user.role == "owner":
+                # Show standard report menu for all shops
+                kb_dict = report_menu_keyboard(user.role)
+                send_message(chat_id, "📊 *All Shops Report*\n\nSelect report type:", kb_dict)
                 return {"ok": True}
 
+            elif text == "report_select_shop" and user.role == "owner":
+                # Show shop selection for specific shop reports
+                tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                if not tenant_db:
+                    send_message(chat_id, "❌ Unable to access store database.")
+                    return {"ok": True}
+    
+                shops = tenant_db.query(ShopORM).all()
+                tenant_db.close()
+    
+                if not shops:
+                    send_message(chat_id, "❌ No shops found.")
+                    return {"ok": True}
+    
+                # Store shops for report selection
+                user_states[chat_id] = {
+                    "action": "select_shop_for_report",
+                    "data": {
+                        "shops": [{"shop_id": s.shop_id, "name": s.name} for s in shops]
+                    }
+                }
+    
+                kb_rows = []
+                for shop in shops:
+                    kb_rows.append([{
+                        "text": f"🏪 {shop.name} {'⭐' if shop.is_main else ''}",
+                        "callback_data": f"select_report_shop:{shop.shop_id}"
+                    }])
+                kb_rows.append([{"text": "⬅️ Back", "callback_data": "report_menu"}])
+    
+                send_message(chat_id, "🏪 Select shop for report:", {"inline_keyboard": kb_rows})
+                return {"ok": True}
+
+            elif text == "report_compare_shops" and user.role == "owner":
+                # Show comparison report options
+                tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                if not tenant_db:
+                    send_message(chat_id, "❌ Unable to access store database.")
+                    return {"ok": True}
+    
+                shops = tenant_db.query(ShopORM).all()
+                tenant_db.close()
+    
+                if not shops or len(shops) < 2:
+                    send_message(chat_id, "❌ Need at least 2 shops for comparison.")
+                    return {"ok": True}
+    
+                # Store shops for comparison
+                user_states[chat_id] = {
+                    "action": "compare_shops_for_report",
+                    "data": {
+                        "shops": [{"shop_id": s.shop_id, "name": s.name} for s in shops]
+                    }
+                }
+    
+                # Create comparison report menu
+                message = "📈 *Shop Comparison Reports*\n\nCompare performance across your shops:\n\n"
+                for i, shop in enumerate(shops, 1):
+                    message += f"{i}. 🏪 {shop.name} {'⭐' if shop.is_main else ''}\n"
+    
+                kb_rows = [
+                    [{"text": "📅 Compare Daily Sales", "callback_data": "compare_report:daily"}],
+                    [{"text": "📊 Compare Weekly Sales", "callback_data": "compare_report:weekly"}],
+                    [{"text": "📦 Compare Low Stock", "callback_data": "compare_report:low_stock"}],
+                    [{"text": "🏆 Compare Top Products", "callback_data": "compare_report:top_products"}],
+                    [{"text": "⬅️ Back to Reports", "callback_data": "report_menu"}]
+                ]
+    
+                send_message(chat_id, message, {"inline_keyboard": kb_rows})
+                return {"ok": True}
+    
+            elif text.startswith("select_report_shop:") and user.role == "owner":
+                try:
+                    shop_id = int(text.split(":")[1])
+        
+                    # Store selected shop for report
+                    current_state = user_states.get(chat_id, {})
+                    current_data = current_state.get("data", {})
+                    current_data["selected_shop_id"] = shop_id
+        
+                    # Get shop name
+                    tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                    if tenant_db:
+                        shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
+                        current_data["selected_shop_name"] = shop.name if shop else f"Shop {shop_id}"
+                        tenant_db.close()
+        
+                    user_states[chat_id] = {"action": "awaiting_shop_report", "data": current_data}
+        
+                    # Show enhanced report menu for specific shop
+                    kb_dict = report_menu_keyboard(user.role, is_shop_specific=True, shop_name=current_data["selected_shop_name"])
+                    send_message(chat_id, f"📊 *Reports for {current_data['selected_shop_name']}*\n\nSelect report type:", kb_dict)
+        
+                except (ValueError, IndexError):
+                    send_message(chat_id, "❌ Invalid shop selection.")
+    
+                return {"ok": True}
+    
+            elif text.startswith("compare_report:") and user.role == "owner":
+                try:
+                    report_type = text.split(":")[1]
+        
+                    current_state = user_states.get(chat_id, {})
+                    current_data = current_state.get("data", {})
+                    shops_data = current_data.get("shops", [])
+        
+                    if not shops_data:
+                        send_message(chat_id, "❌ No shops data available. Please start over.")
+                        user_states.pop(chat_id, None)
+                        return {"ok": True}
+        
+                    tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                    if not tenant_db:
+                        send_message(chat_id, "❌ Unable to access store database.")
+                        return {"ok": True}
+        
+                    # Generate comparison report
+                    shop_ids = [shop["shop_id"] for shop in shops_data]
+                    shop_names = [shop["name"] for shop in shops_data]
+        
+                    # Use the existing generate_report function with comparison logic
+                    # or create a new comparison function
+                    report = generate_comparison_report(tenant_db, f"report_{report_type}", shop_ids, shop_names)
+        
+                    # Add header
+                    report_titles = {
+                        "daily": "Daily Sales Comparison",
+                        "weekly": "Weekly Sales Comparison", 
+                        "low_stock": "Low Stock Comparison",
+                        "top_products": "Top Products Comparison"
+                    }
+        
+                    title = report_titles.get(report_type, "Shop Comparison")
+                    final_report = f"📈 *{title}*\n\n{report}"
+        
+                    send_message(chat_id, final_report)
+        
+                    # Add option to view another comparison
+                    kb_rows = [
+                        [{"text": "📈 Another Comparison", "callback_data": "report_compare_shops"}],
+                        [{"text": "⬅️ Back to Reports", "callback_data": "report_menu"}],
+                        [{"text": "🏠 Main Menu", "callback_data": "back_to_menu"}]
+                    ]
+        
+                    send_message(chat_id, "What would you like to do next?", {"inline_keyboard": kb_rows})
+        
+                except Exception as e:
+                    logger.error(f"❌ Comparison report error: {e}")
+                    send_message(chat_id, f"❌ Error generating comparison report: {str(e)}")
+    
+                return {"ok": True}
+    
             # -------------------- Report Callbacks (UPDATED FOR MULTI-SHOP) --------------------
             elif text in ["report_daily", "report_weekly", "report_monthly", "report_low_stock", 
                           "report_top_products", "report_aov", "report_stock_turnover", 
-                          "report_credits", "report_change", "report_payment_summary"]:  # ✅ Added payment_summary
+                          "report_credits", "report_change", "report_payment_summary"]:
 
                 logger.info(f"🎯 Processing callback: {text} from chat_id={chat_id}, role={user.role}")
 
@@ -4023,56 +4377,67 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     return {"ok": True}
 
                 try:
-                    # ✅ UPDATED: Determine shop information based on user role
+                    # ✅ ENHANCED: Check if owner selected a specific shop
                     shop_id = None
                     shop_name = None
+                    report_title = text.replace('_', ' ').title()
         
-                    if user.role in ["admin", "shopkeeper"]:
+                    # Check if owner is viewing a specific shop report
+                    current_state = user_states.get(chat_id, {})
+                    if current_state and current_state.get("action") == "awaiting_shop_report":
+                        current_data = current_state.get("data", {})
+                        shop_id = current_data.get("selected_shop_id")
+                        shop_name = current_data.get("selected_shop_name")
+            
+                        if shop_id:
+                            # Clear the state after use
+                            user_states.pop(chat_id, None)
+                            logger.info(f"📊 Owner generating {text} for specific shop: {shop_name} (ID: {shop_id})")
+                    elif user.role in ["admin", "shopkeeper"]:
                         # Admin/Shopkeeper can only see reports for their assigned shop
                         shop_id = user.shop_id
                         shop_name = user.shop_name or f"Shop {shop_id}"
             
-                        # Verify shop assignment exists
                         if not shop_id:
                             send_message(chat_id, "❌ You are not assigned to any shop. Contact the owner.")
                             return {"ok": True}
             
-                        # Verify shop exists in tenant database
-                        shop_exists = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
-                        if not shop_exists:
-                            send_message(chat_id, f"❌ Shop {shop_name} not found in database.")
-                            return {"ok": True}
-            
                         logger.info(f"📊 {user.role.title()} '{user.username}' generating {text} for shop {shop_name} (ID: {shop_id})")
-        
                     else:
-                        # Owner can see all shops (no shop filtering)
+                        # Owner viewing all shops (default)
                         logger.info(f"📊 Owner '{user.username}' generating {text} for all shops")
+                        report_title = f"All Shops - {report_title}"
 
-                    # ✅ UPDATED: Generate report with shop filtering
+                    # ✅ Generate report with shop filtering (if specified)
                     report = generate_report(tenant_db, text, shop_id=shop_id, shop_name=shop_name)
         
+                    # Add header based on scope
+                    if shop_name:
+                        final_report = f"📊 *{shop_name} - {report_title}*\n\n{report}"
+                    else:
+                        final_report = f"📊 *{report_title}*\n\n{report}"
+
                     # Send the report
-                    send_message(chat_id, report)
-        
+                    send_message(chat_id, final_report)
+
                     # Log successful generation
                     logger.info(f"✅ Report '{text}' generated successfully for chat_id={chat_id}")
-        
+
                 except Exception as e:
                     logger.error(f"❌ {text} failed for chat_id={chat_id}: {e}")
                     import traceback
                     traceback.print_exc()
-        
+
                     error_msg = f"❌ Failed to generate {text.replace('_', ' ')}."
                     if "division by zero" in str(e):
                         error_msg += "\n\nℹ️ No data available for this report period."
                     elif "relation" in str(e) and "does not exist" in str(e):
                         error_msg += "\n\nℹ️ Database tables not initialized. Please contact support."
-        
+
                     send_message(chat_id, error_msg)
 
                 return {"ok": True}
-    
+        
             # Handle back to menu
             elif text == "back_to_menu":
                 logger.info(f"🎯 Processing callback: back_to_menu from chat_id={chat_id}")
@@ -5009,40 +5374,128 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             send_message(chat_id, "❌ No products found with that name. Try again:")
                             return {"ok": True}
 
-                        if len(matches) == 1:
-                            # Single match - proceed directly to quantity
-                            product = matches[0]
-                            data["selected_product"] = {
-                                "product_id": product.product_id,
-                                "name": product.name,
-                                "current_stock": product.stock
-                            }
-                            user_states[chat_id] = {"action": "quick_stock_update", "step": 2, "data": data}
-                            send_message(chat_id, f"📦 Selected: {product.name}\nCurrent stock: {product.stock}\n\nEnter quantity to ADD to stock:")
-                        else:
-                            # Multiple matches - show selection
-                            data["search_results"] = [
-                                {
-                                    "product_id": p.product_id,
-                                    "name": p.name,
-                                    "current_stock": p.stock
-                                } for p in matches
-                            ]
-                            user_states[chat_id] = {"action": "quick_stock_update", "step": 1.5, "data": data}
-                            
-                            kb_rows = []
-                            for product in matches:
-                                kb_rows.append([{
-                                    "text": f"{product.name} (Stock: {product.stock})",
-                                    "callback_data": f"select_stock_product:{product.product_id}"
-                                }])
-                            kb_rows.append([{"text": "❌ Cancel", "callback_data": "cancel_quick_stock"}])
-                            
-                            send_message(chat_id, "🔍 Multiple products found. Select one:", {"inline_keyboard": kb_rows})
+                        # Store product matches (without stock yet - we need shop first)
+                        data["product_matches"] = [
+                            {
+                                "product_id": p.product_id,
+                                "name": p.name
+                            } for p in matches
+                        ]
+        
+                        # If owner with multiple shops, ask which shop
+                        if user.role == "owner":
+                            # Get all shops
+                            shops = tenant_db.query(ShopORM).all()
+                            if not shops:
+                                send_message(chat_id, "❌ No shops found in the system.")
+                                user_states.pop(chat_id, None)
+                                return {"ok": True}
+            
+                            if len(shops) == 1:
+                                # Only one shop - use it automatically
+                                data["selected_shop_id"] = shops[0].shop_id
+                                data["selected_shop_name"] = shops[0].name
+                
+                                # Show product selection
+                                if len(data["product_matches"]) == 1:
+                                    # Single match - proceed directly to quantity
+                                    product = data["product_matches"][0]
+                                    data["selected_product"] = product
+                                    user_states[chat_id] = {"action": "quick_stock_update", "step": 2, "data": data}
+                    
+                                    # Get current stock for this shop
+                                    stock_item = tenant_db.query(ProductShopStockORM).filter(
+                                        ProductShopStockORM.product_id == product["product_id"],
+                                        ProductShopStockORM.shop_id == shops[0].shop_id
+                                    ).first()
+                                    current_stock = stock_item.stock if stock_item else 0
+                    
+                                    send_message(chat_id, f"📦 Selected: {product['name']}\n🏪 Shop: {shops[0].name}\n📊 Current stock: {current_stock}\n\nEnter quantity to ADD to stock:")
+                                else:
+                                    # Multiple matches - show selection
+                                    user_states[chat_id] = {"action": "quick_stock_update", "step": 1.5, "data": data}
+                    
+                                    kb_rows = []
+                                    for product in data["product_matches"]:
+                                        # Get current stock for this shop
+                                        stock_item = tenant_db.query(ProductShopStockORM).filter(
+                                            ProductShopStockORM.product_id == product["product_id"],
+                                            ProductShopStockORM.shop_id == shops[0].shop_id
+                                        ).first()
+                                        current_stock = stock_item.stock if stock_item else 0
+                        
+                                        kb_rows.append([{
+                                            "text": f"{product['name']} (Stock: {current_stock})",
+                                            "callback_data": f"select_stock_product:{product['product_id']}"
+                                        }])
+                                    kb_rows.append([{"text": "❌ Cancel", "callback_data": "cancel_quick_stock"}])
+                    
+                                    send_message(chat_id, f"🏪 Shop: {shops[0].name}\n🔍 Multiple products found. Select one:", {"inline_keyboard": kb_rows})
+                            else:
+                                # Multiple shops - ask owner to select
+                                user_states[chat_id] = {"action": "quick_stock_update", "step": 1.5, "data": data}
+                
+                                kb_rows = []
+                                for shop in shops:
+                                    kb_rows.append([{
+                                        "text": f"🏪 {shop.name} {'⭐' if shop.is_main else ''}",
+                                        "callback_data": f"select_shop_for_quick_stock:{shop.shop_id}"
+                                    }])
+                                kb_rows.append([{"text": "❌ Cancel", "callback_data": "cancel_quick_stock"}])
+                
+                                send_message(chat_id, "🏪 Select which shop to update stock for:", {"inline_keyboard": kb_rows})
+        
+                        else:  # shopkeeper or admin
+                            # Non-owners use their assigned shop
+                            if not hasattr(user, 'shop_id') or user.shop_id is None:
+                                send_message(chat_id, "❌ You are not assigned to any shop. Please contact owner.")
+                                user_states.pop(chat_id, None)
+                                return {"ok": True}
+            
+                            data["selected_shop_id"] = user.shop_id
+                            # Get shop name for display
+                            shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == user.shop_id).first()
+                            data["selected_shop_name"] = shop.name if shop else "Your Shop"
+            
+                            # Show product selection
+                            if len(data["product_matches"]) == 1:
+                                # Single match - proceed directly
+                                product = data["product_matches"][0]
+                                data["selected_product"] = product
+                                user_states[chat_id] = {"action": "quick_stock_update", "step": 2, "data": data}
+                
+                                # Get current stock for this shop
+                                stock_item = tenant_db.query(ProductShopStockORM).filter(
+                                    ProductShopStockORM.product_id == product["product_id"],
+                                    ProductShopStockORM.shop_id == user.shop_id
+                                ).first()
+                                current_stock = stock_item.stock if stock_item else 0
+                
+                                send_message(chat_id, f"📦 Selected: {product['name']}\n🏪 Shop: {data['selected_shop_name']}\n📊 Current stock: {current_stock}\n\nEnter quantity to ADD to stock:")
+                            else:
+                                # Multiple matches - show selection
+                                user_states[chat_id] = {"action": "quick_stock_update", "step": 1.5, "data": data}
+                
+                                kb_rows = []
+                                for product in data["product_matches"]:
+                                    # Get current stock for this shop
+                                    stock_item = tenant_db.query(ProductShopStockORM).filter(
+                                        ProductShopStockORM.product_id == product["product_id"],
+                                        ProductShopStockORM.shop_id == user.shop_id
+                                    ).first()
+                                    current_stock = stock_item.stock if stock_item else 0
+                    
+                                    kb_rows.append([{
+                                        "text": f"{product['name']} (Stock: {current_stock})",
+                                        "callback_data": f"select_stock_product:{product['product_id']}"
+                                    }])
+                                kb_rows.append([{"text": "❌ Cancel", "callback_data": "cancel_quick_stock"}])
+                
+                                send_message(chat_id, f"🏪 Shop: {data['selected_shop_name']}\n🔍 Multiple products found. Select one:", {"inline_keyboard": kb_rows})
                         return {"ok": True}
 
                     # STEP 2: Enter quantity to add
-                    elif step == 2:  # Enter quantity to add
+                    elif step == 2:
                         quantity_text = text.strip()
                         if not quantity_text:
                             send_message(chat_id, "❌ Quantity cannot be empty. Enter quantity to add:")
@@ -5055,107 +5508,140 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                 return {"ok": True}
 
                             product = data["selected_product"]
+                            shop_id = data.get("selected_shop_id")
+            
+                            if not shop_id:
+                                send_message(chat_id, "❌ No shop selected. Please start over.")
+                                user_states.pop(chat_id, None)
+                                return {"ok": True}
+
+                            # Get shop name for display
+                            shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
+                            shop_name = shop.name if shop else f"Shop ID: {shop_id}"
             
                             if user.role == "owner":
                                 # Owner can update directly
-                                db_product = tenant_db.query(ProductORM).filter(
-                                    ProductORM.product_id == product["product_id"]
+                                # Get or create shop-specific stock record
+                                stock_item = tenant_db.query(ProductShopStockORM).filter(
+                                    ProductShopStockORM.product_id == product["product_id"],
+                                    ProductShopStockORM.shop_id == shop_id
                                 ).first()
                 
-                                if db_product:
-                                    old_stock = db_product.stock
-                                    new_stock = old_stock + quantity_to_add
-                                    db_product.stock = new_stock
-                                    tenant_db.commit()
-                    
-                                    # Success message for owner
-                                    success_msg = f"✅ Stock updated successfully!\n\n"
-                                    success_msg += f"📦 Product: {product['name']}\n"
-                                    success_msg += f"📊 Old Stock: {old_stock}\n"
-                                    success_msg += f"📈 Added: +{quantity_to_add}\n"
-                                    success_msg += f"🆕 New Stock: {new_stock}\n"
-                    
-                                    send_message(chat_id, success_msg)
-                    
-                                    # Return to main menu
-                                    user_states.pop(chat_id, None)
-                                    from app.user_management import get_role_based_menu
-                                    kb = get_role_based_menu(user.role)
-                                    send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
-                                else:
-                                    send_message(chat_id, "❌ Product not found in database.")
-                                    user_states.pop(chat_id, None)
-                    
+                                if not stock_item:
+                                    # Create stock record if it doesn't exist
+                                    stock_item = ProductShopStockORM(
+                                        product_id=product["product_id"],
+                                        shop_id=shop_id,
+                                        stock=0
+                                    )
+                                    tenant_db.add(stock_item)
+                                    tenant_db.flush()
+                
+                                old_stock = stock_item.stock
+                                new_stock = old_stock + quantity_to_add
+                                stock_item.stock = new_stock
+                                tenant_db.commit()
+
+                                # Success message for owner
+                                success_msg = f"✅ Stock updated successfully!\n\n"
+                                success_msg += f"📦 Product: {product['name']}\n"
+                                success_msg += f"🏪 Shop: {shop_name}\n"
+                                success_msg += f"📊 Old Stock: {old_stock}\n"
+                                success_msg += f"📈 Added: +{quantity_to_add}\n"
+                                success_msg += f"🆕 New Stock: {new_stock}\n"
+
+                                send_message(chat_id, success_msg)
+
+                                # Return to main menu
+                                user_states.pop(chat_id, None)
+                                from app.user_management import get_role_based_menu
+                                kb = get_role_based_menu(user.role)
+                                send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+                
                             else:
                                 # Shopkeeper: request approval for stock update
-                                db_product = tenant_db.query(ProductORM).filter(
-                                    ProductORM.product_id == product["product_id"]
+                                # Get shop-specific stock for the product
+                                stock_item = tenant_db.query(ProductShopStockORM).filter(
+                                    ProductShopStockORM.product_id == product["product_id"],
+                                    ProductShopStockORM.shop_id == shop_id
                                 ).first()
                 
-                                if db_product:
-                                    old_stock = db_product.stock
-                                    new_stock = old_stock + quantity_to_add
-                    
-                                    # Save stock update for approval
-                                    stock_data = {
-                                        "product_id": product["product_id"],
-                                        "product_name": product["name"],
-                                        "old_stock": old_stock,
-                                        "new_stock": new_stock,
-                                        "quantity_added": quantity_to_add
-                                    }
-                    
-                                    # Create pending approval for stock update
-                                    from app.core import SessionLocal
-                                    central_db = SessionLocal()
-                                    shopkeeper_user = central_db.query(User).filter(User.chat_id == chat_id).first()
-                    
-                                    if shopkeeper_user:
-                                        pending_stock = PendingApprovalORM(
-                                            action_type='stock_update',
-                                            shopkeeper_id=shopkeeper_user.user_id,
-                                            shopkeeper_name=shopkeeper_user.name,
-                                            product_data=json.dumps(stock_data),
-                                            status='pending'
+                                if not stock_item:
+                                    # Create stock record if it doesn't exist
+                                    stock_item = ProductShopStockORM(
+                                        product_id=product["product_id"],
+                                        shop_id=shop_id,
+                                        stock=0
+                                    )
+                                    tenant_db.add(stock_item)
+                                    tenant_db.flush()
+                
+                                old_stock = stock_item.stock
+                                new_stock = old_stock + quantity_to_add
+
+                                # Save stock update for approval
+                                stock_data = {
+                                    "product_id": product["product_id"],
+                                    "product_name": product["name"],
+                                    "shop_id": shop_id,
+                                    "old_stock": old_stock,
+                                    "new_stock": new_stock,
+                                    "quantity_added": quantity_to_add
+                                }
+
+                                # Create pending approval for stock update
+                                from app.core import SessionLocal
+                                central_db = SessionLocal()
+                                shopkeeper_user = central_db.query(User).filter(User.chat_id == chat_id).first()
+
+                                if shopkeeper_user:
+                                    pending_stock = PendingApprovalORM(
+                                        action_type='stock_update',
+                                        shopkeeper_id=shopkeeper_user.user_id,
+                                        shopkeeper_name=shopkeeper_user.name,
+                                        shop_id=shop_id,
+                                        product_data=json.dumps(stock_data),
+                                        status='pending'
+                                    )
+
+                                    tenant_db.add(pending_stock)
+                                    tenant_db.commit()
+                                    tenant_db.refresh(pending_stock)
+
+                                    # Notify owner
+                                    owner = central_db.query(User).filter(
+                                        User.tenant_schema == shopkeeper_user.tenant_schema,
+                                        User.role == 'owner'
+                                    ).first()
+
+                                    if owner:
+                                        from app.telegram_notifications import notify_owner_of_stock_update_request
+                                        notify_owner_of_stock_update_request(
+                                            owner.chat_id,
+                                            product["name"],
+                                            old_stock,
+                                            new_stock,
+                                            shopkeeper_user.name,
+                                            pending_stock.approval_id,
+                                            shop_id
                                         )
-                        
-                                        tenant_db.add(pending_stock)
-                                        tenant_db.commit()
-                                        tenant_db.refresh(pending_stock)
-                        
-                                        # Notify owner
-                                        owner = central_db.query(User).filter(
-                                            User.tenant_schema == shopkeeper_user.tenant_schema,
-                                            User.role == 'owner'
-                                        ).first()
-                        
-                                        if owner:
-                                            from app.telegram_notifications import notify_owner_of_stock_update_request
-                                            notify_owner_of_stock_update_request(
-                                                owner.chat_id,
-                                                product["name"],
-                                                old_stock,
-                                                new_stock,
-                                                shopkeeper_user.name,
-                                                pending_stock.approval_id
-                                            )
-                        
-                                        central_db.close()
-                        
-                                        send_message(chat_id, f"✅ Stock update request submitted for approval. Owner will review adding +{quantity_to_add} to {product['name']}.")
-                                    else:
-                                        send_message(chat_id, "❌ Failed to submit stock update request.")
-                                        central_db.close()
-                    
-                                    user_states.pop(chat_id, None)
+
+                                    central_db.close()
+
+                                    send_message(chat_id, f"✅ Stock update request submitted for approval. Owner will review adding +{quantity_to_add} to {product['name']} at {shop_name}.")
                                 else:
-                                    send_message(chat_id, "❌ Product not found in database.")
-                                    user_states.pop(chat_id, None)
+                                    send_message(chat_id, "❌ Failed to submit stock update request.")
+                                    central_db.close()
+
+                                user_states.pop(chat_id, None)
 
                         except ValueError:
                             send_message(chat_id, "❌ Invalid quantity. Enter a valid number:")
-                        return {"ok": True}
-        
+                        except Exception as e:
+                            send_message(chat_id, f"❌ Error updating stock: {str(e)}")
+                            import logging
+                            logging.error(f"Stock update error: {str(e)}")
+                        return {"ok": True}        
                         
                 # -------------------- Add Shop Stock Flow --------------------
                 elif action == "add_shop_stock":
