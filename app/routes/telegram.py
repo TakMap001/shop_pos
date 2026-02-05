@@ -238,10 +238,22 @@ def products_page_view(tenant_db, page: int = 1, per_page: int = 5):
 
     # Prepare textual listing with clear IDs
     lines = [f"📦 *Products — Page {page}/{total_pages}*"]
+    
     for p in products:
         # Ensure price cast to float for printing
         price = float(p.price) if p.price is not None else 0.0
-        lines.append(f"ID {p.product_id}: {p.name} — ${price:.2f} — Stock: {p.stock}")
+        
+        # Get total stock across all shops
+        total_stock = 0
+        shop_stocks = tenant_db.query(ProductShopStockORM).filter(
+            ProductShopStockORM.product_id == p.product_id
+        ).all()
+        
+        if shop_stocks:
+            total_stock = sum(stock.stock for stock in shop_stocks)
+        
+        # FIXED: Use total_stock instead of p.stock
+        lines.append(f"ID {p.product_id}: {p.name} — ${price:.2f} — Total Stock: {total_stock}")
 
     text = "\n".join(lines)
 
@@ -891,6 +903,9 @@ def update_product(db: Session, chat_id: int, product: ProductORM, data: dict):
     Update a product in a tenant-aware way.
     Accepts a ProductORM instance and a `data` dict containing any updated fields.
     Supports "-" to keep existing values.
+    
+    NOTE: Stock, min_stock_level, and low_stock_threshold are now handled in 
+    ProductShopStockORM (shop-specific). This function only updates ProductORM fields.
     """
     try:
         # -------------------- Name --------------------
@@ -907,52 +922,63 @@ def update_product(db: Session, chat_id: int, product: ProductORM, data: dict):
                 send_message(chat_id, "❌ Invalid price. Please enter a number.")
                 return
 
-        # -------------------- Quantity --------------------
-        if "new_quantity" in data and data["new_quantity"] != "-":
-            try:
-                product.stock = int(data["new_quantity"])
-                if product.stock < 0:
-                    raise ValueError("Stock cannot be negative.")
-            except ValueError:
-                send_message(chat_id, "❌ Invalid quantity. Please enter a whole number.")
-                return
-
         # -------------------- Unit Type --------------------
         if "new_unit" in data and data["new_unit"] != "-":
             product.unit_type = data["new_unit"].strip()
 
-        # -------------------- Min Stock Level --------------------
-        if "new_min_stock" in data and data["new_min_stock"] != "-":
-            try:
-                product.min_stock_level = int(data["new_min_stock"])
-            except ValueError:
-                send_message(chat_id, "❌ Invalid minimum stock level. Please enter a whole number.")
-                return
-
-        # -------------------- Low Stock Threshold --------------------
-        if "new_low_threshold" in data and data["new_low_threshold"] != "-":
-            try:
-                product.low_stock_threshold = int(data["new_low_threshold"])
-            except ValueError:
-                send_message(chat_id, "❌ Invalid low stock threshold. Please enter a whole number.")
-                return
-
+        # -------------------- REMOVED: Quantity, Min Stock, Low Threshold --------------------
+        # These are now handled in ProductShopStockORM (shop-specific stock)
+        # Do NOT update product.stock, product.min_stock_level, product.low_stock_threshold
+        # as these attributes don't exist on ProductORM anymore
+        
         # -------------------- Commit --------------------
         db.commit()
         db.refresh(product)
-        send_message(
-            chat_id,
-            f"✅ Product updated successfully:\n"
-            f"📦 {product.name}\n"
-            f"💲 Price: {product.price}\n"
-            f"📊 Stock: {product.stock} {product.unit_type}\n"
-            f"📉 Min Level: {product.min_stock_level}, ⚠️ Alert: {product.low_stock_threshold}"
-        )
+        
+        # Get total stock across all shops (for informational display)
+        total_stock = 0
+        shop_stocks = db.query(ProductShopStockORM).filter(
+            ProductShopStockORM.product_id == product.product_id
+        ).all()
+        
+        if shop_stocks:
+            total_stock = sum(stock.stock for stock in shop_stocks)
+        
+        # Also get low stock thresholds from shops (if any)
+        low_thresholds = []
+        for stock in shop_stocks:
+            if stock.low_stock_threshold:
+                # Get shop name
+                shop = db.query(ShopORM).filter(ShopORM.shop_id == stock.shop_id).first()
+                shop_name = shop.name if shop else f"Shop {stock.shop_id}"
+                low_thresholds.append(f"{shop_name}: {stock.low_stock_threshold}")
+
+        # Build success message
+        success_msg = f"✅ Product updated successfully:\n"
+        success_msg += f"📦 {product.name}\n"
+        success_msg += f"💲 Price: ${product.price:.2f}\n"
+        success_msg += f"📦 Unit: {product.unit_type}\n"
+        success_msg += f"📊 Total Stock (all shops): {total_stock}\n"
+        
+        if low_thresholds:
+            success_msg += f"⚠️ Low Stock Alerts: {', '.join(low_thresholds)}\n"
+        else:
+            success_msg += "⚠️ No low stock thresholds set\n"
+            
+        # Show which shop stocks were updated (if any)
+        if "shop_stocks" in data and data["shop_stocks"]:
+            success_msg += "\n🏪 Updated shop stocks:\n"
+            for stock_info in data["shop_stocks"]:
+                if "new_stock" in stock_info:
+                    shop = db.query(ShopORM).filter(ShopORM.shop_id == stock_info["shop_id"]).first()
+                    shop_name = shop.name if shop else f"Shop {stock_info['shop_id']}"
+                    success_msg += f"  • {shop_name}: {stock_info.get('current_stock', '?')} → {stock_info['new_stock']}\n"
+
+        send_message(chat_id, success_msg)
 
     except Exception as e:
         db.rollback()
         send_message(chat_id, f"❌ Failed to update product: {str(e)}")
-
 
 def get_cart_summary(cart):
     """Generate a formatted cart summary"""
@@ -3234,6 +3260,15 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, f"❌ Product ID {product_id} not found.")
                     return {"ok": True}
 
+                # Get total stock across all shops (for informational purposes)
+                total_stock = 0
+                shop_stocks = tenant_db.query(ProductShopStockORM).filter(
+                    ProductShopStockORM.product_id == product_id
+                ).all()
+                
+                if shop_stocks:
+                    total_stock = sum(stock.stock for stock in shop_stocks)
+                
                 # Start update flow
                 user_states[chat_id] = {
                     "action": "awaiting_update",
@@ -3241,16 +3276,18 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     "data": {"product_id": product_id}
                 }
 
+                # FIXED: Removed product.stock - show total stock from all shops instead
                 text_msg = (
                     f"✏️ Updating: {product.name}\n\n"
-                    f"💰 Price: ${product.price}\n"
-                    f"📦 Stock: {product.stock} {product.unit_type}\n\n"
+                    f"💰 Price: ${product.price:.2f}\n"
+                    f"📦 Unit: {product.unit_type}\n"
+                    f"🏪 Total Stock (across all shops): {total_stock}\n\n"
                     "Enter NEW NAME (or '-' to keep current):"
                 )
 
                 send_message(chat_id, text_msg)
                 return {"ok": True}
-
+                
             # -------------------- Record Sale --------------------
             elif text == "record_sale":
                 tenant_db = get_tenant_session(user.tenant_schema, chat_id)
@@ -3281,6 +3318,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     kb_rows = []
                     for shop in shops:
                         # Get shop stats (optional)
+                        # FIXED: Use ShopORM in query instead of undefined variable
                         sales_count = tenant_db.query(SaleORM).filter(SaleORM.shop_id == shop.shop_id).count()
                         kb_rows.append([{
                             "text": f"🏪 {shop.name} ({sales_count} sales)",
@@ -3318,7 +3356,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
 
                 tenant_db.close()
                 return {"ok": True}
-            
+                            
             elif text == "view_shops_before_sale":
                 tenant_db = get_tenant_session(user.tenant_schema, chat_id)
                 if not tenant_db:
@@ -3386,18 +3424,21 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         }
                     }
         
-                    # Check if shop has products
-                    products_count = tenant_db.query(ProductORM).filter(
-                        ProductORM.shop_id == shop_id
+                    # REMOVED: Incorrect product count check
+                    # ProductORM doesn't have shop_id field, so this query was wrong
+                    # Instead, check if shop has any stock assigned
+        
+                    # Check if shop has any stock items
+                    stock_count = tenant_db.query(ProductShopStockORM).filter(
+                        ProductShopStockORM.shop_id == shop_id
                     ).count()
         
-                    if products_count == 0:
-                        send_message(chat_id, f"⚠️ *{shop.name} has no products yet.*\n\nAdd products first or record sale for other items.")
-                        # Still allow them to proceed - they might be adding products
+                    if stock_count == 0:
+                        send_message(chat_id, f"⚠️ *{shop.name} has no stock assigned yet.*\n\nAdd stock to this shop first or contact admin.")
                         kb_rows = [
-                            [{"text": "➕ Add Product First", "callback_data": "add_product"}],
-                            [{"text": "💰 Continue Anyway", "callback_data": "continue_sale"}],
-                            [{"text": "⬅️ Choose Another Shop", "callback_data": "record_sale"}]
+                            [{"text": "📦 View Stock", "callback_data": "view_stock"}],
+                            [{"text": "⬅️ Choose Another Shop", "callback_data": "record_sale"}],
+                            [{"text": "🏠 Main Menu", "callback_data": "back_to_menu"}]
                         ]
                         send_message(chat_id, "What would you like to do?", {"inline_keyboard": kb_rows})
                     else:
@@ -3409,7 +3450,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     send_message(chat_id, "❌ Invalid shop selection.")
     
                 return {"ok": True}
-        
+                        
             elif text == "continue_sale":
                 # Get current state
                 current_state = user_states.get(chat_id, {})
@@ -3420,25 +3461,39 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     user_states.pop(chat_id, None)
                     return {"ok": True}
     
-                # Continue with sale even if shop has no products
+                # Continue with sale even if shop has no stock
                 user_states[chat_id] = {
                     "action": "awaiting_sale", 
                     "step": 1, 
                     "data": current_data
                 }
+                
+                # Check if shop actually has stock (inform user)
+                tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                if tenant_db:
+                    stock_count = tenant_db.query(ProductShopStockORM).filter(
+                        ProductShopStockORM.shop_id == current_data["selected_shop_id"]
+                    ).count()
+                    tenant_db.close()
+                    
+                    if stock_count == 0:
+                        send_message(chat_id, f"⚠️ Warning: This shop has no stock assigned.\nYou can still add products but stock won't be tracked.\n\nEnter product name:")
+                        return {"ok": True}
+                
                 send_message(chat_id, f"💰 Recording sale...\nEnter product name:")
                 return {"ok": True}
-    
+                    
             # -------------------- Product Selection for Sale --------------------
             elif text.startswith("select_sale:"):
                 try:
-                    product_id = int(text.split(":")[1])
-        
+                    # New format: select_sale:product_id:stock_id (from awaiting_sale handler)
+                    # Old format: select_sale:product_id (from other handlers)
+                    parts = text.split(":")
+                    
                     # ✅ CRITICAL: Get current state to preserve cart
                     current_state = user_states.get(chat_id, {})
                     current_data = current_state.get("data", {})
         
-                    # Debug logging
                     logger.info(f"🔍 CART DEBUG [select_sale] - Chat: {chat_id}, Items: {len(current_data.get('cart', []))}")
         
                     # Ensure tenant session is available
@@ -3446,11 +3501,40 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     if tenant_db is None:
                         send_message(chat_id, "❌ Unable to access tenant database.")
                         return {"ok": True}
+                    
+                    shop_id = current_data.get("selected_shop_id")
+                    if not shop_id:
+                        send_message(chat_id, "❌ No shop selected. Please start over.")
+                        user_states.pop(chat_id, None)
+                        return {"ok": True}
+                    
+                    if len(parts) >= 3:
+                        # New format with stock_id
+                        product_id = int(parts[1])
+                        stock_id = int(parts[2])
+                        
+                        # Get product and stock info
+                        product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
+                        stock_item = tenant_db.query(ProductShopStockORM).filter(
+                            ProductShopStockORM.stock_id == stock_id,
+                            ProductShopStockORM.shop_id == shop_id
+                        ).first()
+                        
+                    else:
+                        # Old format - find stock_id
+                        product_id = int(parts[1])
+                        product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
+                        stock_item = tenant_db.query(ProductShopStockORM).filter(
+                            ProductShopStockORM.product_id == product_id,
+                            ProductShopStockORM.shop_id == shop_id
+                        ).first()
         
-                    # Find the selected product
-                    product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
                     if not product:
                         send_message(chat_id, "❌ Product not found. Please try again.")
+                        return {"ok": True}
+                    
+                    if not stock_item:
+                        send_message(chat_id, f"❌ {product.name} not available in this shop's stock.")
                         return {"ok": True}
         
                     # Store selected product and preserve existing cart
@@ -3459,7 +3543,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         "name": product.name,
                         "price": float(product.price),
                         "unit_type": product.unit_type,
-                        "available_stock": product.stock
+                        "available_stock": stock_item.stock,  # FIXED: Use stock_item.stock
+                        "stock_id": stock_item.stock_id  # Store for stock update
                     }
         
                     # Update state with preserved cart and new product
@@ -3471,11 +3556,12 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
         
                     send_message(chat_id, f"📦 Selected {product.name} ({product.unit_type}). Enter quantity to add:")
         
-                except (ValueError, IndexError):
+                except (ValueError, IndexError) as e:
+                    logger.error(f"❌ Error in select_sale handler: {e}")
                     send_message(chat_id, "❌ Invalid product selection.")
     
                 return {"ok": True}
-        
+                        
             # -------------------- Cart Management Callbacks --------------------
             elif text == "add_another_item":
                 logger.info(f"🎯 Processing callback: add_another_item from chat_id={chat_id}")
@@ -3622,52 +3708,6 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         send_message(chat_id, "❌ Invalid item selection.")
                 except (ValueError, IndexError):
                     send_message(chat_id, "❌ Error removing item.")
-                return {"ok": True}
-
-            # ✅ NEW: Handle product selection from multiple matches
-            elif text.startswith("select_sale:"):
-                try:
-                    product_id = int(text.split(":")[1])
-        
-                    # ✅ CRITICAL: Get current state to preserve cart
-                    current_state = user_states.get(chat_id, {})
-                    current_data = current_state.get("data", {})
-        
-                    logger.info(f"🔍 CART DEBUG [select_sale] - Chat: {chat_id}, Items: {len(current_data.get('cart', []))}")
-        
-                    # Ensure tenant session is available
-                    tenant_db = get_tenant_session(user.tenant_schema, chat_id)
-                    if tenant_db is None:
-                        send_message(chat_id, "❌ Unable to access tenant database.")
-                        return {"ok": True}
-        
-                    # Find the selected product
-                    product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
-                    if not product:
-                        send_message(chat_id, "❌ Product not found. Please try again.")
-                        return {"ok": True}
-        
-                    # Store selected product and preserve existing cart
-                    current_data["current_product"] = {
-                        "product_id": product.product_id,
-                        "name": product.name,
-                        "price": float(product.price),
-                        "unit_type": product.unit_type,
-                        "available_stock": product.stock
-                    }
-        
-                    # Update state with preserved cart and new product
-                    user_states[chat_id] = {
-                        "action": "awaiting_sale", 
-                        "step": 2, 
-                        "data": current_data  # This preserves the cart!
-                    }
-        
-                    send_message(chat_id, f"📦 Selected {product.name} ({product.unit_type}). Enter quantity to add:")
-        
-                except (ValueError, IndexError):
-                    send_message(chat_id, "❌ Invalid product selection.")
-    
                 return {"ok": True}
 
             # ✅ UPDATED: Payment method selection with Ecocash surcharge
@@ -5273,8 +5313,9 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             return {"ok": True}
 
                         # Multiple matches → inline keyboard
+                        # FIXED: Don't show stock here (product doesn't have stock attribute)
                         kb_rows = [
-                            [{"text": f"{p.name} — Stock: {p.stock} ({p.unit_type})",
+                            [{"text": f"{p.name} ({p.unit_type}) — Price: ${p.price:.2f}",
                               "callback_data": f"select_update:{p.product_id}"}] for p in matches
                         ]
                         kb_rows.append([{"text": "⬅️ Cancel", "callback_data": "back_to_menu"}])
@@ -5295,7 +5336,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             user_states.pop(chat_id, None)
                             return {"ok": True}
 
-                        # --- Proceed step-by-step: name → price → quantity → unit → min → low threshold ---
+                        # --- Proceed step-by-step: name → price → unit → category/shop (REMOVED: quantity, min_stock, low_threshold) ---
                         if step == 2:  # new name
                             val = text.strip()
                             if val == "":
@@ -5323,77 +5364,138 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                     send_message(chat_id, "❌ Invalid price. Enter a number or `-` to skip:")
                                     return {"ok": True}
                             user_states[chat_id] = {"action": "awaiting_update", "step": 4, "data": data}
-                            send_message(chat_id, "🔢 Enter new quantity (or send `-` to keep current):")
-                            return {"ok": True}
-
-                        if step == 4:  # quantity
-                            val = text.strip()
-                            if val == "":
-                                send_message(chat_id, "⚠️ Please enter a valid quantity or '-' to keep current:")
-                                return {"ok": True}
-                            if val != "-":
-                                try:
-                                    qty_val = int(val)
-                                    if qty_val < 0:
-                                        send_message(chat_id, "❌ Quantity cannot be negative. Enter a valid number:")
-                                        return {"ok": True}
-                                    data["new_quantity"] = qty_val
-                                except ValueError:
-                                    send_message(chat_id, "❌ Invalid quantity. Enter a number or `-` to skip:")
-                                    return {"ok": True}
-                            user_states[chat_id] = {"action": "awaiting_update", "step": 5, "data": data}
                             send_message(chat_id, "📦 Enter new unit type (or send `-` to keep current):")
                             return {"ok": True}
 
-                        if step == 5:  # unit
+                        if step == 4:  # unit
                             val = text.strip()
                             if val == "":
                                 send_message(chat_id, "⚠️ Please enter a valid unit type or '-' to keep current:")
                                 return {"ok": True}
                             if val != "-":
                                 data["new_unit"] = val
-                            user_states[chat_id] = {"action": "awaiting_update", "step": 6, "data": data}
-                            send_message(chat_id, "📊 Enter new minimum stock level (or send `-` to keep current):")
+                            
+                            # ✅ ASK: Update stock in shops? (since stock is now shop-specific)
+                            user_states[chat_id] = {"action": "awaiting_update", "step": 5, "data": data}
+                            send_message(chat_id, "🏪 Do you want to update stock levels in shops?\nSend 'yes' to update shop stocks or '-' to skip:")
                             return {"ok": True}
 
-                        if step == 6:  # min stock
-                            val = text.strip()
+                        if step == 5:  # update shop stocks?
+                            val = text.strip().lower()
                             if val == "":
-                                send_message(chat_id, "⚠️ Please enter a valid minimum stock level or '-' to keep current:")
+                                send_message(chat_id, "⚠️ Please enter 'yes' to update shop stocks or '-' to skip:")
                                 return {"ok": True}
+                            
+                            if val == "yes":
+                                # Get all shops that have this product in stock
+                                shop_stocks = tenant_db.query(ProductShopStockORM).filter(
+                                    ProductShopStockORM.product_id == product_id
+                                ).all()
+                                
+                                if not shop_stocks:
+                                    send_message(chat_id, "ℹ️ This product has no stock assigned to any shop.")
+                                    # Continue to confirmation
+                                    user_states[chat_id] = {"action": "awaiting_update", "step": 7, "data": data}
+                                    send_message(chat_id, "✅ Update product details only? (yes/no):")
+                                    return {"ok": True}
+                                
+                                data["shop_stocks"] = [
+                                    {"stock_id": stock.stock_id, "shop_id": stock.shop_id, "current_stock": stock.stock}
+                                    for stock in shop_stocks
+                                ]
+                                data["current_shop_index"] = 0  # Start with first shop
+                                
+                                # Get shop name for first shop
+                                first_stock = shop_stocks[0]
+                                shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == first_stock.shop_id).first()
+                                shop_name = shop.name if shop else f"Shop {first_stock.shop_id}"
+                                
+                                user_states[chat_id] = {"action": "awaiting_update", "step": 6, "data": data}
+                                send_message(chat_id, f"🏪 Shop: {shop_name}\nCurrent stock: {first_stock.stock}\nEnter new stock quantity (or '-' to keep current):")
+                                return {"ok": True}
+                            else:
+                                # Skip shop stock updates
+                                user_states[chat_id] = {"action": "awaiting_update", "step": 7, "data": data}
+                                send_message(chat_id, "✅ Update product details only? (yes/no):")
+                                return {"ok": True}
+
+                        if step == 6:  # update stock for each shop
+                            val = text.strip()
+                            current_index = data.get("current_shop_index", 0)
+                            shop_stocks = data.get("shop_stocks", [])
+                            
+                            if not shop_stocks:
+                                send_message(chat_id, "❌ Error: No shop stocks data.")
+                                user_states.pop(chat_id, None)
+                                return {"ok": True}
+                            
                             if val != "-":
                                 try:
-                                    min_stock_val = int(val)
-                                    if min_stock_val < 0:
-                                        send_message(chat_id, "❌ Minimum stock cannot be negative. Enter a valid number:")
+                                    new_stock = int(val)
+                                    if new_stock < 0:
+                                        send_message(chat_id, "❌ Stock cannot be negative. Enter a valid number:")
                                         return {"ok": True}
-                                    data["new_min_stock"] = min_stock_val
+                                    # Update stock in the list
+                                    shop_stocks[current_index]["new_stock"] = new_stock
                                 except ValueError:
                                     send_message(chat_id, "❌ Invalid number. Enter an integer or `-` to skip:")
                                     return {"ok": True}
-                            user_states[chat_id] = {"action": "awaiting_update", "step": 7, "data": data}
-                            send_message(chat_id, "⚠️ Enter new low stock threshold (or send `-` to keep current):")
+                            
+                            # Move to next shop
+                            next_index = current_index + 1
+                            data["current_shop_index"] = next_index
+                            
+                            if next_index < len(shop_stocks):
+                                # Get next shop info
+                                next_stock = shop_stocks[next_index]
+                                shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == next_stock["shop_id"]).first()
+                                shop_name = shop.name if shop else f"Shop {next_stock['shop_id']}"
+                                
+                                user_states[chat_id] = {"action": "awaiting_update", "step": 6, "data": data}
+                                send_message(chat_id, f"🏪 Shop: {shop_name}\nCurrent stock: {next_stock['current_stock']}\nEnter new stock quantity (or '-' to keep current):")
+                            else:
+                                # Finished all shops
+                                user_states[chat_id] = {"action": "awaiting_update", "step": 7, "data": data}
+                                send_message(chat_id, "✅ All shop stocks updated. Update product details? (yes/no):")
                             return {"ok": True}
 
-                        if step == 7:  # low threshold
-                            val = text.strip()
+                        if step == 7:  # confirmation
+                            val = text.strip().lower()
                             if val == "":
-                                send_message(chat_id, "⚠️ Please enter a valid low stock threshold or '-' to keep current:")
+                                send_message(chat_id, "⚠️ Please enter 'yes' or 'no':")
                                 return {"ok": True}
-                            if val != "-":
-                                try:
-                                    threshold_val = int(val)
-                                    if threshold_val < 0:
-                                        send_message(chat_id, "❌ Low stock threshold cannot be negative. Enter a valid number:")
-                                        return {"ok": True}
-                                    data["new_low_threshold"] = threshold_val
-                                except ValueError:
-                                    send_message(chat_id, "❌ Invalid number. Enter an integer or `-` to skip:")
-                                    return {"ok": True}
-
+                            
+                            if val != "yes":
+                                send_message(chat_id, "❌ Update cancelled.")
+                                user_states.pop(chat_id, None)
+                                from app.user_management import get_role_based_menu
+                                kb = get_role_based_menu(user.role)
+                                send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+                                return {"ok": True}
+                            
                             # ✅ Update product in DB
-                            update_product(tenant_db, chat_id, product, data)
+                            # Update ProductORM fields
+                            if "new_name" in data and data["new_name"]:
+                                product.name = data["new_name"]
+                            if "new_price" in data:
+                                product.price = data["new_price"]
+                            if "new_unit" in data and data["new_unit"]:
+                                product.unit_type = data["new_unit"]
+                            
                             tenant_db.commit()
+                            
+                            # ✅ Update shop stocks if requested
+                            shop_stocks = data.get("shop_stocks", [])
+                            if shop_stocks:
+                                for stock_info in shop_stocks:
+                                    if "new_stock" in stock_info:
+                                        stock_item = tenant_db.query(ProductShopStockORM).filter(
+                                            ProductShopStockORM.stock_id == stock_info["stock_id"]
+                                        ).first()
+                                        if stock_item:
+                                            stock_item.stock = stock_info["new_stock"]
+                                            tenant_db.commit()
+                            
                             send_message(chat_id, f"✅ Product *{product.name}* updated successfully.")
                             
                             # ✅ Return to main menu
@@ -5402,8 +5504,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             kb = get_role_based_menu(user.role)
                             send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                             return {"ok": True}
-                            
-
+                                                        
                 # -------------------- Record Sale (Cart-based system) --------------------
                 elif action == "awaiting_sale":
                     # Ensure tenant session is available
@@ -5431,29 +5532,48 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         shop_name = data.get("selected_shop_name", "Shop")
                         send_message(chat_id, f"🏪 {shop_name}\n🔍 Searching for products...")
 
-                        matches = tenant_db.query(ProductORM).filter(ProductORM.name.ilike(f"%{text}%")).all()
+                        # Get shop_id from data (should be set when shopkeeper selected shop)
+                        shop_id = data.get("selected_shop_id")
+                        if not shop_id:
+                            send_message(chat_id, "❌ No shop selected. Please start over from main menu.")
+                            user_states.pop(chat_id, None)
+                            return {"ok": True}
+
+                        # CORRECT QUERY: Get shop-specific stock with product info
+                        matches = tenant_db.query(ProductShopStockORM, ProductORM).join(
+                            ProductORM, ProductORM.product_id == ProductShopStockORM.product_id
+                        ).filter(
+                            ProductShopStockORM.shop_id == shop_id,
+                            ProductORM.name.ilike(f"%{text}%")
+                        ).all()
+                        
                         if not matches:
-                            send_message(chat_id, "⚠️ No products found with that name. Try again:")
+                            send_message(chat_id, "⚠️ No products found with that name in this shop. Try again:")
                             return {"ok": True}
 
                         if len(matches) == 1:
-                            selected = matches[0]
+                            stock_item, product = matches[0]
                             data["current_product"] = {
-                                "product_id": selected.product_id,
-                                "name": selected.name,
-                                "price": float(selected.price),
-                                "unit_type": selected.unit_type,
-                                "available_stock": selected.stock
+                                "product_id": product.product_id,
+                                "name": product.name,
+                                "price": float(product.price),
+                                "unit_type": product.unit_type,
+                                "available_stock": stock_item.stock,  # CORRECT: Shop-specific stock
+                                "stock_id": stock_item.stock_id  # For updating stock later
                             }
                             user_states[chat_id] = {"action": "awaiting_sale", "step": 2, "data": data}
-                            send_message(chat_id, f"📦 Selected {selected.name} ({selected.unit_type}). Enter quantity to add:")
+                            send_message(chat_id, f"📦 Selected {product.name} ({product.unit_type}). Enter quantity to add:")
                             return {"ok": True}
 
                         # multiple matches -> show inline keyboard for user to pick
-                        kb_rows = [
-                            [{"text": f"{p.name} — Stock: {p.stock} ({p.unit_type})", "callback_data": f"select_sale:{p.product_id}"}]
-                            for p in matches
-                        ]
+                        kb_rows = []
+                        for stock_item, product in matches:
+                            status = "🟢" if stock_item.stock > stock_item.low_stock_threshold else "🔴" if stock_item.stock == 0 else "🟡"
+                            kb_rows.append([{
+                                "text": f"{status} {product.name} — Stock: {stock_item.stock} ({product.unit_type})", 
+                                "callback_data": f"select_sale:{product.product_id}:{stock_item.stock_id}"
+                            }])
+                        
                         kb_rows.append([{"text": "🛒 View Cart", "callback_data": "view_cart"}])
                         send_message(chat_id, "🔹 Multiple products found. Please select:", {"inline_keyboard": kb_rows})
                         return {"ok": True}
@@ -5492,7 +5612,8 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                 "price": current_product["price"],
                                 "quantity": qty,
                                 "unit_type": current_product["unit_type"],
-                                "subtotal": current_product["price"] * qty
+                                "subtotal": current_product["price"] * qty,
+                                "stock_id": current_product.get("stock_id")  # Include stock_id for stock update
                             }
                             data["cart"].append(cart_item)
                             
@@ -5721,18 +5842,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         user_states[chat_id] = {"action": "awaiting_sale", "step": 6, "data": data}
                         send_message(chat_id, f"✅ Customer info recorded. Confirm sale? (yes/no)")
                         return {"ok": True}
-    
-                    # STEP 5.1: Customer contact (optional)
-                    elif step == 5.1:
-                        customer_contact = text.strip()
-                        if customer_contact.lower() == "skip":
-                            customer_contact = ""
-    
-                        data["customer_contact"] = customer_contact
-                        user_states[chat_id] = {"action": "awaiting_sale", "step": 6, "data": data}
-                        send_message(chat_id, f"✅ Customer info recorded. Confirm sale? (yes/no)")
-                        return {"ok": True}
-    
+        
                     # STEP 6: customer contact OR confirmation
                     elif step == 6:
                         logger.info(f"🔍 STEP 6 ENTERED - Chat: {chat_id}, Customer Name: {data.get('customer_name')}, Text: '{text}'")
@@ -5802,7 +5912,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             send_message(chat_id, "❌ Failed to record sale. Please try again.")
                             user_states.pop(chat_id, None)
                         return {"ok": True}
-                
+                                                                
                 # Reports
                 elif text == "📊 Reports":
                     kb_dict = report_menu_keyboard(user.role)
