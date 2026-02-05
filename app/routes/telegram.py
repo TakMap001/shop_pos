@@ -3516,7 +3516,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         # Get product and stock info
                         product = tenant_db.query(ProductORM).filter(ProductORM.product_id == product_id).first()
                         stock_item = tenant_db.query(ProductShopStockORM).filter(
-                            ProductShopStockORM.stock_id == stock_id,
+                            ProductShopStockORM.id == stock_id,
                             ProductShopStockORM.shop_id == shop_id
                         ).first()
                         
@@ -5400,7 +5400,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                     return {"ok": True}
                                 
                                 data["shop_stocks"] = [
-                                    {"stock_id": stock.stock_id, "shop_id": stock.shop_id, "current_stock": stock.stock}
+                                    {"stock_id": stock.id, "shop_id": stock.shop_id, "current_stock": stock.stock}
                                     for stock in shop_stocks
                                 ]
                                 data["current_shop_index"] = 0  # Start with first shop
@@ -5490,7 +5490,7 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                                 for stock_info in shop_stocks:
                                     if "new_stock" in stock_info:
                                         stock_item = tenant_db.query(ProductShopStockORM).filter(
-                                            ProductShopStockORM.stock_id == stock_info["stock_id"]
+                                            ProductShopStockORM.id == stock_info["stock_id"]
                                         ).first()
                                         if stock_item:
                                             stock_item.stock = stock_info["new_stock"]
