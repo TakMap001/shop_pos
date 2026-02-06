@@ -1028,6 +1028,8 @@ def ensure_payment_method_column(tenant_db, schema_name):
         
 def record_cart_sale(tenant_db, chat_id, data):
     """Record a sale from cart data with payment_method tracking and stock updates - UPDATED FOR MULTI-SHOP"""
+    from datetime import datetime, timedelta  # <-- ADD THIS HERE
+    
     try:
         # ✅ FIX: Check for recent duplicate sales BEFORE processing
         shop_id = None  # Will be determined later
