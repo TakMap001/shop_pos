@@ -414,51 +414,55 @@ def update_user_role(db: Session, username: str, new_role: str) -> bool:
         return False
 
 
-def get_role_based_menu(role: str):
+def get_role_based_menu(role, user=None):
     """
-    Get menu based on user role
-    Returns: inline keyboard markup
+    Generate role-based main menu
+    user parameter is optional for shop-specific info
     """
     if role == "owner":
-        return {
-            "inline_keyboard": [
-                [{"text": "➕ Add Product", "callback_data": "add_product"}],
-                [{"text": "✏️ Update Product", "callback_data": "update_product"}],
-                [{"text": "📈 Quick Stock Update", "callback_data": "quick_stock_update"}],
-                [{"text": "📦 View Stock", "callback_data": "view_stock"}],
-                [{"text": "💰 Record Sale", "callback_data": "record_sale"}],
-                [{"text": "📊 Reports", "callback_data": "report_menu"}],
-                [{"text": "🏪 Manage Shops", "callback_data": "manage_shops"}],  # Owner only
-                [{"text": "👥 Manage Users", "callback_data": "manage_users"}],  # Owner user management
-                [{"text": "❓ Help", "callback_data": "help"}]
-            ]
-        }
+        kb_rows = [
+            [{"text": "💰 Record Sale", "callback_data": "record_sale"}],
+            [{"text": "📦 View Stock", "callback_data": "view_stock"}],
+            [{"text": "➕ Add Product", "callback_data": "add_product"}],
+            [{"text": "✏️ Update Product", "callback_data": "update_product"}],
+            [{"text": "🔧 Quick Stock Update", "callback_data": "quick_stock_update"}],
+            [{"text": "🏪 Manage Shops", "callback_data": "manage_shops"}],
+            [{"text": "👥 Manage Users", "callback_data": "manage_users"}],
+            [{"text": "📊 Reports", "callback_data": "report_menu"}],
+            [{"text": "❓ Help", "callback_data": "help"}],
+            [{"text": "🚪 Logout", "callback_data": "logout"}]
+        ]
     
     elif role == "admin":
-        return {
-            "inline_keyboard": [
-                [{"text": "➕ Add Product", "callback_data": "add_product"}],
-                [{"text": "✏️ Update Product", "callback_data": "update_product"}],
-                [{"text": "📈 Quick Stock Update", "callback_data": "quick_stock_update"}],
-                [{"text": "📦 View Stock", "callback_data": "view_stock"}],
-                [{"text": "💰 Record Sale", "callback_data": "record_sale"}],
-                [{"text": "📊 Reports", "callback_data": "report_menu"}],
-                # ❌ NO "Manage Shops" for admin
-                [{"text": "👥 Manage Users", "callback_data": "manage_users_admin"}],  # ✅ Admin-specific user management
-                [{"text": "❓ Help", "callback_data": "help"}]
-            ]
-        }
+        # ✅ FIXED: Admin menu - no shop management options
+        kb_rows = [
+            [{"text": "💰 Record Sale", "callback_data": "record_sale"}],
+            [{"text": "📦 View Stock", "callback_data": "view_stock"}],
+            [{"text": "➕ Add Product", "callback_data": "add_product"}],
+            [{"text": "✏️ Update Product", "callback_data": "update_product"}],
+            [{"text": "🔧 Quick Stock Update", "callback_data": "quick_stock_update"}],
+            [{"text": "👥 Manage Users", "callback_data": "manage_users_admin"}],  # Only their shop users
+            [{"text": "📊 Reports", "callback_data": "report_menu"}],
+            [{"text": "❓ Help", "callback_data": "help"}],
+            [{"text": "🚪 Logout", "callback_data": "logout"}]
+        ]
     
-    else:  # shopkeeper
-        return {
-            "inline_keyboard": [
-                [{"text": "💰 Record Sale", "callback_data": "record_sale"}],
-                [{"text": "📦 View Stock", "callback_data": "view_stock"}],
-                [{"text": "📊 Reports", "callback_data": "report_menu"}],  # ✅ Changed to report_menu for consistency
-                [{"text": "❓ Help", "callback_data": "help"}],
-                [{"text": "🚪 Logout", "callback_data": "logout"}]
-            ]
-        }
+    elif role == "shopkeeper":
+        kb_rows = [
+            [{"text": "💰 Record Sale", "callback_data": "record_sale"}],
+            [{"text": "📦 View Stock", "callback_data": "view_stock"}],
+            [{"text": "📊 Reports", "callback_data": "report_menu"}],
+            [{"text": "❓ Help", "callback_data": "help"}],
+            [{"text": "🚪 Logout", "callback_data": "logout"}]
+        ]
+    
+    else:
+        kb_rows = [
+            [{"text": "❓ Help", "callback_data": "help"}],
+            [{"text": "🚪 Logout", "callback_data": "logout"}]
+        ]
+    
+    return {"inline_keyboard": kb_rows}
 
 
 def is_user_allowed_for_action(user: User, action: str) -> bool:
