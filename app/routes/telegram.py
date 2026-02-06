@@ -1810,36 +1810,53 @@ def generate_report(tenant_db, report_type, shop_id=None, shop_name=None):
         
         # ---------- CREDIT SALES REPORT ----------
         elif report_type == "report_credits":
-            # Build query with shop filtering
+            # FIXED: Check for both "credit" and "partial" payment types
             query = tenant_db.query(SaleORM).filter(
-                SaleORM.payment_type == "credit"
+                SaleORM.pending_amount > 0  # Any pending amount indicates credit
             )
-            
+    
             if shop_id:
                 query = query.filter(SaleORM.shop_id == shop_id)
-            
+    
             credit_sales = query.all()
-            
+    
             if shop_id:
                 shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
                 shop_display = f" for {shop.name}" if shop else f" for Shop {shop_id}"
             else:
                 shop_display = ""
-            
+    
             report = f"🔄 *Credit Sales Report{shop_display}*\n"
             report += f"📅 Generated: {today.strftime('%Y-%m-%d %H:%M')}\n\n"
-            
+    
+            # DEBUG: Log what we found
+            logger.info(f"🔍 Credit Sales Debug: Found {len(credit_sales)} sales with pending_amount > 0")
+            for sale in credit_sales:
+                logger.info(f"  Sale ID: {sale.sale_id}, Pending: {sale.pending_amount}, Payment Type: {sale.payment_type}")
+    
             if not credit_sales:
                 report += "No credit sales recorded.\n"
             else:
                 total_pending = sum(sale.pending_amount for sale in credit_sales)
                 total_credit_sales = sum(sale.total_amount for sale in credit_sales)
-                
+        
                 report += f"📊 **Credit Summary:**\n"
                 report += f"• Total Credit Sales: ${total_credit_sales:.2f}\n"
                 report += f"• Total Pending Amount: ${total_pending:.2f}\n"
                 report += f"• Number of Credit Transactions: {len(credit_sales)}\n\n"
-                
+        
+                # Also check by payment_type for more detailed breakdown
+                full_credit = [s for s in credit_sales if s.payment_type == "full"]
+                partial_credit = [s for s in credit_sales if s.payment_type == "partial"]
+        
+                if full_credit:
+                    total_full = sum(s.pending_amount for s in full_credit)
+                    report += f"• Full Credit Sales: {len(full_credit)} (${total_full:.2f} pending)\n"
+        
+                if partial_credit:
+                    total_partial = sum(s.pending_amount for s in partial_credit)
+                    report += f"• Partial Credit Sales: {len(partial_credit)} (${total_partial:.2f} pending)\n"
+        
                 # Group by customer
                 customer_credits = {}
                 for sale in credit_sales:
@@ -1850,51 +1867,74 @@ def generate_report(tenant_db, report_type, shop_id=None, shop_name=None):
                         customer_name = customer.name if customer else f"Customer {sale.customer_id}"
                     else:
                         customer_name = "Unknown Customer"
-                    
+            
                     if customer_name not in customer_credits:
                         customer_credits[customer_name] = {"count": 0, "pending": 0}
                     customer_credits[customer_name]["count"] += 1
                     customer_credits[customer_name]["pending"] += sale.pending_amount
-                
+        
                 if customer_credits:
-                    report += f"👥 **Customers with Pending Credit:**\n"
+                    report += f"\n👥 **Customers with Pending Credit:**\n"
                     for customer_name, data in sorted(
                         customer_credits.items(), 
                         key=lambda x: x[1]["pending"], 
                         reverse=True
                     )[:10]:
                         report += f"• {customer_name}: ${data['pending']:.2f} pending ({data['count']} transactions)\n"
-        
+    
+            return report
+
         # ---------- CHANGE DUE REPORT ----------
         elif report_type == "report_change":
-            # Build query with shop filtering
+            # FIXED: Check change_left > 0 (not >= 0)
             query = tenant_db.query(SaleORM).filter(
-                SaleORM.change_left > 0
+                SaleORM.change_left > 0  # Only positive change due
             )
-            
+    
             if shop_id:
                 query = query.filter(SaleORM.shop_id == shop_id)
-            
+    
             change_sales = query.all()
-            
+    
             if shop_id:
                 shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
                 shop_display = f" for {shop.name}" if shop else f" for Shop {shop_id}"
             else:
                 shop_display = ""
-            
+    
             report = f"🪙 *Change Due Report{shop_display}*\n"
             report += f"📅 Generated: {today.strftime('%Y-%m-%d %H:%M')}\n\n"
-            
+    
+            # DEBUG: Log what we found
+            logger.info(f"🔍 Change Due Debug: Found {len(change_sales)} sales with change_left > 0")
+            for sale in change_sales:
+                logger.info(f"  Sale ID: {sale.sale_id}, Change Due: {sale.change_left}, Amount Paid: {sale.amount_paid}")
+    
             if not change_sales:
                 report += "No change due recorded.\n"
             else:
                 total_change = sum(sale.change_left for sale in change_sales)
-                
+        
                 report += f"📊 **Change Due Summary:**\n"
                 report += f"• Total Change Due: ${total_change:.2f}\n"
-                report += f"• Number of Transactions: {len(change_sales)}\n\n"
-                
+                report += f"• Number of Transactions: {len(change_sales)}\n"
+        
+                # Breakdown by amount ranges
+                small_change = [s for s in change_sales if s.change_left < 1.00]
+                medium_change = [s for s in change_sales if 1.00 <= s.change_left < 5.00]
+                large_change = [s for s in change_sales if s.change_left >= 5.00]
+        
+                report += f"\n📈 **Breakdown by Amount:**\n"
+                if small_change:
+                    total_small = sum(s.change_left for s in small_change)
+                    report += f"• < $1.00: {len(small_change)} transactions (${total_small:.2f})\n"
+                if medium_change:
+                    total_medium = sum(s.change_left for s in medium_change)
+                    report += f"• $1.00 - $5.00: {len(medium_change)} transactions (${total_medium:.2f})\n"
+                if large_change:
+                    total_large = sum(s.change_left for s in large_change)
+                    report += f"• ≥ $5.00: {len(large_change)} transactions (${total_large:.2f})\n"
+        
                 # Group by customer
                 customer_changes = {}
                 for sale in change_sales:
@@ -1905,26 +1945,23 @@ def generate_report(tenant_db, report_type, shop_id=None, shop_name=None):
                         customer_name = customer.name if customer else f"Customer {sale.customer_id}"
                     else:
                         customer_name = "Unknown Customer"
-                    
+            
                     if customer_name not in customer_changes:
                         customer_changes[customer_name] = {"count": 0, "change": 0}
                     customer_changes[customer_name]["count"] += 1
                     customer_changes[customer_name]["change"] += sale.change_left
-                
+        
                 if customer_changes:
-                    report += f"👥 **Customers Owed Change:**\n"
+                    report += f"\n👥 **Customers Owed Change:**\n"
                     for customer_name, data in sorted(
                         customer_changes.items(), 
                         key=lambda x: x[1]["change"], 
                         reverse=True
                     )[:10]:
                         report += f"• {customer_name}: ${data['change']:.2f} ({data['count']} transactions)\n"
-        
-        else:
-            report = "❌ Unknown report type."
-        
-        return report
-        
+    
+            return report
+            
     except Exception as e:
         logger.error(f"❌ Error generating report {report_type}: {e}")
         import traceback
@@ -1932,6 +1969,26 @@ def generate_report(tenant_db, report_type, shop_id=None, shop_name=None):
         return f"❌ Error generating report: {str(e)}"
         
         
+def debug_sales_data(tenant_db):
+    """Debug function to check sales data structure"""
+    sales = tenant_db.query(SaleORM).all()
+    
+    debug_info = f"📊 **Sales Data Debug - Total Sales: {len(sales)}**\n\n"
+    
+    for sale in sales[:10]:  # First 10 sales
+        debug_info += f"**Sale ID: {sale.sale_id}**\n"
+        debug_info += f"  Shop ID: {sale.shop_id}\n"
+        debug_info += f"  Total Amount: ${sale.total_amount:.2f}\n"
+        debug_info += f"  Amount Paid: ${sale.amount_paid:.2f}\n"
+        debug_info += f"  Pending Amount: ${sale.pending_amount:.2f}\n"
+        debug_info += f"  Change Left: ${sale.change_left:.2f}\n"
+        debug_info += f"  Payment Method: {sale.payment_method}\n"
+        debug_info += f"  Payment Type: {sale.payment_type}\n"
+        debug_info += f"  Sale Type: {getattr(sale, 'sale_type', 'N/A')}\n"
+        debug_info += "  ---\n"
+    
+    return debug_info
+    
 def report_menu_keyboard(role, is_shop_specific=False, shop_name=None):
     """
     Generate report menu keyboard based on user role and context
@@ -4428,6 +4485,14 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                     logger.error(f"❌ Comparison report error: {e}")
                     send_message(chat_id, f"❌ Error generating comparison report: {str(e)}")
     
+                return {"ok": True}
+    
+            # Add this to the report callbacks section temporarily
+            elif text == "debug_sales_data" and user.role == "owner":
+                tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                if tenant_db:
+                    debug_report = debug_sales_data(tenant_db)
+                    send_message(chat_id, debug_report)
                 return {"ok": True}
     
             # -------------------- Report Callbacks (UPDATED FOR MULTI-SHOP) --------------------
