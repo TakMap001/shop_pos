@@ -1751,21 +1751,21 @@ def generate_report(tenant_db, report_type, shop_id=None, shop_name=None):
         elif report_type == "report_payment_summary":
             # Build query with shop filtering
             query = tenant_db.query(SaleORM)
-            
+    
             if shop_id:
                 query = query.filter(SaleORM.shop_id == shop_id)
-            
+    
             all_sales = query.all()
-            
+    
             if shop_id:
                 shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
                 shop_display = f" for {shop.name}" if shop else f" for Shop {shop_id}"
             else:
                 shop_display = ""
-            
+    
             report = f"💳 *Payment Summary Report{shop_display}*\n"
             report += f"📅 Generated: {today.strftime('%Y-%m-%d %H:%M')}\n\n"
-            
+    
             if not all_sales:
                 report += "No sales data available.\n"
             else:
@@ -1773,46 +1773,254 @@ def generate_report(tenant_db, report_type, shop_id=None, shop_name=None):
                 payment_methods = {}
                 payment_types = {}
                 total_amount = 0
-                
+                total_ecocash_surcharge = 0
+        
                 for sale in all_sales:
                     method = sale.payment_method or "unknown"
                     ptype = sale.payment_type or "full"
-                    
+            
                     if method not in payment_methods:
-                        payment_methods[method] = {"count": 0, "amount": 0}
+                        payment_methods[method] = {"count": 0, "amount": 0, "surcharge": 0}
                     payment_methods[method]["count"] += 1
                     payment_methods[method]["amount"] += sale.total_amount
-                    
+                    payment_methods[method]["surcharge"] += sale.surcharge_amount or 0
+            
                     if ptype not in payment_types:
                         payment_types[ptype] = {"count": 0, "amount": 0}
                     payment_types[ptype]["count"] += 1
                     payment_types[ptype]["amount"] += sale.total_amount
-                    
+            
                     total_amount += sale.total_amount
-                
+                    total_ecocash_surcharge += sale.surcharge_amount or 0
+        
                 report += f"📊 **Payment Methods:**\n"
                 for method, data in payment_methods.items():
                     percentage = (data["amount"] / total_amount * 100) if total_amount > 0 else 0
                     report += f"• {method.title()}: {data['count']} sales (${data['amount']:.2f}, {percentage:.1f}%)\n"
-                
+                    if method == "ecocash" and data["surcharge"] > 0:
+                        report += f"  ⚡ Surcharge: ${data['surcharge']:.2f}\n"
+        
                 report += f"\n📊 **Payment Types:**\n"
                 for ptype, data in payment_types.items():
                     percentage = (data["amount"] / total_amount * 100) if total_amount > 0 else 0
                     report += f"• {ptype.title()}: {data['count']} sales (${data['amount']:.2f}, {percentage:.1f}%)\n"
-                
+        
                 # Ecocash surcharge summary
                 ecocash_sales = [s for s in all_sales if s.payment_method == "ecocash"]
                 if ecocash_sales:
-                    total_surcharge = sum(s.surcharge_amount for s in ecocash_sales)
+                    total_surcharge = sum(s.surcharge_amount or 0 for s in ecocash_sales)
+                    total_ecocash_amount = sum(s.total_amount for s in ecocash_sales)
                     report += f"\n📱 **Ecocash Summary:**\n"
                     report += f"• Total Ecocash Sales: {len(ecocash_sales)}\n"
+                    report += f"• Total Ecocash Amount: ${total_ecocash_amount:.2f}\n"
                     report += f"• Total Surcharge Collected: ${total_surcharge:.2f}\n"
+                    if total_ecocash_amount > 0:
+                        surcharge_percentage = (total_surcharge / total_ecocash_amount * 100)
+                        report += f"• Surcharge Rate: {surcharge_percentage:.1f}%\n"
         
+                # Add credit summary
+                credit_sales = [s for s in all_sales if s.pending_amount and s.pending_amount > 0.01]
+                if credit_sales:
+                    total_credit_pending = sum(s.pending_amount for s in credit_sales)
+                    total_credit_sales_amount = sum(s.total_amount for s in credit_sales)
+                    total_credit_paid = sum(s.amount_paid for s in credit_sales)
+            
+                    report += f"\n🔄 **Credit Sales Summary:**\n"
+                    report += f"• Total Credit Transactions: {len(credit_sales)}\n"
+                    report += f"• Total Credit Sales Amount: ${total_credit_sales_amount:.2f}\n"
+                    report += f"• Total Amount Paid: ${total_credit_paid:.2f}\n"
+                    report += f"• Total Pending Amount: ${total_credit_pending:.2f}\n"
+            
+                    # Breakdown by credit type
+                    full_credit = [s for s in credit_sales if s.payment_type == "credit"]
+                    partial_credit = [s for s in credit_sales if s.payment_type == "partial"]
+            
+                    if full_credit:
+                        full_total = sum(s.total_amount for s in full_credit)
+                        full_pending = sum(s.pending_amount for s in full_credit)
+                        report += f"\n📋 **Full Credit Sales:**\n"
+                        report += f"  • Transactions: {len(full_credit)}\n"
+                        report += f"  • Total Amount: ${full_total:.2f}\n"
+                        report += f"  • Pending: ${full_pending:.2f}\n"
+            
+                    if partial_credit:
+                        partial_total = sum(s.total_amount for s in partial_credit)
+                        partial_paid = sum(s.amount_paid for s in partial_credit)
+                        partial_pending = sum(s.pending_amount for s in partial_credit)
+                        report += f"\n📋 **Partial Credit Sales:**\n"
+                        report += f"  • Transactions: {len(partial_credit)}\n"
+                        report += f"  • Total Amount: ${partial_total:.2f}\n"
+                        report += f"  • Amount Paid: ${partial_paid:.2f}\n"
+                        report += f"  • Pending: ${partial_pending:.2f}\n"
+            
+                    # Recent credit sales
+                    recent_credits = sorted(credit_sales, key=lambda x: x.sale_date, reverse=True)[:5]
+                    if recent_credits:
+                        report += f"\n📅 **Recent Credit Sales (Last 5):**\n"
+                        for sale in recent_credits:
+                            product = tenant_db.query(ProductORM).filter(
+                                ProductORM.product_id == sale.product_id
+                            ).first()
+                            product_name = product.name if product else f"Product {sale.product_id}"
+                            report += f"  • {sale.sale_date.strftime('%Y-%m-%d')}: {product_name}\n"
+                            report += f"    ${sale.total_amount:.2f} (Paid: ${sale.amount_paid:.2f}, Pending: ${sale.pending_amount:.2f})\n"
+        
+                # Add change due summary
+                change_sales = [s for s in all_sales if s.change_left and s.change_left > 0.01]
+                if change_sales:
+                    total_change_due = sum(s.change_left for s in change_sales)
+            
+                    report += f"\n🪙 **Change Due Summary:**\n"
+                    report += f"• Transactions with Change Due: {len(change_sales)}\n"
+                    report += f"• Total Change Due: ${total_change_due:.2f}\n"
+                    report += f"• Average Change Due: ${total_change_due/len(change_sales):.2f}\n"
+            
+                    # Amount breakdown
+                    small_change = [s for s in change_sales if s.change_left < 1.00]
+                    medium_change = [s for s in change_sales if 1.00 <= s.change_left < 5.00]
+                    large_change = [s for s in change_sales if s.change_left >= 5.00]
+            
+                    if small_change:
+                        total_small = sum(s.change_left for s in small_change)
+                        report += f"\n📊 **Change Breakdown:**\n"
+                        report += f"  • < $1.00: {len(small_change)} (${total_small:.2f})\n"
+                    if medium_change:
+                        total_medium = sum(s.change_left for s in medium_change)
+                        report += f"  • $1.00-$5.00: {len(medium_change)} (${total_medium:.2f})\n"
+                    if large_change:
+                        total_large = sum(s.change_left for s in large_change)
+                        report += f"  • ≥ $5.00: {len(large_change)} (${total_large:.2f})\n"
+            
+                    # Recent change due
+                    recent_changes = sorted(change_sales, key=lambda x: x.sale_date, reverse=True)[:5]
+                    if recent_changes:
+                        report += f"\n📅 **Recent Change Due (Last 5):**\n"
+                        for sale in recent_changes:
+                            product = tenant_db.query(ProductORM).filter(
+                                ProductORM.product_id == sale.product_id
+                            ).first()
+                            product_name = product.name if product else f"Product {sale.product_id}"
+                            report += f"  • {sale.sale_date.strftime('%Y-%m-%d')}: {product_name}\n"
+                            report += f"    Change Due: ${sale.change_left:.2f}\n"
+        
+                # 🆕 ADDED: Payment Records Summary
+                # Query payment records with shop filtering
+                payment_records_query = tenant_db.query(PaymentRecordORM)
+                if shop_id:
+                    payment_records_query = payment_records_query.filter(PaymentRecordORM.shop_id == shop_id)
+        
+                all_payment_records = payment_records_query.all()
+        
+                if all_payment_records:
+                    # Credit payments
+                    credit_payments = [p for p in all_payment_records if p.payment_type == "credit_payment"]
+                    if credit_payments:
+                        total_credit_collected = sum(p.amount for p in credit_payments)
+                
+                        # Group by payment method
+                        credit_by_method = {}
+                        for payment in credit_payments:
+                            method = payment.payment_method or "unknown"
+                            if method not in credit_by_method:
+                                credit_by_method[method] = {"count": 0, "amount": 0}
+                            credit_by_method[method]["count"] += 1
+                            credit_by_method[method]["amount"] += payment.amount
+                
+                        report += f"\n💰 **Credit Payments Collected:**\n"
+                        report += f"• Total Credit Payments: {len(credit_payments)}\n"
+                        report += f"• Total Amount Collected: ${total_credit_collected:.2f}\n"
+                
+                        if credit_by_method:
+                            report += f"• Breakdown by Method:\n"
+                            for method, data in credit_by_method.items():
+                                report += f"  • {method.title()}: {data['count']} payments (${data['amount']:.2f})\n"
+                
+                        # Recent credit payments
+                        recent_credit_payments = sorted(credit_payments, key=lambda x: x.recorded_at, reverse=True)[:5]
+                        if recent_credit_payments:
+                            report += f"• Recent Payments (Last 5):\n"
+                            for payment in recent_credit_payments:
+                                report += f"  • {payment.recorded_at.strftime('%Y-%m-%d')}: ${payment.amount:.2f} from {payment.customer_name}\n"
+                                if payment.payment_method:
+                                    report += f"    Method: {payment.payment_method}\n"
+            
+                    # Change collections
+                    change_collections = [p for p in all_payment_records if p.payment_type == "change_collection"]
+                    if change_collections:
+                        total_change_collected = sum(p.amount for p in change_collections)
+                
+                        report += f"\n🪙 **Change Collected:**\n"
+                        report += f"• Total Change Collections: {len(change_collections)}\n"
+                        report += f"• Total Amount Collected: ${total_change_collected:.2f}\n"
+                        report += f"• Average Collection: ${total_change_collected/len(change_collections):.2f}\n"
+                
+                        # Recent change collections
+                        recent_change_collections = sorted(change_collections, key=lambda x: x.recorded_at, reverse=True)[:5]
+                        if recent_change_collections:
+                            report += f"• Recent Collections (Last 5):\n"
+                            for collection in recent_change_collections:
+                                report += f"  • {collection.recorded_at.strftime('%Y-%m-%d')}: ${collection.amount:.2f} from {collection.customer_name}\n"
+            
+                    # Overall payment records summary
+                    report += f"\n📈 **Payment Records Summary:**\n"
+                    report += f"• Total Payment Records: {len(all_payment_records)}\n"
+                    report += f"• Total Amount Processed: ${sum(p.amount for p in all_payment_records):.2f}\n"
+            
+                    # Monthly breakdown
+                    monthly_totals = {}
+                    for payment in all_payment_records:
+                        month_key = payment.recorded_at.strftime("%Y-%m")
+                        if month_key not in monthly_totals:
+                            monthly_totals[month_key] = {"count": 0, "amount": 0}
+                        monthly_totals[month_key]["count"] += 1
+                        monthly_totals[month_key]["amount"] += payment.amount
+            
+                    if monthly_totals:
+                        report += f"• Monthly Breakdown:\n"
+                        for month, data in sorted(monthly_totals.items(), reverse=True)[:3]:  # Last 3 months
+                            report += f"  • {month}: {data['count']} records (${data['amount']:.2f})\n"
+        
+                # Overall summary
+                report += f"\n📈 **Overall Summary:**\n"
+                report += f"• Total Sales: {len(all_sales)}\n"
+                report += f"• Total Revenue: ${total_amount:.2f}\n"
+                if total_ecocash_surcharge > 0:
+                    report += f"• Total Surcharge: ${total_ecocash_surcharge:.2f}\n"
+                if credit_sales:
+                    report += f"• Credit Sales: {len(credit_sales)} (${sum(s.total_amount for s in credit_sales):.2f})\n"
+                if change_sales:
+                    report += f"• Change Due: {len(change_sales)} (${sum(s.change_left for s in change_sales):.2f})\n"
+        
+                # 🆕 ADDED: Include payment records totals in overall summary
+                if all_payment_records:
+                    total_payments_collected = sum(p.amount for p in all_payment_records)
+                    report += f"• Total Payments Collected: ${total_payments_collected:.2f}\n"
+            
+                    # Collection efficiency
+                    if credit_sales:
+                        total_credit_outstanding = sum(s.pending_amount for s in credit_sales)
+                        total_credit_collected = sum(p.amount for p in credit_payments) if credit_payments else 0
+                        collection_rate = (total_credit_collected / (total_credit_collected + total_credit_outstanding) * 100) if (total_credit_collected + total_credit_outstanding) > 0 else 0
+                        report += f"• Credit Collection Rate: {collection_rate:.1f}%\n"
+            
+                    if change_sales:
+                        total_change_outstanding = sum(s.change_left for s in change_sales)
+                        total_change_collected = sum(p.amount for p in change_collections) if change_collections else 0
+                        collection_rate = (total_change_collected / (total_change_collected + total_change_outstanding) * 100) if (total_change_collected + total_change_outstanding) > 0 else 0
+                        report += f"• Change Collection Rate: {collection_rate:.1f}%\n"
+    
+            return report
+            
         # ---------- CREDIT SALES REPORT ----------
         elif report_type == "report_credits":
-            # FIXED: Check for both "credit" and "partial" payment types
+            # Check for credit sales properly
+            from sqlalchemy import or_
+    
             query = tenant_db.query(SaleORM).filter(
-                SaleORM.pending_amount > 0  # Any pending amount indicates credit
+                or_(
+                    SaleORM.payment_type.in_(["credit", "partial"]),
+                    SaleORM.pending_amount > 0.01
+                )
             )
     
             if shop_id:
@@ -1829,35 +2037,32 @@ def generate_report(tenant_db, report_type, shop_id=None, shop_name=None):
             report = f"🔄 *Credit Sales Report{shop_display}*\n"
             report += f"📅 Generated: {today.strftime('%Y-%m-%d %H:%M')}\n\n"
     
-            # DEBUG: Log what we found
-            logger.info(f"🔍 Credit Sales Debug: Found {len(credit_sales)} sales with pending_amount > 0")
-            for sale in credit_sales:
-                logger.info(f"  Sale ID: {sale.sale_id}, Pending: {sale.pending_amount}, Payment Type: {sale.payment_type}")
-    
             if not credit_sales:
                 report += "No credit sales recorded.\n"
             else:
                 total_pending = sum(sale.pending_amount for sale in credit_sales)
                 total_credit_sales = sum(sale.total_amount for sale in credit_sales)
+                total_paid = sum(sale.amount_paid for sale in credit_sales)
         
                 report += f"📊 **Credit Summary:**\n"
                 report += f"• Total Credit Sales: ${total_credit_sales:.2f}\n"
+                report += f"• Amount Paid: ${total_paid:.2f}\n"
                 report += f"• Total Pending Amount: ${total_pending:.2f}\n"
                 report += f"• Number of Credit Transactions: {len(credit_sales)}\n\n"
         
-                # Also check by payment_type for more detailed breakdown
-                full_credit = [s for s in credit_sales if s.payment_type == "full"]
+                # Breakdown by payment type
+                full_credit = [s for s in credit_sales if s.payment_type == "credit"]
                 partial_credit = [s for s in credit_sales if s.payment_type == "partial"]
         
                 if full_credit:
                     total_full = sum(s.pending_amount for s in full_credit)
-                    report += f"• Full Credit Sales: {len(full_credit)} (${total_full:.2f} pending)\n"
+                    report += f"📋 **Full Credit Sales:** {len(full_credit)} (${total_full:.2f} pending)\n"
         
                 if partial_credit:
                     total_partial = sum(s.pending_amount for s in partial_credit)
-                    report += f"• Partial Credit Sales: {len(partial_credit)} (${total_partial:.2f} pending)\n"
+                    report += f"📋 **Partial Credit Sales:** {len(partial_credit)} (${total_partial:.2f} pending)\n"
         
-                # Group by customer
+                # Get all customers with credit
                 customer_credits = {}
                 for sale in credit_sales:
                     if sale.customer_id:
@@ -1869,26 +2074,77 @@ def generate_report(tenant_db, report_type, shop_id=None, shop_name=None):
                         customer_name = "Unknown Customer"
             
                     if customer_name not in customer_credits:
-                        customer_credits[customer_name] = {"count": 0, "pending": 0}
+                        customer_credits[customer_name] = {
+                            "customer_id": sale.customer_id,
+                            "count": 0, 
+                            "pending": 0, 
+                            "last_date": sale.sale_date,
+                            "total_amount": 0
+                        }
                     customer_credits[customer_name]["count"] += 1
                     customer_credits[customer_name]["pending"] += sale.pending_amount
+                    customer_credits[customer_name]["total_amount"] += sale.total_amount
+                    # Keep the most recent date
+                    if sale.sale_date > customer_credits[customer_name]["last_date"]:
+                        customer_credits[customer_name]["last_date"] = sale.sale_date
         
                 if customer_credits:
                     report += f"\n👥 **Customers with Pending Credit:**\n"
-                    for customer_name, data in sorted(
+                    sorted_customers = sorted(
                         customer_credits.items(), 
                         key=lambda x: x[1]["pending"], 
                         reverse=True
-                    )[:10]:
-                        report += f"• {customer_name}: ${data['pending']:.2f} pending ({data['count']} transactions)\n"
+                    )[:10]  # Top 10 customers
+            
+                    for customer_name, data in sorted_customers:
+                        days_ago = (today - data["last_date"].date()).days
+                        report += f"\n• **{customer_name}**\n"
+                        report += f"  📊 Total Credit: ${data['total_amount']:.2f}\n"
+                        report += f"  💰 Pending: ${data['pending']:.2f}\n"
+                        report += f"  📈 Transactions: {data['count']}\n"
+                        report += f"  📅 Last Credit: {data['last_date'].strftime('%Y-%m-%d')} ({days_ago} days ago)\n"
+                
+                        # 🆕 ADDED: Payment history for this customer
+                        if data["customer_id"]:
+                            payment_records = tenant_db.query(PaymentRecordORM).filter(
+                                PaymentRecordORM.customer_id == data["customer_id"],
+                                PaymentRecordORM.payment_type == "credit_payment"
+                            ).order_by(PaymentRecordORM.recorded_at.desc()).limit(3).all()
+                    
+                            if payment_records:
+                                report += f"  📋 **Recent Payments (Last 3):**\n"
+                                for pr in payment_records:
+                                    method_display = f"via {pr.payment_method}" if pr.payment_method else ""
+                                    report += f"    • {pr.recorded_at.strftime('%Y-%m-%d')}: ${pr.amount:.2f} {method_display}\n"
+                                    if pr.notes:
+                                        report += f"      Note: {pr.notes}\n"
+        
+                # Show recent credit sales (last 10)
+                recent_credits = sorted(credit_sales, key=lambda x: x.sale_date, reverse=True)[:10]
+                if recent_credits:
+                    report += f"\n📅 **Recent Credit Sales (Last 10):**\n"
+                    for sale in recent_credits:
+                        product = tenant_db.query(ProductORM).filter(
+                            ProductORM.product_id == sale.product_id
+                        ).first()
+                        product_name = product.name if product else f"Product {sale.product_id}"
+                
+                        report += f"• {sale.sale_date.strftime('%Y-%m-%d')}: {product_name}\n"
+                        report += f"  Amount: ${sale.total_amount:.2f}, Paid: ${sale.amount_paid:.2f}, Pending: ${sale.pending_amount:.2f}\n"
+                        if sale.customer_id:
+                            customer = tenant_db.query(CustomerORM).filter(
+                                CustomerORM.customer_id == sale.customer_id
+                            ).first()
+                            if customer:
+                                report += f"  Customer: {customer.name}\n"
     
             return report
-
+    
         # ---------- CHANGE DUE REPORT ----------
         elif report_type == "report_change":
-            # FIXED: Check change_left > 0 (not >= 0)
+            # Check change_left properly
             query = tenant_db.query(SaleORM).filter(
-                SaleORM.change_left > 0  # Only positive change due
+                SaleORM.change_left > 0.01
             )
     
             if shop_id:
@@ -1905,19 +2161,15 @@ def generate_report(tenant_db, report_type, shop_id=None, shop_name=None):
             report = f"🪙 *Change Due Report{shop_display}*\n"
             report += f"📅 Generated: {today.strftime('%Y-%m-%d %H:%M')}\n\n"
     
-            # DEBUG: Log what we found
-            logger.info(f"🔍 Change Due Debug: Found {len(change_sales)} sales with change_left > 0")
-            for sale in change_sales:
-                logger.info(f"  Sale ID: {sale.sale_id}, Change Due: {sale.change_left}, Amount Paid: {sale.amount_paid}")
-    
             if not change_sales:
-                report += "No change due recorded.\n"
+                report += "✅ No change due recorded. All customers received their change.\n"
             else:
                 total_change = sum(sale.change_left for sale in change_sales)
         
                 report += f"📊 **Change Due Summary:**\n"
                 report += f"• Total Change Due: ${total_change:.2f}\n"
                 report += f"• Number of Transactions: {len(change_sales)}\n"
+                report += f"• Average Change Due: ${total_change/len(change_sales):.2f}\n"
         
                 # Breakdown by amount ranges
                 small_change = [s for s in change_sales if s.change_left < 1.00]
@@ -1935,7 +2187,7 @@ def generate_report(tenant_db, report_type, shop_id=None, shop_name=None):
                     total_large = sum(s.change_left for s in large_change)
                     report += f"• ≥ $5.00: {len(large_change)} transactions (${total_large:.2f})\n"
         
-                # Group by customer
+                # Get all customers with change due
                 customer_changes = {}
                 for sale in change_sales:
                     if sale.customer_id:
@@ -1944,30 +2196,88 @@ def generate_report(tenant_db, report_type, shop_id=None, shop_name=None):
                         ).first()
                         customer_name = customer.name if customer else f"Customer {sale.customer_id}"
                     else:
-                        customer_name = "Unknown Customer"
+                        customer_name = "Walk-in Customer"
             
                     if customer_name not in customer_changes:
-                        customer_changes[customer_name] = {"count": 0, "change": 0}
+                        customer_changes[customer_name] = {
+                            "customer_id": sale.customer_id,
+                            "count": 0, 
+                            "change": 0, 
+                            "last_date": sale.sale_date,
+                            "total_sales": 0
+                        }
                     customer_changes[customer_name]["count"] += 1
                     customer_changes[customer_name]["change"] += sale.change_left
+                    customer_changes[customer_name]["total_sales"] += sale.total_amount
+                    # Keep the most recent date
+                    if sale.sale_date > customer_changes[customer_name]["last_date"]:
+                        customer_changes[customer_name]["last_date"] = sale.sale_date
         
                 if customer_changes:
                     report += f"\n👥 **Customers Owed Change:**\n"
-                    for customer_name, data in sorted(
+                    sorted_customers = sorted(
                         customer_changes.items(), 
                         key=lambda x: x[1]["change"], 
                         reverse=True
-                    )[:10]:
-                        report += f"• {customer_name}: ${data['change']:.2f} ({data['count']} transactions)\n"
+                    )[:10]  # Top 10 customers
+            
+                    for customer_name, data in sorted_customers:
+                        days_ago = (today - data["last_date"].date()).days
+                        report += f"\n• **{customer_name}**\n"
+                        report += f"  🪙 Change Due: ${data['change']:.2f}\n"
+                        report += f"  📊 Transactions: {data['count']}\n"
+                        report += f"  💰 Total Sales: ${data['total_sales']:.2f}\n"
+                        report += f"  📅 Last Transaction: {data['last_date'].strftime('%Y-%m-%d')} ({days_ago} days ago)\n"
+                
+                        # 🆕 ADDED: Collection history for this customer
+                        if data["customer_id"]:
+                            collection_records = tenant_db.query(PaymentRecordORM).filter(
+                                PaymentRecordORM.customer_id == data["customer_id"],
+                                PaymentRecordORM.payment_type == "change_collection"
+                            ).order_by(PaymentRecordORM.recorded_at.desc()).limit(3).all()
+                    
+                            if collection_records:
+                                report += f"  📋 **Recent Collections (Last 3):**\n"
+                                for cr in collection_records:
+                                    report += f"    • {cr.recorded_at.strftime('%Y-%m-%d')}: ${cr.amount:.2f} collected\n"
+                                    if cr.notes:
+                                        report += f"      Note: {cr.notes}\n"
+        
+                # Show recent change due sales (last 10)
+                recent_changes = sorted(change_sales, key=lambda x: x.sale_date, reverse=True)[:10]
+                if recent_changes:
+                    report += f"\n📅 **Recent Change Due (Last 10):**\n"
+                    for sale in recent_changes:
+                        product = tenant_db.query(ProductORM).filter(
+                            ProductORM.product_id == sale.product_id
+                        ).first()
+                        product_name = product.name if product else f"Product {sale.product_id}"
+                
+                        report += f"• {sale.sale_date.strftime('%Y-%m-%d %H:%M')}: {product_name}\n"
+                        report += f"  Change Due: ${sale.change_left:.2f}, Paid: ${sale.amount_paid:.2f}\n"
+                        if sale.customer_id:
+                            customer = tenant_db.query(CustomerORM).filter(
+                                CustomerORM.customer_id == sale.customer_id
+                            ).first()
+                            if customer:
+                                report += f"  Customer: {customer.name}\n"
+        
+                # Add actionable advice
+                report += f"\n💡 **Action Required:**\n"
+                if total_change > 10:
+                    report += f"⚠️ Significant change due (${total_change:.2f}). Consider following up with customers.\n"
+                elif len(change_sales) > 5:
+                    report += f"⚠️ Multiple small change amounts ({len(change_sales)} transactions). Keep more small change available.\n"
+                else:
+                    report += f"✅ Manageable change due. Follow up when convenient.\n"
     
             return report
-            
+                    
     except Exception as e:
         logger.error(f"❌ Error generating report {report_type}: {e}")
         import traceback
         traceback.print_exc()
         return f"❌ Error generating report: {str(e)}"
-        
         
 def debug_sales_data(tenant_db):
     """Debug function to check sales data structure"""
@@ -1999,13 +2309,15 @@ def report_menu_keyboard(role, is_shop_specific=False, shop_name=None):
     - shop_name: Name of the specific shop (for display)
     """
     
-    # Base reports for all roles
+    # Base reports for all roles - INCLUDING CHANGE & CREDIT
     base_reports = [
         [{"text": "📅 Daily Sales", "callback_data": "report_daily"}],
         [{"text": "📊 Weekly Sales", "callback_data": "report_weekly"}],
         [{"text": "📈 Monthly Sales", "callback_data": "report_monthly"}],
         [{"text": "📦 Low Stock", "callback_data": "report_low_stock"}],
         [{"text": "🏆 Top Products", "callback_data": "report_top_products"}],
+        [{"text": "🔄 Credit Sales", "callback_data": "report_credits"}],  # ✅ ADDED for all
+        [{"text": "🪙 Change Due", "callback_data": "report_change"}],     # ✅ ADDED for all
     ]
     
     # Advanced reports for owners and admins
@@ -2015,14 +2327,6 @@ def report_menu_keyboard(role, is_shop_specific=False, shop_name=None):
             [{"text": "💰 Average Order Value", "callback_data": "report_aov"}],
             [{"text": "🔄 Stock Turnover", "callback_data": "report_stock_turnover"}],
             [{"text": "💳 Payment Summary", "callback_data": "report_payment_summary"}],
-        ]
-    
-    # Credit reports for owners
-    credit_reports = []
-    if role == "owner":
-        credit_reports = [
-            [{"text": "🔄 Credit Sales", "callback_data": "report_credits"}],
-            [{"text": "🪙 Change Due", "callback_data": "report_change"}],
         ]
     
     # Special owner-only options
@@ -2041,11 +2345,11 @@ def report_menu_keyboard(role, is_shop_specific=False, shop_name=None):
         nav_buttons.append([{"text": "⬅️ Back to Menu", "callback_data": "back_to_menu"}])
     
     # Combine all sections
-    keyboard = base_reports + advanced_reports + credit_reports + owner_special + nav_buttons
+    keyboard = base_reports + advanced_reports + owner_special + nav_buttons
     
     return {"inline_keyboard": keyboard}
 
-    
+
 # -------------------- Webhook --------------------
 @router.post("/telegram/webhook")
 async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
@@ -4165,6 +4469,86 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
     
                 return {"ok": True}
                     
+            # -------------------- Record Payment/Credit/Change Collection --------------------
+            elif text == "record_payment":
+                # Start payment recording flow
+                user_states[chat_id] = {"action": "record_payment", "step": 1, "data": {}}
+    
+                # Ask what type of payment to record
+                kb_rows = [
+                    [{"text": "💳 Credit Payment", "callback_data": "payment_type:credit"}],
+                    [{"text": "🪙 Change Collection", "callback_data": "payment_type:change"}],
+                    [{"text": "⬅️ Cancel", "callback_data": "back_to_menu"}]
+                ]
+    
+                send_message(chat_id, "💰 *Record Payment*\n\nSelect payment type:", {"inline_keyboard": kb_rows})
+                return {"ok": True}
+
+            elif text.startswith("payment_type:"):
+                payment_type = text.split(":")[1]
+    
+                current_state = user_states.get(chat_id, {})
+                current_data = current_state.get("data", {})
+                current_data["payment_type"] = payment_type
+    
+                user_states[chat_id] = {"action": "record_payment", "step": 2, "data": current_data}
+    
+                if payment_type == "credit":
+                    send_message(chat_id, "💳 *Record Credit Payment*\n\nEnter customer name to search:")
+                else:  # change
+                    send_message(chat_id, "🪙 *Record Change Collection*\n\nEnter customer name to search:")
+    
+                return {"ok": True}
+    
+            elif text.startswith("select_customer_payment:"):
+                try:
+                    parts = text.split(":")
+                    customer_id = int(parts[1])
+                    payment_type = parts[2]
+        
+                    current_state = user_states.get(chat_id, {})
+                    current_data = current_state.get("data", {})
+        
+                    # Find the selected customer from results
+                    selected_customer = None
+                    for customer in current_data.get("customer_results", []):
+                        if customer["customer_id"] == customer_id:
+                            selected_customer = customer
+                            break
+        
+                    if selected_customer:
+                        current_data["selected_customer"] = selected_customer
+                        user_states[chat_id] = {"action": "record_payment", "step": 3, "data": current_data}
+            
+                        # Get tenant session for shop info
+                        tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                        if not tenant_db:
+                            send_message(chat_id, "❌ Unable to access store database.")
+                            return {"ok": True}
+            
+                        if payment_type == "credit":
+                            send_message(chat_id, f"👤 Selected: {selected_customer['name']}\n"
+                                                 f"📞 Contact: {selected_customer['contact']}\n"
+                                                 f"💳 Total Credit Due: ${selected_customer['total_pending']:.2f}\n"
+                                                 f"📊 From {selected_customer['sales_count']} transaction(s)\n\n"
+                                                 f"Enter amount received from customer:")
+                        else:
+                            send_message(chat_id, f"👤 Selected: {selected_customer['name']}\n"
+                                                 f"📞 Contact: {selected_customer['contact']}\n"
+                                                 f"🪙 Total Change Due: ${selected_customer['total_change']:.2f}\n"
+                                                 f"📊 From {selected_customer['sales_count']} transaction(s)\n\n"
+                                                 f"Enter amount of change collected from customer:")
+        
+                    else:
+                        send_message(chat_id, "❌ Customer selection failed. Please try again.")
+                        user_states.pop(chat_id, None)
+    
+                except (ValueError, IndexError):
+                    send_message(chat_id, "❌ Invalid customer selection.")
+                    user_states.pop(chat_id, None)
+    
+                return {"ok": True}
+    
             # -------------------- View Stock --------------------
             elif text == "view_stock":
                 tenant_db = get_tenant_session(user.tenant_schema, chat_id)
@@ -6565,6 +6949,429 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             user_states.pop(chat_id, None)
                         return {"ok": True}
                                                                 
+                # -------------------- Record Payment Flow --------------------
+                elif action == "record_payment":
+                    tenant_db = get_tenant_session(user.tenant_schema, chat_id)
+                    if tenant_db is None:
+                        send_message(chat_id, "❌ Unable to access tenant database.")
+                        return {"ok": True}
+    
+                    data = state.get("data", {})
+                    payment_type = data.get("payment_type")
+    
+                    # STEP 1: Already handled by callback (payment_type selection)
+    
+                    # STEP 2: Search for customer
+                    if step == 2:
+                        customer_name = text.strip()
+                        if not customer_name:
+                            send_message(chat_id, "❌ Customer name cannot be empty. Please enter customer name:")
+                            return {"ok": True}
+        
+                        # Search for customers with outstanding balance
+                        if payment_type == "credit":
+                            # Find customers with pending credit
+                            sales_with_credit = tenant_db.query(SaleORM).filter(
+                                SaleORM.pending_amount > 0.01
+                            ).all()
+            
+                            # Get unique customers with credit
+                            customer_ids = set()
+                            customers_with_credit = []
+            
+                            for sale in sales_with_credit:
+                                if sale.customer_id and sale.customer_id not in customer_ids:
+                                    customer_ids.add(sale.customer_id)
+                                    customer = tenant_db.query(CustomerORM).filter(
+                                        CustomerORM.customer_id == sale.customer_id
+                                    ).first()
+                                    if customer and customer_name.lower() in customer.name.lower():
+                                        # Calculate total pending for this customer
+                                        customer_sales = tenant_db.query(SaleORM).filter(
+                                            SaleORM.customer_id == sale.customer_id,
+                                            SaleORM.pending_amount > 0.01
+                                        ).all()
+                        
+                                        total_pending = sum(s.pending_amount for s in customer_sales)
+                                        customers_with_credit.append({
+                                            "customer_id": customer.customer_id,
+                                            "name": customer.name,
+                                            "contact": customer.contact or "No contact",
+                                            "total_pending": total_pending,
+                                            "sales_count": len(customer_sales)
+                                        })
+            
+                        else:  # change collection
+                            # Find customers with change due
+                            sales_with_change = tenant_db.query(SaleORM).filter(
+                                SaleORM.change_left > 0.01
+                            ).all()
+            
+                            # Get unique customers with change due
+                            customer_ids = set()
+                            customers_with_change = []
+            
+                            for sale in sales_with_change:
+                                if sale.customer_id and sale.customer_id not in customer_ids:
+                                    customer_ids.add(sale.customer_id)
+                                    customer = tenant_db.query(CustomerORM).filter(
+                                        CustomerORM.customer_id == sale.customer_id
+                                    ).first()
+                                    if customer and customer_name.lower() in customer.name.lower():
+                                        # Calculate total change due for this customer
+                                        customer_sales = tenant_db.query(SaleORM).filter(
+                                            SaleORM.customer_id == sale.customer_id,
+                                            SaleORM.change_left > 0.01
+                                        ).all()
+                        
+                                        total_change = sum(s.change_left for s in customer_sales)
+                                        customers_with_change.append({
+                                            "customer_id": customer.customer_id,
+                                            "name": customer.name,
+                                            "contact": customer.contact or "No contact",
+                                            "total_change": total_change,
+                                            "sales_count": len(customer_sales)
+                                        })
+        
+                        # Check results
+                        if payment_type == "credit" and not customers_with_credit:
+                            send_message(chat_id, f"❌ No customers found with credit balance matching '{customer_name}'.\n\nTry again or enter a different name:")
+                            return {"ok": True}
+                        elif payment_type == "change" and not customers_with_change:
+                            send_message(chat_id, f"❌ No customers found with change due matching '{customer_name}'.\n\nTry again or enter a different name:")
+                            return {"ok": True}
+        
+                        # Store results and move to selection
+                        if payment_type == "credit":
+                            data["customer_results"] = customers_with_credit
+                            if len(customers_with_credit) == 1:
+                                # Single match - proceed directly
+                                customer = customers_with_credit[0]
+                                data["selected_customer"] = customer
+                                user_states[chat_id] = {"action": "record_payment", "step": 3, "data": data}
+                
+                                send_message(chat_id, f"👤 Selected: {customer['name']}\n"
+                                                     f"📞 Contact: {customer['contact']}\n"
+                                                     f"💳 Total Credit Due: ${customer['total_pending']:.2f}\n"
+                                                     f"📊 From {customer['sales_count']} transaction(s)\n\n"
+                                                     f"Enter amount received from customer:")
+                            else:
+                                # Multiple matches - show selection
+                                user_states[chat_id] = {"action": "record_payment", "step": 2.5, "data": data}
+                
+                                kb_rows = []
+                                for customer in customers_with_credit:
+                                    kb_rows.append([{
+                                        "text": f"👤 {customer['name']} - ${customer['total_pending']:.2f} due",
+                                        "callback_data": f"select_customer_payment:{customer['customer_id']}:credit"
+                                    }])
+                                kb_rows.append([{"text": "⬅️ Cancel", "callback_data": "back_to_menu"}])
+                
+                                send_message(chat_id, "🔍 Multiple customers found. Select one:", {"inline_keyboard": kb_rows})
+        
+                        else:  # change
+                            data["customer_results"] = customers_with_change
+                            if len(customers_with_change) == 1:
+                                # Single match - proceed directly
+                                customer = customers_with_change[0]
+                                data["selected_customer"] = customer
+                                user_states[chat_id] = {"action": "record_payment", "step": 3, "data": data}
+                
+                                send_message(chat_id, f"👤 Selected: {customer['name']}\n"
+                                                     f"📞 Contact: {customer['contact']}\n"
+                                                     f"🪙 Total Change Due: ${customer['total_change']:.2f}\n"
+                                                     f"📊 From {customer['sales_count']} transaction(s)\n\n"
+                                                     f"Enter amount of change collected from customer:")
+                            else:
+                                # Multiple matches - show selection
+                                user_states[chat_id] = {"action": "record_payment", "step": 2.5, "data": data}
+                
+                                kb_rows = []
+                                for customer in customers_with_change:
+                                    kb_rows.append([{
+                                        "text": f"👤 {customer['name']} - ${customer['total_change']:.2f} change due",
+                                        "callback_data": f"select_customer_payment:{customer['customer_id']}:change"
+                                    }])
+                                kb_rows.append([{"text": "⬅️ Cancel", "callback_data": "back_to_menu"}])
+                
+                                send_message(chat_id, "🔍 Multiple customers found. Select one:", {"inline_keyboard": kb_rows})
+        
+                        return {"ok": True}
+    
+                    # STEP 3: Enter payment amount
+                    elif step == 3:
+                        amount_text = text.strip()
+                        if not amount_text:
+                            send_message(chat_id, "❌ Amount cannot be empty. Please enter amount:")
+                            return {"ok": True}
+        
+                        try:
+                            amount = float(amount_text)
+                            if amount <= 0:
+                                send_message(chat_id, "❌ Amount must be greater than 0. Please enter a positive amount:")
+                                return {"ok": True}
+            
+                            customer = data.get("selected_customer")
+                            if not customer:
+                                send_message(chat_id, "❌ Customer not selected. Please start over.")
+                                user_states.pop(chat_id, None)
+                                return {"ok": True}
+            
+                            # Validate amount
+                            if payment_type == "credit":
+                                max_amount = customer["total_pending"]
+                                if amount > max_amount:
+                                    send_message(chat_id, f"❌ Amount (${amount:.2f}) exceeds total credit due (${max_amount:.2f}).\n\nEnter amount received (max ${max_amount:.2f}):")
+                                    return {"ok": True}
+                            else:  # change
+                                max_amount = customer["total_change"]
+                                if amount > max_amount:
+                                    send_message(chat_id, f"❌ Amount (${amount:.2f}) exceeds total change due (${max_amount:.2f}).\n\nEnter amount collected (max ${max_amount:.2f}):")
+                                    return {"ok": True}
+            
+                            data["payment_amount"] = amount
+                            user_states[chat_id] = {"action": "record_payment", "step": 4, "data": data}
+            
+                            # Ask for payment method if it's a credit payment
+                            if payment_type == "credit":
+                                kb_rows = [
+                                    [{"text": "💵 Cash", "callback_data": "payment_method:cash"}],
+                                    [{"text": "📱 Ecocash", "callback_data": "payment_method:ecocash"}],
+                                    [{"text": "💳 Swipe", "callback_data": "payment_method:swipe"}],
+                                    [{"text": "⬅️ Cancel", "callback_data": "back_to_menu"}]
+                                ]
+                
+                                send_message(chat_id, f"💰 Amount: ${amount:.2f}\n💳 Select payment method:", {"inline_keyboard": kb_rows})
+                            else:
+                                # For change collection, just confirm
+                                send_message(chat_id, f"🪙 Confirm Change Collection:\n\n"
+                                                     f"👤 Customer: {customer['name']}\n"
+                                                     f"💰 Amount Collected: ${amount:.2f}\n\n"
+                                                     f"Type 'YES' to confirm or 'NO' to cancel:")
+            
+                        except ValueError:
+                            send_message(chat_id, "❌ Invalid amount. Please enter a valid number:")
+        
+                        return {"ok": True}
+    
+                    # STEP 4: Process payment (for credit) or confirm (for change)
+                    elif step == 4:
+                        if payment_type == "credit":
+                            # This step is handled by callback (payment_method)
+                            pass
+                        else:
+                            # Change collection confirmation
+                            confirmation = text.strip().upper()
+                            if confirmation != "YES":
+                                send_message(chat_id, "❌ Change collection cancelled.")
+                                user_states.pop(chat_id, None)
+                                return {"ok": True}
+            
+                            # Process change collection
+                            customer = data.get("selected_customer")
+                            amount = data.get("payment_amount", 0)
+            
+                            # Get all sales with change due for this customer
+                            sales_with_change = tenant_db.query(SaleORM).filter(
+                                SaleORM.customer_id == customer["customer_id"],
+                                SaleORM.change_left > 0.01
+                            ).order_by(SaleORM.sale_date).all()
+            
+                            remaining_amount = amount
+                            processed_sales = []
+            
+                            # Apply payment to oldest sales first (FIFO)
+                            for sale in sales_with_change:
+                                if remaining_amount <= 0:
+                                    break
+                
+                                if sale.change_left <= remaining_amount:
+                                    # Full change collected for this sale
+                                    processed_amount = sale.change_left
+                                    sale.change_left = 0
+                                    remaining_amount -= processed_amount
+                                else:
+                                    # Partial change collected
+                                    sale.change_left -= remaining_amount
+                                    processed_amount = remaining_amount
+                                    remaining_amount = 0
+                
+                                processed_sales.append({
+                                    "sale_id": sale.sale_id,
+                                    "amount": processed_amount,
+                                    "remaining_change": sale.change_left
+                                })
+            
+                            # Commit changes
+                            tenant_db.commit()
+            
+                            # Create payment record
+                            from datetime import datetime
+                            payment_record = PaymentRecordORM(
+                                customer_id=customer["customer_id"],
+                                customer_name=customer["name"],
+                                payment_type="change_collection",
+                                amount=amount,
+                                remaining_amount=remaining_amount if remaining_amount > 0 else 0,
+                                notes=f"Change collected by {user.name}",
+                                recorded_by=user.user_id,
+                                recorded_by_name=user.name,
+                                shop_id=user.shop_id if hasattr(user, 'shop_id') else None,
+                                recorded_at=datetime.utcnow()
+                            )
+                            tenant_db.add(payment_record)
+                            tenant_db.commit()
+            
+                            # Success message
+                            success_msg = f"✅ Change collection recorded successfully!\n\n"
+                            success_msg += f"👤 Customer: {customer['name']}\n"
+                            success_msg += f"💰 Amount Collected: ${amount:.2f}\n\n"
+            
+                            if processed_sales:
+                                success_msg += f"📋 **Applied to {len(processed_sales)} sale(s):**\n"
+                                for ps in processed_sales:
+                                    success_msg += f"• Sale #{ps['sale_id']}: ${ps['amount']:.2f} collected\n"
+                                    if ps['remaining_change'] > 0:
+                                        success_msg += f"  Remaining change: ${ps['remaining_change']:.2f}\n"
+            
+                            if remaining_amount > 0:
+                                success_msg += f"\n⚠️ Note: ${remaining_amount:.2f} was not applied (exceeds total change due)\n"
+            
+                            # Check if customer still has change due
+                            remaining_change = tenant_db.query(SaleORM).filter(
+                                SaleORM.customer_id == customer["customer_id"],
+                                SaleORM.change_left > 0.01
+                            ).count()
+            
+                            if remaining_change > 0:
+                                total_remaining = sum(s.change_left for s in tenant_db.query(SaleORM).filter(
+                                    SaleORM.customer_id == customer["customer_id"],
+                                    SaleORM.change_left > 0.01
+                                ).all())
+                                success_msg += f"\nℹ️ Customer still has ${total_remaining:.2f} change due from {remaining_change} transaction(s)"
+            
+                            send_message(chat_id, success_msg)
+            
+                            # Clear state and return to menu
+                            user_states.pop(chat_id, None)
+                            from app.user_management import get_role_based_menu
+                            kb = get_role_based_menu(user.role)
+                            send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+        
+                        return {"ok": True}
+                    
+                    # STEP 5: Confirm and process credit payment
+                    elif step == 5:
+                        if payment_type != "credit":
+                            send_message(chat_id, "❌ Invalid step for payment type.")
+                            user_states.pop(chat_id, None)
+                            return {"ok": True}
+        
+                        confirmation = text.strip().upper()
+                        if confirmation != "YES":
+                            send_message(chat_id, "❌ Credit payment cancelled.")
+                            user_states.pop(chat_id, None)
+                            return {"ok": True}
+        
+                        # Process credit payment
+                        customer = data.get("selected_customer")
+                        amount = data.get("payment_amount", 0)
+                        payment_method = data.get("payment_method", "cash")
+        
+                        # Get all sales with pending amount for this customer
+                        sales_with_credit = tenant_db.query(SaleORM).filter(
+                            SaleORM.customer_id == customer["customer_id"],
+                            SaleORM.pending_amount > 0.01
+                        ).order_by(SaleORM.sale_date).all()
+        
+                        remaining_amount = amount
+                        processed_sales = []
+        
+                        # Apply payment to oldest sales first (FIFO)
+                        for sale in sales_with_credit:
+                            if remaining_amount <= 0:
+                                break
+            
+                            if sale.pending_amount <= remaining_amount:
+                                # Full payment for this sale
+                                processed_amount = sale.pending_amount
+                                sale.pending_amount = 0
+                                sale.amount_paid = sale.total_amount  # Mark as fully paid
+                                remaining_amount -= processed_amount
+                            else:
+                                # Partial payment
+                                sale.pending_amount -= remaining_amount
+                                sale.amount_paid += remaining_amount
+                                processed_amount = remaining_amount
+                                remaining_amount = 0
+            
+                            processed_sales.append({
+                                "sale_id": sale.sale_id,
+                                "amount": processed_amount,
+                                "remaining_pending": sale.pending_amount
+                            })
+        
+                        # Commit changes
+                        tenant_db.commit()
+        
+                        # Create payment record
+                        from datetime import datetime
+                        payment_record = PaymentRecordORM(
+                            customer_id=customer["customer_id"],
+                            customer_name=customer["name"],
+                            payment_type="credit_payment",
+                            payment_method=payment_method,
+                            amount=amount,
+                            remaining_amount=remaining_amount if remaining_amount > 0 else 0,
+                            notes=f"Credit payment via {payment_method} collected by {user.name}",
+                            recorded_by=user.user_id,
+                            recorded_by_name=user.name,
+                            shop_id=user.shop_id if hasattr(user, 'shop_id') else None,
+                            recorded_at=datetime.utcnow()
+                        )
+                        tenant_db.add(payment_record)
+                        tenant_db.commit()
+        
+                        # Success message
+                        success_msg = f"✅ Credit payment recorded successfully!\n\n"
+                        success_msg += f"👤 Customer: {customer['name']}\n"
+                        success_msg += f"💰 Amount Paid: ${amount:.2f}\n"
+                        success_msg += f"💵 Method: {payment_method.title()}\n\n"
+        
+                        if processed_sales:
+                            success_msg += f"📋 **Applied to {len(processed_sales)} sale(s):**\n"
+                            for ps in processed_sales:
+                                success_msg += f"• Sale #{ps['sale_id']}: ${ps['amount']:.2f} paid\n"
+                                if ps['remaining_pending'] > 0:
+                                    success_msg += f"  Remaining credit: ${ps['remaining_pending']:.2f}\n"
+        
+                        if remaining_amount > 0:
+                            success_msg += f"\n⚠️ Note: ${remaining_amount:.2f} was not applied (exceeds total credit due)\n"
+        
+                        # Check if customer still has credit balance
+                        remaining_credit = tenant_db.query(SaleORM).filter(
+                            SaleORM.customer_id == customer["customer_id"],
+                            SaleORM.pending_amount > 0.01
+                        ).count()
+        
+                        if remaining_credit > 0:
+                            total_remaining = sum(s.pending_amount for s in tenant_db.query(SaleORM).filter(
+                                SaleORM.customer_id == customer["customer_id"],
+                                SaleORM.pending_amount > 0.01
+                            ).all())
+                            success_msg += f"\nℹ️ Customer still has ${total_remaining:.2f} credit balance from {remaining_credit} transaction(s)"
+        
+                        send_message(chat_id, success_msg)
+        
+                        # Clear state and return to menu
+                        user_states.pop(chat_id, None)
+                        from app.user_management import get_role_based_menu
+                        kb = get_role_based_menu(user.role)
+                        send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
+        
+                        return {"ok": True}
+        
+                          
                 # Reports
                 elif text == "📊 Reports":
                     kb_dict = report_menu_keyboard(user.role)

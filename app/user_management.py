@@ -417,11 +417,11 @@ def update_user_role(db: Session, username: str, new_role: str) -> bool:
 def get_role_based_menu(role, user=None):
     """
     Generate role-based main menu
-    user parameter is optional for shop-specific info
     """
     if role == "owner":
         kb_rows = [
             [{"text": "💰 Record Sale", "callback_data": "record_sale"}],
+            [{"text": "💰 Record Payment", "callback_data": "record_payment"}],  # NEW
             [{"text": "📦 View Stock", "callback_data": "view_stock"}],
             [{"text": "➕ Add Product", "callback_data": "add_product"}],
             [{"text": "✏️ Update Product", "callback_data": "update_product"}],
@@ -434,14 +434,14 @@ def get_role_based_menu(role, user=None):
         ]
     
     elif role == "admin":
-        # ✅ FIXED: Admin menu - no shop management options
         kb_rows = [
             [{"text": "💰 Record Sale", "callback_data": "record_sale"}],
+            [{"text": "💰 Record Payment", "callback_data": "record_payment"}],  # NEW
             [{"text": "📦 View Stock", "callback_data": "view_stock"}],
             [{"text": "➕ Add Product", "callback_data": "add_product"}],
             [{"text": "✏️ Update Product", "callback_data": "update_product"}],
             [{"text": "🔧 Quick Stock Update", "callback_data": "quick_stock_update"}],
-            [{"text": "👥 Manage Users", "callback_data": "manage_users_admin"}],  # Only their shop users
+            [{"text": "👥 Manage Users", "callback_data": "manage_users_admin"}],
             [{"text": "📊 Reports", "callback_data": "report_menu"}],
             [{"text": "❓ Help", "callback_data": "help"}],
             [{"text": "🚪 Logout", "callback_data": "logout"}]
@@ -450,6 +450,7 @@ def get_role_based_menu(role, user=None):
     elif role == "shopkeeper":
         kb_rows = [
             [{"text": "💰 Record Sale", "callback_data": "record_sale"}],
+            [{"text": "💰 Record Payment", "callback_data": "record_payment"}],  # NEW
             [{"text": "📦 View Stock", "callback_data": "view_stock"}],
             [{"text": "📊 Reports", "callback_data": "report_menu"}],
             [{"text": "❓ Help", "callback_data": "help"}],

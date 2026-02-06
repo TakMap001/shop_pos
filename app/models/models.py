@@ -128,3 +128,22 @@ class PendingApprovalORM(TenantBase):
     created_at = Column(TIMESTAMP, server_default=func.now())
     resolved_at = Column(TIMESTAMP, nullable=True)
     
+class PaymentRecordORM(TenantBase):
+    __tablename__ = "payment_records"
+    
+    payment_id = Column(Integer, primary_key=True, index=True)
+    customer_id = Column(Integer, ForeignKey("customers.customer_id"), nullable=True)
+    customer_name = Column(String(150), nullable=False)
+    payment_type = Column(String(50), nullable=False)  # 'credit_payment' or 'change_collection'
+    payment_method = Column(String(50), nullable=True)  # Only for credit payments
+    amount = Column(Numeric(10, 2), nullable=False)
+    remaining_amount = Column(Numeric(10, 2), default=0.0)  # If payment exceeds balance
+    notes = Column(Text, nullable=True)
+    recorded_by = Column(BigInteger, nullable=False)  # User ID
+    recorded_by_name = Column(String(150), nullable=False)
+    shop_id = Column(Integer, ForeignKey("shops.shop_id"), nullable=True)
+    recorded_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    customer = relationship("CustomerORM", backref="payment_records")
+    shop = relationship("ShopORM", backref="payment_records")
