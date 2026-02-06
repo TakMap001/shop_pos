@@ -1029,6 +1029,47 @@ def ensure_payment_method_column(tenant_db, schema_name):
 def record_cart_sale(tenant_db, chat_id, data):
     """Record a sale from cart data with payment_method tracking and stock updates - UPDATED FOR MULTI-SHOP"""
     try:
+        # ✅ FIX: Check for recent duplicate sales BEFORE processing
+        shop_id = None  # Will be determined later
+        customer_id = data.get("customer_id")
+        cart_total = sum(item["subtotal"] for item in data.get("cart", []))
+        
+        # Only check for duplicates if we have a customer_id
+        if customer_id:
+            from datetime import datetime, timedelta
+            five_minutes_ago = datetime.utcnow() - timedelta(minutes=5)
+            
+            # We need to get the shop_id first to check duplicates
+            from app.core import SessionLocal
+            central_db_temp = SessionLocal()
+            current_user_temp = central_db_temp.query(User).filter(User.chat_id == chat_id).first()
+            
+            if current_user_temp:
+                # Determine tentative shop_id for duplicate check
+                if current_user_temp.role in ["admin", "shopkeeper"]:
+                    shop_id_for_check = current_user_temp.shop_id
+                elif current_user_temp.role == "owner":
+                    shop_id_for_check = data.get("selected_shop_id")
+                else:
+                    shop_id_for_check = None
+                
+                if shop_id_for_check:
+                    recent_sales = tenant_db.query(SaleORM).filter(
+                        SaleORM.customer_id == customer_id,
+                        SaleORM.shop_id == shop_id_for_check,
+                        SaleORM.sale_date >= five_minutes_ago
+                    ).all()
+                    
+                    if recent_sales:
+                        # Check if any recent sale matches current cart total
+                        for sale in recent_sales:
+                            if abs(sale.total_amount - cart_total) < 0.01:  # Within 1 cent
+                                logger.warning(f"⚠️ Duplicate sale detected and prevented: Sale ID {sale.sale_id}, Amount: ${sale.total_amount}")
+                                central_db_temp.close()
+                                send_message(chat_id, "⚠️ A similar sale was recently recorded. Please wait a few minutes or verify this is a new sale.")
+                                return False
+            central_db_temp.close()
+        
         # ✅ Calculate surcharge for Ecocash
         payment_method = data.get("payment_method", "cash")
         surcharge = 0
@@ -1257,7 +1298,7 @@ def record_cart_sale(tenant_db, chat_id, data):
         tenant_db.rollback()
         send_message(chat_id, f"❌ Failed to record sale: {str(e)}")
         return False
-        
+                
 def check_low_stock_alerts(tenant_db, product_id, shop_id):
     """Check and notify about low stock for specific shop"""
     
@@ -6856,18 +6897,21 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         if not customer_name:
                             send_message(chat_id, "❌ Customer name cannot be empty. Please enter customer name:")
                             return {"ok": True}
+    
                         data["customer_name"] = customer_name
     
-                        # Only ask for contact if it's a credit sale (optional for change due)
+                        # FIXED: Always go to step 6 for contact collection
+                        # Whether it's credit sale or change due, we should collect contact
+                        user_states[chat_id] = {"action": "awaiting_sale", "step": 6, "data": data}
+    
+                        # Ask for contact (optional)
                         if data.get("sale_type") == "credit":
-                            user_states[chat_id] = {"action": "awaiting_sale", "step": 5.1, "data": data}
-                            send_message(chat_id, "📞 Enter customer contact number (optional for credit follow-up):")
+                            send_message(chat_id, "📞 Enter customer contact number (optional for credit follow-up) or type 'skip':")
                         else:
-                            # For change due, contact is optional
-                            user_states[chat_id] = {"action": "awaiting_sale", "step": 6, "data": data}
                             send_message(chat_id, "📞 Enter customer contact number (optional for change follow-up) or type 'skip':")
+    
                         return {"ok": True}
-
+    
                     # STEP 5.1: Customer contact (optional)
                     elif step == 5.1:
                         customer_contact = text.strip()
@@ -6879,56 +6923,33 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                         send_message(chat_id, f"✅ Customer info recorded. Confirm sale? (yes/no)")
                         return {"ok": True}
         
-                    # STEP 6: customer contact OR confirmation
+                    # STEP 6: customer contact OR confirmation ONLY collect contact info - NEVER record sales here
                     elif step == 6:
-                        logger.info(f"🔍 STEP 6 ENTERED - Chat: {chat_id}, Customer Name: {data.get('customer_name')}, Text: '{text}'")
-                        
-                        # Check if we need customer contact (credit sales or change due)
-                        if data.get("customer_name"):  # We're collecting customer details
-                            logger.info(f"🔍 STEP 6 → Collecting contact - Chat: {chat_id}")
-                            customer_contact = text.strip()
-                            if not customer_contact:
-                                send_message(chat_id, "❌ Contact cannot be empty. Enter customer contact number:")
-                                return {"ok": True}
-                            data["customer_contact"] = customer_contact
-                            user_states[chat_id] = {"action": "awaiting_sale", "step": 7, "data": data}
-                            send_message(chat_id, f"✅ Customer info recorded. Confirm sale? (yes/no)")
-                        else:
-                            # No customer details needed - this is confirmation for cash sales with no change
-                            logger.info(f"🔍 STEP 6 → Processing confirmation - Chat: {chat_id}")
-                            confirmation = text.strip().lower()
-                            if not confirmation:
-                                send_message(chat_id, "⚠️ Please confirm with 'yes' or 'no':")
-                                return {"ok": True}
-                            if confirmation != "yes":
-                                send_message(chat_id, "❌ Sale cancelled.")
-                                user_states.pop(chat_id, None)
-                                from app.user_management import get_role_based_menu
-                                kb = get_role_based_menu(user.role)
-                                send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
-                                return {"ok": True}
-                            
-                            logger.info(f"✅ STEP 6 → Recording sale - Chat: {chat_id}")
-                            # Record sale without customer details
-                            record_sale_result = record_cart_sale(tenant_db, chat_id, data)
-                            if record_sale_result:
-                                logger.info(f"🎉 STEP 6 → Sale recorded successfully - Chat: {chat_id}")
-                                user_states.pop(chat_id, None)
-                                from app.user_management import get_role_based_menu
-                                kb = get_role_based_menu(user.role)
-                                send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
-                            else:
-                                logger.error(f"❌ STEP 6 → Sale recording failed - Chat: {chat_id}")
-                                send_message(chat_id, "❌ Failed to record sale. Please try again.")
-                                user_states.pop(chat_id, None)
+                        logger.info(f"🔍 STEP 6 ENTERED - Collecting contact - Chat: {chat_id}, Text: '{text}'")
+    
+                        # This should ONLY be for collecting customer contact
+                        customer_contact = text.strip()
+    
+                        # Handle "skip" for optional contact
+                        if customer_contact.lower() == "skip":
+                            customer_contact = ""
+    
+                        data["customer_contact"] = customer_contact
+                        user_states[chat_id] = {"action": "awaiting_sale", "step": 7, "data": data}
+    
+                        # Now ask for confirmation
+                        send_message(chat_id, f"✅ Customer info recorded. Confirm sale? (yes/no)")
                         return {"ok": True}
-                        
-                    # STEP 7: final confirmation (ONLY when customer details were collected)
+
+                    # STEP 7: ONLY record sales here - this is the final confirmation step
                     elif step == 7:
+                        logger.info(f"🔍 STEP 7 ENTERED - Final confirmation - Chat: {chat_id}, Text: '{text}'")
+    
                         confirmation = text.strip().lower()
                         if not confirmation:
                             send_message(chat_id, "⚠️ Please confirm with 'yes' or 'no':")
                             return {"ok": True}
+    
                         if confirmation != "yes":
                             send_message(chat_id, "❌ Sale cancelled.")
                             user_states.pop(chat_id, None)
@@ -6936,19 +6957,27 @@ async def telegram_webhook(request: Request, db: Session = Depends(get_db)):
                             kb = get_role_based_menu(user.role)
                             send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                             return {"ok": True}
-                        
-                        # Record sale with customer details
+    
+                        logger.info(f"🎯 STEP 7 → Recording sale - Chat: {chat_id}")
+    
+                        # Record the sale (ONLY HERE!)
                         record_sale_result = record_cart_sale(tenant_db, chat_id, data)
+    
                         if record_sale_result:
+                            logger.info(f"✅ STEP 7 → Sale recorded successfully - Chat: {chat_id}")
+        
+                            # Clear state and return to menu
                             user_states.pop(chat_id, None)
                             from app.user_management import get_role_based_menu
                             kb = get_role_based_menu(user.role)
                             send_message(chat_id, "🏠 Main Menu:", keyboard=kb)
                         else:
+                            logger.error(f"❌ STEP 7 → Sale recording failed - Chat: {chat_id}")
                             send_message(chat_id, "❌ Failed to record sale. Please try again.")
                             user_states.pop(chat_id, None)
+    
                         return {"ok": True}
-                                                                
+                                                                    
                 # -------------------- Record Payment Flow --------------------
                 elif action == "record_payment":
                     tenant_db = get_tenant_session(user.tenant_schema, chat_id)
