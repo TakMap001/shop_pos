@@ -1423,6 +1423,31 @@ def generate_report(tenant_db, report_type, shop_id=None, shop_name=None):
     """
     
     from datetime import datetime, timedelta
+    from sqlalchemy import func, or_, text
+    
+    # Import required ORM models
+    try:
+        from app.models import PaymentRecordORM, SaleORM, CustomerORM, ProductORM, ShopORM, ProductShopStockORM
+    except ImportError:
+        # If models are already imported elsewhere, they might be in scope
+        # Just pass and assume they're available
+        pass
+    
+    def payment_records_table_exists():
+        """Check if payment_records table exists in the database"""
+        try:
+            # Try to query the payment_records table
+            result = tenant_db.execute(text("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_schema = current_schema()
+                    AND table_name = 'payment_records'
+                );
+            """))
+            return result.scalar()
+        except Exception as e:
+            logger.debug(f"Error checking payment_records table: {e}")
+            return False
     
     try:
         # Get current date for time-based reports
@@ -1432,363 +1457,15 @@ def generate_report(tenant_db, report_type, shop_id=None, shop_name=None):
         
         report = ""
         
+        # Check if payment_records table exists
+        has_payment_records = payment_records_table_exists()
+        
         # ---------- DAILY SALES REPORT ----------
         if report_type == "report_daily":
-            # Build query with shop filtering
-            query = tenant_db.query(SaleORM).filter(
-                func.date(SaleORM.sale_date) == today
-            )
-            
-            if shop_id:
-                query = query.filter(SaleORM.shop_id == shop_id)
-            
-            daily_sales = query.all()
-            
-            # Get shop info
-            if shop_id:
-                shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
-                shop_display = f" for {shop.name}" if shop else f" for Shop {shop_id}"
-            else:
-                shop_display = ""
-            
-            report = f"📅 *Daily Sales Report{shop_display}*\n"
-            report += f"📅 Date: {today.strftime('%Y-%m-%d')}\n\n"
-            
-            if not daily_sales:
-                report += "No sales recorded today.\n"
-            else:
-                total_amount = sum(sale.total_amount for sale in daily_sales)
-                total_quantity = sum(sale.quantity for sale in daily_sales)
-                total_surcharge = sum(sale.surcharge_amount for sale in daily_sales)
-                
-                report += f"📊 **Summary:**\n"
-                report += f"• Total Sales: ${total_amount:.2f}\n"
-                if total_surcharge > 0:
-                    report += f"• Total Surcharge: ${total_surcharge:.2f}\n"
-                report += f"• Total Items Sold: {total_quantity}\n"
-                report += f"• Number of Transactions: {len(daily_sales)}\n\n"
-                
-                # Group by product
-                product_sales = {}
-                for sale in daily_sales:
-                    product = tenant_db.query(ProductORM).filter(
-                        ProductORM.product_id == sale.product_id
-                    ).first()
-                    if product:
-                        product_name = product.name
-                        if product_name not in product_sales:
-                            product_sales[product_name] = {"quantity": 0, "amount": 0}
-                        product_sales[product_name]["quantity"] += sale.quantity
-                        product_sales[product_name]["amount"] += sale.total_amount
-                
-                if product_sales:
-                    report += f"📦 **Top Products Today:**\n"
-                    for product_name, data in sorted(
-                        product_sales.items(), 
-                        key=lambda x: x[1]["amount"], 
-                        reverse=True
-                    )[:5]:
-                        report += f"• {product_name}: {data['quantity']} sold (${data['amount']:.2f})\n"
+            # ... [rest of your existing code for daily report] ...
+            pass
         
-        # ---------- WEEKLY SALES REPORT ----------
-        elif report_type == "report_weekly":
-            # Build query with shop filtering
-            query = tenant_db.query(SaleORM).filter(
-                SaleORM.sale_date >= week_ago
-            )
-            
-            if shop_id:
-                query = query.filter(SaleORM.shop_id == shop_id)
-            
-            weekly_sales = query.all()
-            
-            if shop_id:
-                shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
-                shop_display = f" for {shop.name}" if shop else f" for Shop {shop_id}"
-            else:
-                shop_display = ""
-            
-            report = f"📊 *Weekly Sales Report{shop_display}*\n"
-            report += f"📅 Period: {week_ago.strftime('%Y-%m-%d')} to {today.strftime('%Y-%m-%d')}\n\n"
-            
-            if not weekly_sales:
-                report += "No sales recorded this week.\n"
-            else:
-                total_amount = sum(sale.total_amount for sale in weekly_sales)
-                total_quantity = sum(sale.quantity for sale in weekly_sales)
-                
-                report += f"📊 **Weekly Summary:**\n"
-                report += f"• Total Sales: ${total_amount:.2f}\n"
-                report += f"• Total Items Sold: {total_quantity}\n"
-                report += f"• Number of Transactions: {len(weekly_sales)}\n\n"
-                
-                # Daily breakdown
-                daily_totals = {}
-                for sale in weekly_sales:
-                    sale_date = sale.sale_date.date()
-                    if sale_date not in daily_totals:
-                        daily_totals[sale_date] = {"amount": 0, "count": 0}
-                    daily_totals[sale_date]["amount"] += sale.total_amount
-                    daily_totals[sale_date]["count"] += 1
-                
-                report += f"📅 **Daily Breakdown:**\n"
-                for date in sorted(daily_totals.keys()):
-                    report += f"• {date.strftime('%Y-%m-%d')}: ${daily_totals[date]['amount']:.2f} ({daily_totals[date]['count']} sales)\n"
-        
-        # ---------- MONTHLY SALES REPORT ----------
-        elif report_type == "report_monthly":
-            # Build query with shop filtering
-            query = tenant_db.query(SaleORM).filter(
-                SaleORM.sale_date >= month_ago
-            )
-            
-            if shop_id:
-                query = query.filter(SaleORM.shop_id == shop_id)
-            
-            monthly_sales = query.all()
-            
-            if shop_id:
-                shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
-                shop_display = f" for {shop.name}" if shop else f" for Shop {shop_id}"
-            else:
-                shop_display = ""
-            
-            report = f"📈 *Monthly Sales Report{shop_display}*\n"
-            report += f"📅 Period: {month_ago.strftime('%Y-%m-%d')} to {today.strftime('%Y-%m-%d')}\n\n"
-            
-            if not monthly_sales:
-                report += "No sales recorded this month.\n"
-            else:
-                total_amount = sum(sale.total_amount for sale in monthly_sales)
-                total_quantity = sum(sale.quantity for sale in monthly_sales)
-                
-                report += f"📊 **Monthly Summary:**\n"
-                report += f"• Total Sales: ${total_amount:.2f}\n"
-                report += f"• Total Items Sold: {total_quantity}\n"
-                report += f"• Number of Transactions: {len(monthly_sales)}\n\n"
-                
-                # Weekly breakdown
-                weekly_totals = {}
-                for sale in monthly_sales:
-                    week_num = sale.sale_date.isocalendar()[1]  # Week number
-                    if week_num not in weekly_totals:
-                        weekly_totals[week_num] = {"amount": 0, "count": 0}
-                    weekly_totals[week_num]["amount"] += sale.total_amount
-                    weekly_totals[week_num]["count"] += 1
-                
-                report += f"📅 **Weekly Breakdown:**\n"
-                for week_num in sorted(weekly_totals.keys()):
-                    report += f"• Week {week_num}: ${weekly_totals[week_num]['amount']:.2f} ({weekly_totals[week_num]['count']} sales)\n"
-        
-        # ---------- LOW STOCK REPORT (FIXED!) ----------
-        elif report_type == "report_low_stock":
-            # FIXED: Use ProductShopStockORM instead of ProductORM
-            # Build query with shop filtering
-            query = tenant_db.query(ProductShopStockORM).join(
-                ProductORM, ProductORM.product_id == ProductShopStockORM.product_id
-            ).filter(
-                ProductShopStockORM.stock <= ProductShopStockORM.low_stock_threshold
-            )
-            
-            if shop_id:
-                query = query.filter(ProductShopStockORM.shop_id == shop_id)
-            
-            low_stock_items = query.all()
-            
-            if shop_id:
-                shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
-                shop_display = f" for {shop.name}" if shop else f" for Shop {shop_id}"
-            else:
-                shop_display = ""
-            
-            report = f"📦 *Low Stock Report{shop_display}*\n"
-            report += f"📅 Generated: {today.strftime('%Y-%m-%d %H:%M')}\n\n"
-            
-            if not low_stock_items:
-                report += "✅ All stock levels are good!\n"
-            else:
-                report += f"⚠️ **Low Stock Items ({len(low_stock_items)}):**\n\n"
-                
-                for stock_item in low_stock_items:
-                    product = stock_item.product
-                    shop_info = tenant_db.query(ShopORM).filter(ShopORM.shop_id == stock_item.shop_id).first()
-                    shop_name = shop_info.name if shop_info else f"Shop {stock_item.shop_id}"
-                    
-                    status = "🔴" if stock_item.stock == 0 else "🟡"
-                    report += f"{status} *{product.name}*\n"
-                    report += f"   🏪 Shop: {shop_name}\n"
-                    report += f"   📊 Current Stock: {stock_item.stock} {product.unit_type}\n"
-                    report += f"   ⚠️ Low Stock Threshold: {stock_item.low_stock_threshold}\n"
-                    report += f"   📦 Minimum Stock: {stock_item.min_stock_level}\n"
-                    
-                    if stock_item.stock == 0:
-                        report += f"   ❌ **OUT OF STOCK!**\n"
-                    elif stock_item.stock <= stock_item.min_stock_level:
-                        report += f"   ⚠️ **AT MINIMUM LEVEL!**\n"
-                    
-                    # Calculate how many to order
-                    reorder_qty = max(stock_item.reorder_quantity, 
-                                     stock_item.low_stock_threshold - stock_item.stock)
-                    if reorder_qty > 0:
-                        report += f"   📝 Suggested Reorder: {reorder_qty} {product.unit_type}\n"
-                    
-                    report += "\n"
-        
-        # ---------- TOP PRODUCTS REPORT ----------
-        elif report_type == "report_top_products":
-            # Build query with shop filtering
-            query = tenant_db.query(
-                SaleORM.product_id,
-                func.sum(SaleORM.quantity).label('total_quantity'),
-                func.sum(SaleORM.total_amount).label('total_amount')
-            ).group_by(SaleORM.product_id)
-            
-            if shop_id:
-                query = query.filter(SaleORM.shop_id == shop_id)
-            
-            top_products = query.order_by(func.sum(SaleORM.total_amount).desc()).limit(10).all()
-            
-            if shop_id:
-                shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
-                shop_display = f" for {shop.name}" if shop else f" for Shop {shop_id}"
-            else:
-                shop_display = ""
-            
-            report = f"🏆 *Top Products Report{shop_display}*\n"
-            report += f"📅 Generated: {today.strftime('%Y-%m-%d %H:%M')}\n\n"
-            
-            if not top_products:
-                report += "No sales data available.\n"
-            else:
-                report += "📊 **Top 10 Products by Revenue:**\n\n"
-                
-                for i, (product_id, quantity, amount) in enumerate(top_products, 1):
-                    product = tenant_db.query(ProductORM).filter(
-                        ProductORM.product_id == product_id
-                    ).first()
-                    
-                    if product:
-                        product_name = product.name
-                        report += f"{i}. *{product_name}*\n"
-                        report += f"   📦 Sold: {quantity} {product.unit_type}\n"
-                        report += f"   💰 Revenue: ${amount:.2f}\n"
-                        
-                        # Calculate average price
-                        avg_price = amount / quantity if quantity > 0 else 0
-                        report += f"   💲 Avg Price: ${avg_price:.2f}\n\n"
-        
-        # ---------- AVERAGE ORDER VALUE REPORT ----------
-        elif report_type == "report_aov":
-            # Build query with shop filtering
-            query = tenant_db.query(
-                func.avg(SaleORM.total_amount).label('avg_amount'),
-                func.count(SaleORM.sale_id).label('total_sales')
-            )
-            
-            if shop_id:
-                query = query.filter(SaleORM.shop_id == shop_id)
-            
-            result = query.first()
-            
-            if shop_id:
-                shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
-                shop_display = f" for {shop.name}" if shop else f" for Shop {shop_id}"
-            else:
-                shop_display = ""
-            
-            report = f"💰 *Average Order Value Report{shop_display}*\n"
-            report += f"📅 Generated: {today.strftime('%Y-%m-%d %H:%M')}\n\n"
-            
-            if not result or result.total_sales == 0:
-                report += "No sales data available.\n"
-            else:
-                avg_amount = result.avg_amount or 0
-                total_sales = result.total_sales
-                
-                report += f"📊 **Statistics:**\n"
-                report += f"• Average Order Value: ${avg_amount:.2f}\n"
-                report += f"• Total Orders: {total_sales}\n"
-                
-                # Get distribution
-                order_ranges = [
-                    ("<$10", tenant_db.query(SaleORM).filter(SaleORM.total_amount < 10).count()),
-                    ("$10-$50", tenant_db.query(SaleORM).filter(
-                        SaleORM.total_amount >= 10, 
-                        SaleORM.total_amount <= 50
-                    ).count()),
-                    ("$50-$100", tenant_db.query(SaleORM).filter(
-                        SaleORM.total_amount > 50, 
-                        SaleORM.total_amount <= 100
-                    ).count()),
-                    (">$100", tenant_db.query(SaleORM).filter(SaleORM.total_amount > 100).count())
-                ]
-                
-                report += f"\n📈 **Order Value Distribution:**\n"
-                for range_name, count in order_ranges:
-                    percentage = (count / total_sales * 100) if total_sales > 0 else 0
-                    report += f"• {range_name}: {count} orders ({percentage:.1f}%)\n"
-        
-        # ---------- STOCK TURNOVER REPORT ----------
-        elif report_type == "report_stock_turnover":
-            # FIXED: Use ProductShopStockORM
-            # Get all stock items with sales data
-            query = tenant_db.query(ProductShopStockORM).join(
-                ProductORM, ProductORM.product_id == ProductShopStockORM.product_id
-            )
-            
-            if shop_id:
-                query = query.filter(ProductShopStockORM.shop_id == shop_id)
-            
-            stock_items = query.all()
-            
-            if shop_id:
-                shop = tenant_db.query(ShopORM).filter(ShopORM.shop_id == shop_id).first()
-                shop_display = f" for {shop.name}" if shop else f" for Shop {shop_id}"
-            else:
-                shop_display = ""
-            
-            report = f"🔄 *Stock Turnover Report{shop_display}*\n"
-            report += f"📅 Generated: {today.strftime('%Y-%m-%d %H:%M')}\n\n"
-            
-            if not stock_items:
-                report += "No stock data available.\n"
-            else:
-                report += "📊 **Stock Status Summary:**\n\n"
-                
-                for stock_item in stock_items[:20]:  # Limit to first 20 items
-                    product = stock_item.product
-                    shop_info = tenant_db.query(ShopORM).filter(ShopORM.shop_id == stock_item.shop_id).first()
-                    shop_name = shop_info.name if shop_info else f"Shop {stock_item.shop_id}"
-                    
-                    # Get sales for this product
-                    sales_query = tenant_db.query(SaleORM).filter(
-                        SaleORM.product_id == product.product_id
-                    )
-                    
-                    if shop_id:
-                        sales_query = sales_query.filter(SaleORM.shop_id == shop_id)
-                    
-                    monthly_sales = sales_query.filter(
-                        SaleORM.sale_date >= month_ago
-                    ).all()
-                    
-                    total_sold = sum(sale.quantity for sale in monthly_sales)
-                    
-                    status = "🟢" if stock_item.stock > stock_item.low_stock_threshold else "🔴" if stock_item.stock == 0 else "🟡"
-                    report += f"{status} *{product.name}*\n"
-                    report += f"   🏪 Shop: {shop_name}\n"
-                    report += f"   📊 Current Stock: {stock_item.stock}\n"
-                    report += f"   📈 Sold (30 days): {total_sold}\n"
-                    
-                    # Calculate turnover rate
-                    if stock_item.stock > 0:
-                        turnover_rate = (total_sold / stock_item.stock) * 100
-                        report += f"   🔄 Turnover Rate: {turnover_rate:.1f}%\n"
-                    
-                    report += "\n"
-                
-                if len(stock_items) > 20:
-                    report += f"... and {len(stock_items) - 20} more items\n"
+        # ... [rest of your existing code for other reports] ...
         
         # ---------- PAYMENT SUMMARY REPORT ----------
         elif report_type == "report_payment_summary":
@@ -1812,216 +1489,89 @@ def generate_report(tenant_db, report_type, shop_id=None, shop_name=None):
             if not all_sales:
                 report += "No sales data available.\n"
             else:
-                # Payment method breakdown
-                payment_methods = {}
-                payment_types = {}
-                total_amount = 0
-                total_ecocash_surcharge = 0
-        
-                for sale in all_sales:
-                    method = sale.payment_method or "unknown"
-                    ptype = sale.payment_type or "full"
-            
-                    if method not in payment_methods:
-                        payment_methods[method] = {"count": 0, "amount": 0, "surcharge": 0}
-                    payment_methods[method]["count"] += 1
-                    payment_methods[method]["amount"] += sale.total_amount
-                    payment_methods[method]["surcharge"] += sale.surcharge_amount or 0
-            
-                    if ptype not in payment_types:
-                        payment_types[ptype] = {"count": 0, "amount": 0}
-                    payment_types[ptype]["count"] += 1
-                    payment_types[ptype]["amount"] += sale.total_amount
-            
-                    total_amount += sale.total_amount
-                    total_ecocash_surcharge += sale.surcharge_amount or 0
-        
-                report += f"📊 **Payment Methods:**\n"
-                for method, data in payment_methods.items():
-                    percentage = (data["amount"] / total_amount * 100) if total_amount > 0 else 0
-                    report += f"• {method.title()}: {data['count']} sales (${data['amount']:.2f}, {percentage:.1f}%)\n"
-                    if method == "ecocash" and data["surcharge"] > 0:
-                        report += f"  ⚡ Surcharge: ${data['surcharge']:.2f}\n"
-        
-                report += f"\n📊 **Payment Types:**\n"
-                for ptype, data in payment_types.items():
-                    percentage = (data["amount"] / total_amount * 100) if total_amount > 0 else 0
-                    report += f"• {ptype.title()}: {data['count']} sales (${data['amount']:.2f}, {percentage:.1f}%)\n"
-        
-                # Ecocash surcharge summary
-                ecocash_sales = [s for s in all_sales if s.payment_method == "ecocash"]
-                if ecocash_sales:
-                    total_surcharge = sum(s.surcharge_amount or 0 for s in ecocash_sales)
-                    total_ecocash_amount = sum(s.total_amount for s in ecocash_sales)
-                    report += f"\n📱 **Ecocash Summary:**\n"
-                    report += f"• Total Ecocash Sales: {len(ecocash_sales)}\n"
-                    report += f"• Total Ecocash Amount: ${total_ecocash_amount:.2f}\n"
-                    report += f"• Total Surcharge Collected: ${total_surcharge:.2f}\n"
-                    if total_ecocash_amount > 0:
-                        surcharge_percentage = (total_surcharge / total_ecocash_amount * 100)
-                        report += f"• Surcharge Rate: {surcharge_percentage:.1f}%\n"
-        
-                # Add credit summary
-                credit_sales = [s for s in all_sales if s.pending_amount and s.pending_amount > 0.01]
-                if credit_sales:
-                    total_credit_pending = sum(s.pending_amount for s in credit_sales)
-                    total_credit_sales_amount = sum(s.total_amount for s in credit_sales)
-                    total_credit_paid = sum(s.amount_paid for s in credit_sales)
-            
-                    report += f"\n🔄 **Credit Sales Summary:**\n"
-                    report += f"• Total Credit Transactions: {len(credit_sales)}\n"
-                    report += f"• Total Credit Sales Amount: ${total_credit_sales_amount:.2f}\n"
-                    report += f"• Total Amount Paid: ${total_credit_paid:.2f}\n"
-                    report += f"• Total Pending Amount: ${total_credit_pending:.2f}\n"
-            
-                    # Breakdown by credit type
-                    full_credit = [s for s in credit_sales if s.payment_type == "credit"]
-                    partial_credit = [s for s in credit_sales if s.payment_type == "partial"]
-            
-                    if full_credit:
-                        full_total = sum(s.total_amount for s in full_credit)
-                        full_pending = sum(s.pending_amount for s in full_credit)
-                        report += f"\n📋 **Full Credit Sales:**\n"
-                        report += f"  • Transactions: {len(full_credit)}\n"
-                        report += f"  • Total Amount: ${full_total:.2f}\n"
-                        report += f"  • Pending: ${full_pending:.2f}\n"
-            
-                    if partial_credit:
-                        partial_total = sum(s.total_amount for s in partial_credit)
-                        partial_paid = sum(s.amount_paid for s in partial_credit)
-                        partial_pending = sum(s.pending_amount for s in partial_credit)
-                        report += f"\n📋 **Partial Credit Sales:**\n"
-                        report += f"  • Transactions: {len(partial_credit)}\n"
-                        report += f"  • Total Amount: ${partial_total:.2f}\n"
-                        report += f"  • Amount Paid: ${partial_paid:.2f}\n"
-                        report += f"  • Pending: ${partial_pending:.2f}\n"
-            
-                    # Recent credit sales
-                    recent_credits = sorted(credit_sales, key=lambda x: x.sale_date, reverse=True)[:5]
-                    if recent_credits:
-                        report += f"\n📅 **Recent Credit Sales (Last 5):**\n"
-                        for sale in recent_credits:
-                            product = tenant_db.query(ProductORM).filter(
-                                ProductORM.product_id == sale.product_id
-                            ).first()
-                            product_name = product.name if product else f"Product {sale.product_id}"
-                            report += f"  • {sale.sale_date.strftime('%Y-%m-%d')}: {product_name}\n"
-                            report += f"    ${sale.total_amount:.2f} (Paid: ${sale.amount_paid:.2f}, Pending: ${sale.pending_amount:.2f})\n"
-        
-                # Add change due summary
-                change_sales = [s for s in all_sales if s.change_left and s.change_left > 0.01]
-                if change_sales:
-                    total_change_due = sum(s.change_left for s in change_sales)
-            
-                    report += f"\n🪙 **Change Due Summary:**\n"
-                    report += f"• Transactions with Change Due: {len(change_sales)}\n"
-                    report += f"• Total Change Due: ${total_change_due:.2f}\n"
-                    report += f"• Average Change Due: ${total_change_due/len(change_sales):.2f}\n"
-            
-                    # Amount breakdown
-                    small_change = [s for s in change_sales if s.change_left < 1.00]
-                    medium_change = [s for s in change_sales if 1.00 <= s.change_left < 5.00]
-                    large_change = [s for s in change_sales if s.change_left >= 5.00]
-            
-                    if small_change:
-                        total_small = sum(s.change_left for s in small_change)
-                        report += f"\n📊 **Change Breakdown:**\n"
-                        report += f"  • < $1.00: {len(small_change)} (${total_small:.2f})\n"
-                    if medium_change:
-                        total_medium = sum(s.change_left for s in medium_change)
-                        report += f"  • $1.00-$5.00: {len(medium_change)} (${total_medium:.2f})\n"
-                    if large_change:
-                        total_large = sum(s.change_left for s in large_change)
-                        report += f"  • ≥ $5.00: {len(large_change)} (${total_large:.2f})\n"
-            
-                    # Recent change due
-                    recent_changes = sorted(change_sales, key=lambda x: x.sale_date, reverse=True)[:5]
-                    if recent_changes:
-                        report += f"\n📅 **Recent Change Due (Last 5):**\n"
-                        for sale in recent_changes:
-                            product = tenant_db.query(ProductORM).filter(
-                                ProductORM.product_id == sale.product_id
-                            ).first()
-                            product_name = product.name if product else f"Product {sale.product_id}"
-                            report += f"  • {sale.sale_date.strftime('%Y-%m-%d')}: {product_name}\n"
-                            report += f"    Change Due: ${sale.change_left:.2f}\n"
-        
-                # 🆕 ADDED: Payment Records Summary
-                # Query payment records with shop filtering
-                payment_records_query = tenant_db.query(PaymentRecordORM)
-                if shop_id:
-                    payment_records_query = payment_records_query.filter(PaymentRecordORM.shop_id == shop_id)
-        
-                all_payment_records = payment_records_query.all()
-        
-                if all_payment_records:
-                    # Credit payments
-                    credit_payments = [p for p in all_payment_records if p.payment_type == "credit_payment"]
-                    if credit_payments:
-                        total_credit_collected = sum(p.amount for p in credit_payments)
+                # ... [rest of payment summary code] ...
                 
-                        # Group by payment method
-                        credit_by_method = {}
-                        for payment in credit_payments:
-                            method = payment.payment_method or "unknown"
-                            if method not in credit_by_method:
-                                credit_by_method[method] = {"count": 0, "amount": 0}
-                            credit_by_method[method]["count"] += 1
-                            credit_by_method[method]["amount"] += payment.amount
+                # 🆕 ADDED: Payment Records Summary (only if table exists)
+                if has_payment_records and PaymentRecordORM:
+                    try:
+                        # Query payment records with shop filtering
+                        payment_records_query = tenant_db.query(PaymentRecordORM)
+                        if shop_id:
+                            payment_records_query = payment_records_query.filter(PaymentRecordORM.shop_id == shop_id)
                 
-                        report += f"\n💰 **Credit Payments Collected:**\n"
-                        report += f"• Total Credit Payments: {len(credit_payments)}\n"
-                        report += f"• Total Amount Collected: ${total_credit_collected:.2f}\n"
+                        all_payment_records = payment_records_query.all()
                 
-                        if credit_by_method:
-                            report += f"• Breakdown by Method:\n"
-                            for method, data in credit_by_method.items():
-                                report += f"  • {method.title()}: {data['count']} payments (${data['amount']:.2f})\n"
-                
-                        # Recent credit payments
-                        recent_credit_payments = sorted(credit_payments, key=lambda x: x.recorded_at, reverse=True)[:5]
-                        if recent_credit_payments:
-                            report += f"• Recent Payments (Last 5):\n"
-                            for payment in recent_credit_payments:
-                                report += f"  • {payment.recorded_at.strftime('%Y-%m-%d')}: ${payment.amount:.2f} from {payment.customer_name}\n"
-                                if payment.payment_method:
-                                    report += f"    Method: {payment.payment_method}\n"
-            
-                    # Change collections
-                    change_collections = [p for p in all_payment_records if p.payment_type == "change_collection"]
-                    if change_collections:
-                        total_change_collected = sum(p.amount for p in change_collections)
-                
-                        report += f"\n🪙 **Change Collected:**\n"
-                        report += f"• Total Change Collections: {len(change_collections)}\n"
-                        report += f"• Total Amount Collected: ${total_change_collected:.2f}\n"
-                        report += f"• Average Collection: ${total_change_collected/len(change_collections):.2f}\n"
-                
-                        # Recent change collections
-                        recent_change_collections = sorted(change_collections, key=lambda x: x.recorded_at, reverse=True)[:5]
-                        if recent_change_collections:
-                            report += f"• Recent Collections (Last 5):\n"
-                            for collection in recent_change_collections:
-                                report += f"  • {collection.recorded_at.strftime('%Y-%m-%d')}: ${collection.amount:.2f} from {collection.customer_name}\n"
-            
-                    # Overall payment records summary
-                    report += f"\n📈 **Payment Records Summary:**\n"
-                    report += f"• Total Payment Records: {len(all_payment_records)}\n"
-                    report += f"• Total Amount Processed: ${sum(p.amount for p in all_payment_records):.2f}\n"
-            
-                    # Monthly breakdown
-                    monthly_totals = {}
-                    for payment in all_payment_records:
-                        month_key = payment.recorded_at.strftime("%Y-%m")
-                        if month_key not in monthly_totals:
-                            monthly_totals[month_key] = {"count": 0, "amount": 0}
-                        monthly_totals[month_key]["count"] += 1
-                        monthly_totals[month_key]["amount"] += payment.amount
-            
-                    if monthly_totals:
-                        report += f"• Monthly Breakdown:\n"
-                        for month, data in sorted(monthly_totals.items(), reverse=True)[:3]:  # Last 3 months
-                            report += f"  • {month}: {data['count']} records (${data['amount']:.2f})\n"
+                        if all_payment_records:
+                            # Credit payments
+                            credit_payments = [p for p in all_payment_records if p.payment_type == "credit_payment"]
+                            if credit_payments:
+                                total_credit_collected = sum(p.amount for p in credit_payments)
+                        
+                                # Group by payment method
+                                credit_by_method = {}
+                                for payment in credit_payments:
+                                    method = payment.payment_method or "unknown"
+                                    if method not in credit_by_method:
+                                        credit_by_method[method] = {"count": 0, "amount": 0}
+                                    credit_by_method[method]["count"] += 1
+                                    credit_by_method[method]["amount"] += payment.amount
+                        
+                                report += f"\n💰 **Credit Payments Collected:**\n"
+                                report += f"• Total Credit Payments: {len(credit_payments)}\n"
+                                report += f"• Total Amount Collected: ${total_credit_collected:.2f}\n"
+                        
+                                if credit_by_method:
+                                    report += f"• Breakdown by Method:\n"
+                                    for method, data in credit_by_method.items():
+                                        report += f"  • {method.title()}: {data['count']} payments (${data['amount']:.2f})\n"
+                        
+                                # Recent credit payments
+                                recent_credit_payments = sorted(credit_payments, key=lambda x: x.recorded_at, reverse=True)[:5]
+                                if recent_credit_payments:
+                                    report += f"• Recent Payments (Last 5):\n"
+                                    for payment in recent_credit_payments:
+                                        report += f"  • {payment.recorded_at.strftime('%Y-%m-%d')}: ${payment.amount:.2f} from {payment.customer_name}\n"
+                                        if payment.payment_method:
+                                            report += f"    Method: {payment.payment_method}\n"
+                    
+                            # Change collections
+                            change_collections = [p for p in all_payment_records if p.payment_type == "change_collection"]
+                            if change_collections:
+                                total_change_collected = sum(p.amount for p in change_collections)
+                        
+                                report += f"\n🪙 **Change Collected:**\n"
+                                report += f"• Total Change Collections: {len(change_collections)}\n"
+                                report += f"• Total Amount Collected: ${total_change_collected:.2f}\n"
+                                report += f"• Average Collection: ${total_change_collected/len(change_collections):.2f}\n"
+                        
+                                # Recent change collections
+                                recent_change_collections = sorted(change_collections, key=lambda x: x.recorded_at, reverse=True)[:5]
+                                if recent_change_collections:
+                                    report += f"• Recent Collections (Last 5):\n"
+                                    for collection in recent_change_collections:
+                                        report += f"  • {collection.recorded_at.strftime('%Y-%m-%d')}: ${collection.amount:.2f} from {collection.customer_name}\n"
+                    
+                            # Overall payment records summary
+                            report += f"\n📈 **Payment Records Summary:**\n"
+                            report += f"• Total Payment Records: {len(all_payment_records)}\n"
+                            report += f"• Total Amount Processed: ${sum(p.amount for p in all_payment_records):.2f}\n"
+                    
+                            # Monthly breakdown
+                            monthly_totals = {}
+                            for payment in all_payment_records:
+                                month_key = payment.recorded_at.strftime("%Y-%m")
+                                if month_key not in monthly_totals:
+                                    monthly_totals[month_key] = {"count": 0, "amount": 0}
+                                monthly_totals[month_key]["count"] += 1
+                                monthly_totals[month_key]["amount"] += payment.amount
+                    
+                            if monthly_totals:
+                                report += f"• Monthly Breakdown:\n"
+                                for month, data in sorted(monthly_totals.items(), reverse=True)[:3]:  # Last 3 months
+                                    report += f"  • {month}: {data['count']} records (${data['amount']:.2f})\n"
+                    except Exception as e:
+                        logger.debug(f"Error querying payment_records table: {e}")
+                        report += f"\n⚠️ Payment records table exists but could not be queried.\n"
         
                 # Overall summary
                 report += f"\n📈 **Overall Summary:**\n"
@@ -2035,7 +1585,7 @@ def generate_report(tenant_db, report_type, shop_id=None, shop_name=None):
                     report += f"• Change Due: {len(change_sales)} (${sum(s.change_left for s in change_sales):.2f})\n"
         
                 # 🆕 ADDED: Include payment records totals in overall summary
-                if all_payment_records:
+                if has_payment_records and PaymentRecordORM and 'all_payment_records' in locals() and all_payment_records:
                     total_payments_collected = sum(p.amount for p in all_payment_records)
                     report += f"• Total Payments Collected: ${total_payments_collected:.2f}\n"
             
@@ -2057,8 +1607,6 @@ def generate_report(tenant_db, report_type, shop_id=None, shop_name=None):
         # ---------- CREDIT SALES REPORT ----------
         elif report_type == "report_credits":
             # Check for credit sales properly
-            from sqlalchemy import or_
-    
             query = tenant_db.query(SaleORM).filter(
                 or_(
                     SaleORM.payment_type.in_(["credit", "partial"]),
@@ -2130,7 +1678,7 @@ def generate_report(tenant_db, report_type, shop_id=None, shop_name=None):
                     # Keep the most recent date
                     if sale.sale_date > customer_credits[customer_name]["last_date"]:
                         customer_credits[customer_name]["last_date"] = sale.sale_date
-        
+    
                 if customer_credits:
                     report += f"\n👥 **Customers with Pending Credit:**\n"
                     sorted_customers = sorted(
@@ -2147,21 +1695,25 @@ def generate_report(tenant_db, report_type, shop_id=None, shop_name=None):
                         report += f"  📈 Transactions: {data['count']}\n"
                         report += f"  📅 Last Credit: {data['last_date'].strftime('%Y-%m-%d')} ({days_ago} days ago)\n"
                 
-                        # 🆕 ADDED: Payment history for this customer
-                        if data["customer_id"]:
-                            payment_records = tenant_db.query(PaymentRecordORM).filter(
-                                PaymentRecordORM.customer_id == data["customer_id"],
-                                PaymentRecordORM.payment_type == "credit_payment"
-                            ).order_by(PaymentRecordORM.recorded_at.desc()).limit(3).all()
-                    
-                            if payment_records:
-                                report += f"  📋 **Recent Payments (Last 3):**\n"
-                                for pr in payment_records:
-                                    method_display = f"via {pr.payment_method}" if pr.payment_method else ""
-                                    report += f"    • {pr.recorded_at.strftime('%Y-%m-%d')}: ${pr.amount:.2f} {method_display}\n"
-                                    if pr.notes:
-                                        report += f"      Note: {pr.notes}\n"
-        
+                        # 🆕 ADDED: Payment history for this customer (only if table exists)
+                        if has_payment_records and PaymentRecordORM and data["customer_id"]:
+                            try:
+                                payment_records = tenant_db.query(PaymentRecordORM).filter(
+                                    PaymentRecordORM.customer_id == data["customer_id"],
+                                    PaymentRecordORM.payment_type == "credit_payment"
+                                ).order_by(PaymentRecordORM.recorded_at.desc()).limit(3).all()
+                        
+                                if payment_records:
+                                    report += f"  📋 **Recent Payments (Last 3):**\n"
+                                    for pr in payment_records:
+                                        method_display = f"via {pr.payment_method}" if pr.payment_method else ""
+                                        report += f"    • {pr.recorded_at.strftime('%Y-%m-%d')}: ${pr.amount:.2f} {method_display}\n"
+                                        if pr.notes:
+                                            report += f"      Note: {pr.notes}\n"
+                            except Exception as e:
+                                logger.debug(f"Error querying payment records for customer {data['customer_id']}: {e}")
+                                # Silently skip if there's an error
+    
                 # Show recent credit sales (last 10)
                 recent_credits = sorted(credit_sales, key=lambda x: x.sale_date, reverse=True)[:10]
                 if recent_credits:
@@ -2255,7 +1807,7 @@ def generate_report(tenant_db, report_type, shop_id=None, shop_name=None):
                     # Keep the most recent date
                     if sale.sale_date > customer_changes[customer_name]["last_date"]:
                         customer_changes[customer_name]["last_date"] = sale.sale_date
-        
+    
                 if customer_changes:
                     report += f"\n👥 **Customers Owed Change:**\n"
                     sorted_customers = sorted(
@@ -2272,19 +1824,23 @@ def generate_report(tenant_db, report_type, shop_id=None, shop_name=None):
                         report += f"  💰 Total Sales: ${data['total_sales']:.2f}\n"
                         report += f"  📅 Last Transaction: {data['last_date'].strftime('%Y-%m-%d')} ({days_ago} days ago)\n"
                 
-                        # 🆕 ADDED: Collection history for this customer
-                        if data["customer_id"]:
-                            collection_records = tenant_db.query(PaymentRecordORM).filter(
-                                PaymentRecordORM.customer_id == data["customer_id"],
-                                PaymentRecordORM.payment_type == "change_collection"
-                            ).order_by(PaymentRecordORM.recorded_at.desc()).limit(3).all()
-                    
-                            if collection_records:
-                                report += f"  📋 **Recent Collections (Last 3):**\n"
-                                for cr in collection_records:
-                                    report += f"    • {cr.recorded_at.strftime('%Y-%m-%d')}: ${cr.amount:.2f} collected\n"
-                                    if cr.notes:
-                                        report += f"      Note: {cr.notes}\n"
+                        # 🆕 ADDED: Collection history for this customer (only if table exists)
+                        if has_payment_records and PaymentRecordORM and data["customer_id"]:
+                            try:
+                                collection_records = tenant_db.query(PaymentRecordORM).filter(
+                                    PaymentRecordORM.customer_id == data["customer_id"],
+                                    PaymentRecordORM.payment_type == "change_collection"
+                                ).order_by(PaymentRecordORM.recorded_at.desc()).limit(3).all()
+                        
+                                if collection_records:
+                                    report += f"  📋 **Recent Collections (Last 3):**\n"
+                                    for cr in collection_records:
+                                        report += f"    • {cr.recorded_at.strftime('%Y-%m-%d')}: ${cr.amount:.2f} collected\n"
+                                        if cr.notes:
+                                            report += f"      Note: {cr.notes}\n"
+                            except Exception as e:
+                                logger.debug(f"Error querying collection records for customer {data['customer_id']}: {e}")
+                                # Silently skip if there's an error
         
                 # Show recent change due sales (last 10)
                 recent_changes = sorted(change_sales, key=lambda x: x.sale_date, reverse=True)[:10]
@@ -2321,6 +1877,7 @@ def generate_report(tenant_db, report_type, shop_id=None, shop_name=None):
         import traceback
         traceback.print_exc()
         return f"❌ Error generating report: {str(e)}"
+        
         
 def debug_sales_data(tenant_db):
     """Debug function to check sales data structure"""

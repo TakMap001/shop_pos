@@ -362,6 +362,27 @@ def ensure_tenant_tables(base_url: str, schema_name: str):
             conn.commit()
             logger.info(f"✅ Created pending_approvals table in {schema_name}")
             
+            # 8. Create payment_records table
+            payment_records_sql = f"""
+                CREATE TABLE IF NOT EXISTS {schema_name}.payment_records (
+                    payment_id SERIAL PRIMARY KEY,
+                    customer_id INTEGER,
+                    customer_name VARCHAR(150) NOT NULL,
+                    payment_type VARCHAR(50) NOT NULL,
+                    payment_method VARCHAR(50),
+                    amount NUMERIC(10, 2) NOT NULL,
+                    remaining_amount NUMERIC(10, 2) DEFAULT 0.0,
+                    notes TEXT,
+                    recorded_by BIGINT NOT NULL,
+                    recorded_by_name VARCHAR(150) NOT NULL,
+                    shop_id INTEGER,
+                    recorded_at TIMESTAMP DEFAULT NOW()
+                )
+            """
+            conn.execute(text(payment_records_sql))
+            conn.commit()
+            logger.info(f"✅ Created payment_records table in {schema_name}")
+            
             # ================== FOREIGN KEYS ==================
             
             try:
@@ -462,7 +483,35 @@ def ensure_tenant_tables(base_url: str, schema_name: str):
             except Exception as e:
                 logger.info(f"ℹ️ Foreign key might already exist: {e}")
             
-            # 8. ✅ REMOVED: Don't create default main shop
+            try:
+                # Payment_records -> Customers
+                fk_sql = f"""
+                    ALTER TABLE {schema_name}.payment_records 
+                    ADD CONSTRAINT fk_payment_records_customers 
+                    FOREIGN KEY (customer_id) 
+                    REFERENCES {schema_name}.customers(customer_id)
+                """
+                conn.execute(text(fk_sql))
+                conn.commit()
+                logger.info(f"✅ Added foreign key: payment_records → customers")
+            except Exception as e:
+                logger.info(f"ℹ️ Foreign key might already exist: {e}")
+            
+            try:
+                # Payment_records -> Shops
+                fk_sql = f"""
+                    ALTER TABLE {schema_name}.payment_records 
+                    ADD CONSTRAINT fk_payment_records_shops 
+                    FOREIGN KEY (shop_id) 
+                    REFERENCES {schema_name}.shops(shop_id)
+                """
+                conn.execute(text(fk_sql))
+                conn.commit()
+                logger.info(f"✅ Added foreign key: payment_records → shops")
+            except Exception as e:
+                logger.info(f"ℹ️ Foreign key might already exist: {e}")
+            
+            # 9. ✅ REMOVED: Don't create default main shop
             # Shops will be created by the owner during setup
             
             logger.info(f"✅ All tables created successfully in '{schema_name}'.")
@@ -470,6 +519,7 @@ def ensure_tenant_tables(base_url: str, schema_name: str):
     except Exception as e:
         logger.error(f"❌ Failed to create tenant tables in {schema_name}: {e}")
         logger.error(f"❌ Error details: {str(e)}")
+        
 
 # ======================================================
 # 🔹 GET TENANT SESSION (SAME AS BEFORE)
