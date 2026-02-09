@@ -85,7 +85,6 @@ class CustomerORM(TenantBase):
     created_at = Column(TIMESTAMP, server_default=func.now())
 
     sales = relationship("SaleORM", back_populates="customer")
-    payment_records = relationship("PaymentRecordORM", backref="payment_customer")  # ADD THIS LINE
 
 
 class SaleORM(TenantBase):
